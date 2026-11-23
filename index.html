@@ -2597,9 +2597,9 @@ const pill = (text, kind = '') => `<span class="pill ${kind}">${esc(text)}</span
 
 // 에이전트 상태: agent_status(새 방식) 기준으로 이름·온라인 여부를 만든다
 async function agentRows() {
-  const rows = await q(S.sb.from('agent_status').select('device_id,platform,paused,current_job,last_seen_at,state,devices(name)'));
+  const rows = await q(S.sb.from('agent_status').select('device_id,platform,role,paused,current_job,last_seen_at,state,devices(name)'));
   return rows.filter(r => r.state !== 'removed').map(r => ({
-    name: r.devices?.name || '이름 없음', platform: r.platform, paused: r.paused,
+    name: r.devices?.name || '이름 없음', platform: r.platform, role: r.role || 'office', paused: r.paused,
     current_job: r.current_job ? (JOB_NAME[r.current_job] || r.current_job) : null, last_seen_at: r.last_seen_at,
     alive: !!r.last_seen_at && (Date.now() - new Date(r.last_seen_at)) / 1000 < 60,
   }));
@@ -3897,6 +3897,15 @@ function bindCopy() {
   };
 }
 
+const ROLE = {
+  office: ['회사(작업용)', 'accent', '대본·감독·영상 생성·감수·조립 등 모든 일을 합니다'],
+  server: ['서버(보관)', 'good', '영상을 OneDrive 씬 폴더에 보관하고 완성본을 만듭니다. 항상 켜 둡니다'],
+  mobile: ['이동용', '', '들고 다니는 노트북: 작가실·감독·목소리·말로 편집 같은 가벼운 일만 합니다(덮개를 닫아도 문제없게)'],
+};
+const AGENT_PRESETS = [
+  { name: '회사 맥', platform: 'mac', role: 'office' }, { name: '집 윈도우 (서버)', platform: 'windows', role: 'server' },
+  { name: '이동용 맥', platform: 'mac', role: 'mobile' }, { name: '이동용 윈도우', platform: 'windows', role: 'mobile' },
+];
 async function viewAgents(main) {
   const [stored, latest] = await Promise.all([
     fetch(agentBase() + '/version.txt?t=' + Date.now()).then(r => r.ok ? r.text() : null, () => null),
@@ -3918,14 +3927,19 @@ async function viewAgents(main) {
   <div id="agList"><p class="quiet">불러오는 중…</p></div>
   <div class="card">
     <b>에이전트 추가</b>
+    <div class="row" style="margin:8px 0 2px">${AGENT_PRESETS.map((p, i) => `<button class="btn small" data-preset="${i}">${esc(p.name)}</button>`).join('')}</div>
+    <p class="quiet" style="margin:2px 0 0">자주 쓰는 구성을 누르면 이름·종류·역할이 채워집니다.</p>
     <div class="row" style="align-items:flex-end">
       <div style="flex:2;min-width:160px"><label>이름</label><input id="aname" placeholder="예: Windows 본부 PC, 회사 맥북"></div>
       <div style="flex:1;min-width:130px"><label>종류</label><select id="aplat"><option value="windows">Windows</option>
         <option value="mac" ${guessKind() === 'mac_browser' ? 'selected' : ''}>맥</option></select></div>
+      <div style="flex:1;min-width:150px"><label>역할</label><select id="arole">${Object.entries(ROLE).map(([k, [l]]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
       <button class="btn primary" id="aadd">추가하고 설치 명령 받기</button></div>
   </div>
   <div id="ainstall"></div>`;
 
+  main.querySelectorAll('[data-preset]').forEach(b => b.onclick = () => { const p = AGENT_PRESETS[+b.dataset.preset];
+    $('#aname').value = p.name; $('#aplat').value = p.platform; $('#arole').value = p.role; $('#aname').focus(); });
   $('#deploy').onclick = guard(async () => {
     const btn = $('#deploy'); btn.disabled = true; btn.textContent = '배포 중…';
     try {
@@ -3945,6 +3959,7 @@ async function viewAgents(main) {
     const name = $('#aname').value.trim(); if (!name) return toast('이름을 적어 주세요');
     const plat = $('#aplat').value;
     const r = await q(S.sb.rpc('create_agent', { p_name: name, p_platform: plat }));
+    try { await q(S.sb.from('agent_status').update({ role: $('#arole').value }).eq('device_id', r.device_id)); } catch (e) { console.warn(e); }
     $('#aname').value = '';
     $('#ainstall').innerHTML = installBox(plat, name, r.token); bindCopy();
     $('#ainstall').scrollIntoView({ behavior: 'smooth' });
@@ -3978,12 +3993,14 @@ async function renderAgentList(newest) {
     const recent = cmds.filter(c => c.device_id === a.device_id).slice(0, 3);
     return `<div class="card">
       <div class="row"><b style="font-size:16px">${esc(a.devices?.name || '이름 없음')}</b>
-        ${pill(a.platform === 'mac' ? '맥' : a.platform === 'windows' ? 'Windows' : (a.platform || '-'))}${conn}${state}
+        ${pill(a.platform === 'mac' ? '맥' : a.platform === 'windows' ? 'Windows' : (a.platform || '-'))}${pill(ROLE[a.role || 'office'][0], ROLE[a.role || 'office'][1])}${conn}${state}
         ${a.version ? pill('v' + a.version, old ? 'warn' : '') : ''}${old ? `<span class="quiet">새 버전 v${esc(newest)} ${a.info?.auto_update_minutes ? '· 곧 자동 업데이트' : '· "업데이트"를 한 번 눌러 주세요'}</span>` : ''}</div>
       ${a.info?.rolled_back_from ? `<div class="msg err" style="margin:8px 0 0">v${esc(a.info.rolled_back_from)} 업데이트가 이 기기에서 시작에 실패해 이전 버전으로 되돌렸습니다. 다음 버전이 나오면 다시 시도합니다.</div>` : ''}
       <div class="quiet" style="margin-top:6px">마지막 통신 ${fmt(a.last_seen_at)}${a.info?.hostname ? ` · ${esc(a.info.hostname)} · ${esc(a.info.os || '')}` : ''}
         ${a.current_job ? `<br>지금 하는 일: <b>${esc(JOB_NAME[a.current_job] || a.current_job)}</b>` : ''}</div>
       ${a.last_error ? `<div class="msg err" style="margin:8px 0 0">${esc(a.last_error)}</div>` : ''}
+      <div class="row" style="margin-top:8px"><span class="quiet">역할</span><select data-role="${esc(a.device_id)}" style="width:auto">${Object.entries(ROLE).map(([k, [l]]) => `<option value="${k}" ${k === (a.role || 'office') ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <span class="quiet">${esc(ROLE[a.role || 'office'][2])}</span></div>
       <div class="row" style="margin-top:10px">
         <button class="btn small" data-cmd="ping" data-dev="${esc(a.device_id)}">연결 시험</button>
         <button class="btn small" data-pause="${esc(a.device_id)}" data-v="${a.paused ? '0' : '1'}">${a.paused ? '다시 시작' : '일시정지'}</button>
@@ -4001,6 +4018,11 @@ async function renderAgentList(newest) {
   box.querySelectorAll('[data-cmd]').forEach(b => b.onclick = guard(async () => {
     await q(S.sb.from('agent_commands').insert({ device_id: b.dataset.dev, command: b.dataset.cmd }));
     toast(`${CMD[b.dataset.cmd]} 명령을 보냈습니다. 15초 안에 처리됩니다`); renderAgentList(newest);
+  }));
+  box.querySelectorAll('[data-role]').forEach(s => s.onchange = guard(async () => {
+    if (s.value === 'server' && list.some(x => x.role === 'server' && x.device_id !== s.dataset.role) && !confirm('이미 서버가 있습니다. 서버를 둘로 두면 영상이 두 곳에 나뉘어 보관될 수 있습니다. 계속할까요?')) { s.value = list.find(x => x.device_id === s.dataset.role)?.role || 'office'; return; }
+    await q(S.sb.from('agent_status').update({ role: s.value }).eq('device_id', s.dataset.role));
+    toast(`역할을 "${ROLE[s.value][0]}"(으)로 바꿨습니다`); renderAgentList(newest);
   }));
   box.querySelectorAll('[data-pause]').forEach(b => b.onclick = guard(async () => {
     const paused = b.dataset.v === '1';
@@ -4448,7 +4470,7 @@ async function renderProduction(ep, quietRefresh = false) {
   const openTasks = tasks.filter(t => ['queued', 'running'].includes(t.status));
   S.prodBusy = openTasks.length > 0;
   const online = agents.filter(a => a.alive);
-  const hasWin = agents.some(a => a.platform === 'windows');
+  const hasWin = agents.some(a => a.role === 'server');
   const passed = cuts.filter(c => c.status === 'passed').length;
   const step = !versions.length ? 0 : !confirmed ? 1 : !cuts.length ? 2 : !cuts.some(c => c.status !== 'designed') ? 3 : passed < cuts.length ? 4 : 5;
 
@@ -5313,7 +5335,7 @@ async function edRenderOut() {
   const box = $('#eOut'); if (!box || !ED.proj) { if (box) box.innerHTML = '<b>결과물</b><p class="quiet">편집하면 자동 저장되고, 여기서 미리보기·완성본을 만듭니다.</p>'; return; }
   const renders = await q(S.sb.from('edit_renders').select('id,kind,rev,status,progress,files,error,created_at,finished_at').eq('project_id', ED.proj.id).order('created_at', { ascending: false }).limit(8));
   const agents = await agentRows();
-  const hasWin = agents.some(a => a.platform === 'windows');
+  const hasWin = agents.some(a => a.role === 'server');
   const urlPaths = renders.flatMap(r => [r.files?.preview, r.files?.vtt, r.files?.voice, r.files?.music]).filter(Boolean);
   let urls = {};
   if (urlPaths.length) { const { data } = await S.sb.storage.from('takes').createSignedUrls(urlPaths, 3600); (data || []).forEach(d => { if (d.signedUrl) urls[d.path] = d.signedUrl; }); }
@@ -5339,7 +5361,7 @@ async function edRenderOut() {
     if (!ED.tl.clips.length) return toast('타임라인이 비어 있습니다');
     if (kind === 'final' && ED.L.clips.some(x => takeOf(x.c).verdict !== 'pass') && !confirm('감수 통과 전 컷이 들어 있습니다. 그래도 완성본을 만들까요?')) return;
     const r = await q(S.sb.from('edit_renders').insert({ project_id: ED.proj.id, episode_id: ED.ep.id, kind, rev: ED.proj.rev, timeline: ED.tl }).select('id').single());
-    await q(S.sb.from('pipeline_tasks').insert({ kind: 'assemble', episode_id: ED.ep.id, platform: kind === 'final' && hasWin ? 'windows' : null, payload: { render_id: r.id } }));
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'assemble', episode_id: ED.ep.id, platform: kind === 'final' && hasWin ? 'server' : null, payload: { render_id: r.id } }));
     toast(kind === 'final' ? '완성본을 만들기 시작했습니다' : '정확한 미리보기를 만드는 중입니다'); edRenderOut(); edPollRenders();
   });
   $('#eRPrev').onclick = make('preview'); $('#eRFinal').onclick = make('final');
@@ -5691,6 +5713,8 @@ const HELP = {
 <h4>직접 기록하기</h4>
 <ul><li><b>+ 광고 콘텐츠</b>: 제목, 종류, 어느 화에서 나왔는지, 유튜브 영상 ID(있으면).</li>
 <li>콘텐츠를 고른 뒤 <b>+ 집행 기록</b>: 광고 관리자·유튜브 스튜디오의 숫자를 옮겨 적습니다. 모르는 칸은 비워 두세요.</li></ul>
+<h4>연결 예정</h4>
+<p>유튜브·Google Ads부터 연결하고, 이후 <b>인스타그램(메타)·틱톡</b>도 API로 연결해 같은 화면에서 비교합니다. 플랫폼마다 집행 기록의 "어디에"로 구분되고, 승률·앞뒤 비교도 플랫폼을 섞어 볼 수 있습니다.</p>
 <h4>안전장치</h4>
 <p>광고 담당은 <b>설정 → 광고</b>의 월 한도 안에서만 광고비를 제안하고, 모든 지출은 대표님이 승인해야 실행됩니다. 한도가 0원이면 무료 개선만 제안합니다.</p>`],
 
@@ -5829,16 +5853,28 @@ const HELP = {
 </ul>`],
 
   agents: ['에이전트 사용법', `
-<p>실제로 일하는 컴퓨터(닉스맥, 집 PC 등)를 관리합니다. AI 직원은 이 컴퓨터들 위에서 일합니다.</p>
+<p>실제로 일하는 컴퓨터를 관리합니다. AI 직원은 이 컴퓨터들 위에서 일하고, 대시보드는 어느 컴퓨터에서 열어도 똑같습니다.</p>
+<h4>우리 구성 (4대)</h4>
+<table class="htab"><tr><th>컴퓨터</th><th>역할</th><th>하는 일</th></tr>
+<tr><td>회사 맥 (닉스맥)</td><td>회사(작업용)</td><td>작가실·감독·영상 생성·감수·편집 조립 등 모든 일</td></tr>
+<tr><td>집 윈도우</td><td>서버(보관)</td><td>위의 일 + <b>영상 보관</b>(OneDrive 씬 폴더) + <b>완성본 만들기</b>. 항상 켜 둠</td></tr>
+<tr><td>이동용 맥</td><td>이동용</td><td>가벼운 일만: 작가실·감독 컷 설계·목소리·말로 편집·감수</td></tr>
+<tr><td>이동용 윈도우</td><td>이동용</td><td>이동용 맥과 같음</td></tr></table>
+<p class="quiet">이동용은 영상 생성(최대 40분)·보관·조립을 받지 않습니다. 덮개를 닫거나 이동 중에 끊겨도 일이 멈추지 않게 하려는 것입니다. 끊긴 일은 45분 뒤 다른 컴퓨터가 이어서 합니다.</p>
 <h4>새 컴퓨터 연결</h4>
-<ol><li>이름(예: 집 PC)과 종류(Mac/Windows)를 고르고 <b>추가하고 설치 명령 받기</b>.</li>
-<li>Mac은 터미널, Windows는 PowerShell에 명령을 붙여 넣으면 끝. 1분 안에 초록(온라인)이 됩니다.</li>
-<li>설치 명령에 들어 있는 토큰은 그 컴퓨터 전용 열쇠입니다. 다른 사람에게 보내지 마세요.</li></ol>
+<ol><li>아래 <b>에이전트 추가</b>에서 "회사 맥 / 집 윈도우(서버) / 이동용 맥 / 이동용 윈도우" 버튼을 누르면 이름·종류·역할이 채워집니다.</li>
+<li><b>추가하고 설치 명령 받기</b> → 그 컴퓨터에서 Mac은 터미널, Windows는 PowerShell에 붙여 넣기. 1분 안에 초록(온라인).</li>
+<li>설치 명령 속 토큰은 그 컴퓨터 전용 열쇠입니다. 다른 사람에게 보내지 마세요. 잃어버리면 "설치 명령 다시 받기".</li>
+<li>역할은 목록의 <b>역할</b> 칸에서 언제든 바꿀 수 있습니다.</li></ol>
+<h4>잠들지 않게 하기</h4>
+<ul><li><b>맥</b>: 에이전트가 켜져 있는 동안 시스템 잠자기를 막습니다(화면은 꺼져도 됨). 단 <b>전원이 연결돼 있을 때</b>만 확실하고, <b>노트북 덮개를 닫으면 잠듭니다</b>(외부 모니터·전원을 연결한 닫힌 상태는 예외). 회사 맥북은 덮개를 열어 두거나 외부 모니터에 연결해 두세요.</li>
+<li><b>윈도우 서버</b>: 설치할 때 전원 연결 시 절전·최대 절전을 끕니다(화면 끄기는 그대로). 추가로
+  ① <b>설정 → 시스템 → 전원</b>에서 화면 끄기만 남기고 절전 "안 함" 확인,
+  ② 노트북이면 <b>덮개를 닫을 때 "아무것도 안 함"</b>,
+  ③ <b>자동 로그인</b>을 켜 두세요(에이전트와 OneDrive는 로그인해야 켜집니다. 정전·업데이트로 재부팅돼도 자동으로 다시 일함),
+  ④ Windows 업데이트의 <b>사용 시간</b>을 넓게 지정해 낮에 재부팅하지 않게.</li></ul>
 <h4>버튼</h4>
-<ul><li><b>연결 시험</b> — 응답 확인 · <b>재시작</b> · <b>업데이트</b> — 새 버전을 바로 받기(원래는 10분마다 스스로 받음) · <b>일시정지</b> — 새 일을 가져가지 않음</li>
-<li>컴퓨터는 잠들지 않게 설정됩니다(화면은 꺼져도 됨). 꺼지면 그 컴퓨터가 맡을 일이 대기합니다.</li></ul>
-<h4>역할</h4>
-<p>닉스맥: 작가실·감독·생성·감수 등 무엇이든. 집 PC: 위의 일 + <b>영상 보관 서버</b>(OneDrive 씬 폴더).</p>`],
+<ul><li><b>연결 시험</b> · <b>일시정지</b>(새 일을 가져가지 않음) · <b>재시작</b> · <b>업데이트</b>(원래는 10분마다 스스로) · <b>설치 명령 다시 받기</b> · <b>연결 해제</b></li></ul>`],
 
   costs: ['비용 사용법', `
 <p>모든 유료 호출(Claude, Seedance, ElevenLabs)이 자동으로 장부에 기록됩니다.</p>
