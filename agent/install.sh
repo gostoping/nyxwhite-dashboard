@@ -28,7 +28,8 @@ echo "▶ 파이썬 준비"
 
 # 2) 에이전트 프로그램과 설정
 echo "▶ 에이전트 프로그램 내려받기"
-curl -fsSL "$URL/storage/v1/object/public/agent/agent.py?t=$(date +%s)" -o "$DIR/agent.py"
+GH="https://raw.githubusercontent.com/gostoping/nyxwhite-dashboard/main/agent/agent.py"
+curl -fsSL "$GH" -o "$DIR/agent.py" 2>/dev/null || curl -fsSL "$URL/storage/v1/object/public/agent/agent.py?t=$(date +%s)" -o "$DIR/agent.py"
 cat > "$DIR/config.json" <<EOF
 {"url": "$URL", "key": "$KEY", "token": "$TOKEN"}
 EOF

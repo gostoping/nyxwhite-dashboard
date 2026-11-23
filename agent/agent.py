@@ -5,9 +5,11 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
 - 15초마다 "살아 있음" 신호를 보내고, 대시보드에서 누른 명령(연결 시험·재시작·업데이트)을 받아 처리합니다.
 - 일시정지가 아니면 작업 대기열에서 이 에이전트가 할 수 있는 일을 가져가 처리합니다.
 - 컴퓨터가 잠들지 않게 막습니다(화면은 꺼져도 됨).
+- 10분마다 GitHub에 새 버전이 있는지 확인하고, 있으면 하던 일을 마친 뒤 스스로 업데이트합니다.
+  새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 import json
 import os
@@ -27,6 +29,33 @@ except Exception:
     pass
 
 HOME = os.path.dirname(os.path.abspath(__file__))
+PENDING = os.path.join(HOME, "update_pending.json")
+PREV = os.path.join(HOME, "agent.py.prev")
+
+
+def _rollback_if_broken():
+    """업데이트 직후 시작이 3번 넘게 실패하면 이전 버전으로 되돌린다."""
+    try:
+        if not os.path.exists(PENDING):
+            return
+        with open(PENDING, encoding="utf-8") as f:
+            st = json.load(f)
+        st["tries"] = int(st.get("tries", 0)) + 1
+        if st["tries"] > 3 and os.path.exists(PREV):
+            os.replace(PREV, os.path.join(HOME, "agent.py"))
+            os.remove(PENDING)
+            with open(os.path.join(HOME, "rollback.json"), "w", encoding="utf-8") as f:
+                json.dump({"from": st.get("version"), "at": time.time()}, f)
+            sys.exit(0)  # 자동 시작 장치가 이전 버전으로 다시 켠다
+        with open(PENDING, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+
+
+_rollback_if_broken()
 with open(os.path.join(HOME, "config.json"), encoding="utf-8-sig") as f:
     CFG = json.load(f)
 URL = CFG["url"].rstrip("/")
@@ -34,6 +63,8 @@ KEY = CFG["key"]
 TOKEN = CFG["token"]
 PLATFORM = "mac" if sys.platform == "darwin" else "windows" if os.name == "nt" else "linux"
 BEAT_SECONDS = int(CFG.get("beat_seconds", 15))
+UPDATE_URL = CFG.get("update_url", "https://raw.githubusercontent.com/gostoping/nyxwhite-dashboard/main/agent/agent.py")
+UPDATE_EVERY = int(CFG.get("update_every_seconds", 600))
 LOG_PATH = os.path.join(HOME, "agent.log")
 STARTED = datetime.now().isoformat(timespec="seconds")
 
@@ -91,6 +122,74 @@ def download(path):
         return r.read()
 
 
+def ver_tuple(v):
+    try:
+        return tuple(int(x) for x in str(v).split("."))
+    except ValueError:
+        return (0,)
+
+
+def fetch_latest():
+    """최신 agent.py 내용과 버전을 가져온다. GitHub 우선, 실패하면 Supabase 저장소."""
+    errors = []
+    for src in ("github", "storage"):
+        try:
+            if src == "github":
+                req = urllib.request.Request(UPDATE_URL, headers={"Cache-Control": "no-cache"})
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    code = r.read()
+            else:
+                code = download("agent.py")
+            text = code.decode("utf-8")
+            compile(text, "agent.py", "exec")  # 문법이 깨진 파일이면 쓰지 않는다
+            ver = next((l.split("=", 1)[1].strip().strip('"') for l in text.splitlines() if l.startswith("VERSION =")), None)
+            if ver:
+                return code, ver, src
+        except Exception as e:
+            errors.append(f"{src}: {e}")
+    raise RuntimeError("최신 버전 확인 실패 (" + "; ".join(errors) + ")")
+
+
+def install_update(code, new_ver):
+    """새 버전으로 바꾸고, 이전 버전은 되돌리기용으로 보관한다."""
+    me = os.path.join(HOME, "agent.py")
+    with open(me, "rb") as f:
+        old = f.read()
+    with open(PREV, "wb") as f:
+        f.write(old)
+    tmp = me + ".new"
+    with open(tmp, "wb") as f:
+        f.write(code)
+    os.replace(tmp, me)
+    with open(PENDING, "w", encoding="utf-8") as f:
+        json.dump({"version": new_ver, "from": VERSION, "tries": 0}, f)
+
+
+LAST_CHECK = 0.0
+LATEST_SEEN = None
+
+
+def check_update(force=False):
+    """새 버전이 있으면 설치하고 True를 돌려준다(호출한 쪽이 재시작)."""
+    global LAST_CHECK, LATEST_SEEN
+    if not force and time.time() - LAST_CHECK < UPDATE_EVERY:
+        return None
+    LAST_CHECK = time.time()
+    code, ver, src = fetch_latest()
+    LATEST_SEEN = ver
+    if ver_tuple(ver) <= ver_tuple(VERSION):
+        return None
+    try:  # 시작에 실패해 되돌렸던 버전은 다시 받지 않는다(더 새 버전이 나오면 받음)
+        with open(os.path.join(HOME, "rollback.json"), encoding="utf-8") as f:
+            if json.load(f).get("from") == ver and not force:
+                return None
+    except Exception:
+        pass
+    install_update(code, ver)
+    log(f"자동 업데이트: v{VERSION} → v{ver} ({src})")
+    return ver
+
+
 # ------------------------------------------------------------------ 잠자기 방지
 def keep_awake():
     try:
@@ -123,17 +222,11 @@ def handle_command(cmd):
             rpc("agent_command_done", p_token=TOKEN, p_id=cid, p_ok=True, p_result="재시작합니다")
             raise Restart()
         elif name == "update":
-            code = download("agent.py")
-            text = code.decode("utf-8")
-            compile(text, "agent.py", "exec")  # 문법이 깨진 파일이면 여기서 멈추고 기존 버전 유지
-            new_ver = next((l.split("=")[1].strip().strip('"') for l in text.splitlines() if l.startswith("VERSION =")), "?")
-            if new_ver == VERSION:
-                rpc("agent_command_done", p_token=TOKEN, p_id=cid, p_ok=True, p_result=f"이미 최신 버전입니다 (v{VERSION})")
+            new_ver = check_update(force=True)
+            if not new_ver:
+                rpc("agent_command_done", p_token=TOKEN, p_id=cid, p_ok=True,
+                    p_result=f"이미 최신 버전입니다 (v{VERSION}, 확인한 최신 v{LATEST_SEEN})")
                 return
-            tmp = os.path.join(HOME, "agent.py.new")
-            with open(tmp, "wb") as f:
-                f.write(code)
-            os.replace(tmp, os.path.join(HOME, "agent.py"))
             rpc("agent_command_done", p_token=TOKEN, p_id=cid, p_ok=True, p_result=f"v{VERSION} → v{new_ver} 업데이트, 재시작합니다")
             raise Restart()
         else:
@@ -170,15 +263,27 @@ def main():
     keep_awake()
     last_error, paused = None, False
     info = {"hostname": socket.gethostname(), "os": f"{platform.system()} {platform.release()}",
-            "python": platform.python_version(), "started_at": STARTED, "jobs": sorted(HANDLERS)}
+            "python": platform.python_version(), "started_at": STARTED, "jobs": sorted(HANDLERS),
+            "auto_update_minutes": UPDATE_EVERY // 60}
+    try:
+        with open(os.path.join(HOME, "rollback.json"), encoding="utf-8") as f:
+            rb = json.load(f)
+        info["rolled_back_from"] = rb.get("from")
+        log(f"주의: v{rb.get('from')} 업데이트가 시작에 실패해 이전 버전으로 되돌렸습니다")
+    except Exception:
+        pass
     while True:
         busy = False
         try:
+            info["latest_seen"] = LATEST_SEEN
             hb = rpc("agent_heartbeat", p_token=TOKEN, p_platform=PLATFORM, p_version=VERSION,
                      p_state="error" if last_error else ("paused" if paused else "idle"),
                      p_current_job=None, p_last_error=last_error, p_info=info)
             DEVICE_ID, paused = hb.get("device_id"), bool(hb.get("paused"))
             last_error = None
+            if os.path.exists(PENDING):  # 새 버전이 정상적으로 연결됨 → 업데이트 확정
+                os.remove(PENDING)
+                log(f"v{VERSION} 업데이트 확정")
             for c in hb.get("commands") or []:
                 handle_command(c)
             if not paused:
@@ -197,6 +302,14 @@ def main():
                 time.sleep(300)
                 continue
         if not busy:
+            try:
+                if check_update():
+                    log("새 버전으로 재시작")
+                    sys.exit(0)
+            except SystemExit:
+                raise
+            except Exception as e:
+                log(f"업데이트 확인 실패(다음에 다시 시도): {e}")
             time.sleep(BEAT_SECONDS)
 
 

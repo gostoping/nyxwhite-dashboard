@@ -28,7 +28,11 @@ Write-Host '파이썬 준비'
 
 # 2) 에이전트 프로그램과 설정
 Write-Host '에이전트 프로그램 내려받기'
-Invoke-WebRequest "$URL/storage/v1/object/public/agent/agent.py?t=$([DateTimeOffset]::Now.ToUnixTimeSeconds())" -OutFile (Join-Path $Dir 'agent.py') -UseBasicParsing
+try {
+  Invoke-WebRequest 'https://raw.githubusercontent.com/gostoping/nyxwhite-dashboard/main/agent/agent.py' -OutFile (Join-Path $Dir 'agent.py') -UseBasicParsing
+} catch {
+  Invoke-WebRequest "$URL/storage/v1/object/public/agent/agent.py?t=$([DateTimeOffset]::Now.ToUnixTimeSeconds())" -OutFile (Join-Path $Dir 'agent.py') -UseBasicParsing
+}
 @{ url = $URL; key = $KEY; token = $TOKEN } | ConvertTo-Json | Set-Content -Path (Join-Path $Dir 'config.json') -Encoding UTF8
 
 # 3) 꺼지면 다시 켜는 실행기 + 로그인하면 자동 시작(창 없이)
