@@ -1219,7 +1219,7 @@ async function viewGuide(main) {
       <li><b>등급별 해상도</b>: 일반 장면·연결 컷은 720p로 만들어 맥북에서 업스케일하고, 주요 장면만 1080p로 바로 만듭니다. (Kling 기준 720p가 1080p보다 약 25% 저렴)</li>
       <li><b>업스케일 도구는 생성량을 보고 고르기</b>: 무료나 1회 구매 도구로 시작하고, 매달 아끼는 금액이 구독료보다 커지면 Topaz로 넘어갑니다.</li>
     </ol>
-    <p class="quiet">⚠️ 720p보다 낮게 만들지 않습니다. 업스케일하면서 AI가 얼굴을 새로 그려 린·탄이 미세하게 달라질 수 있습니다. 업스케일한 뒤에도 영상감수자가 한 번 더 확인합니다.</p>
+    <p class="quiet">⚠️ 720p보다 낮게 만들지 않습니다. 업스케일하면서 AI가 얼굴을 새로 그려 배우 얼굴이 미세하게 달라질 수 있습니다. 업스케일한 뒤에도 영상감수자가 한 번 더 확인합니다.</p>
   </div>
 
   <div class="card">
@@ -1650,7 +1650,7 @@ async function viewBible(main) {
         ${n > 1 ? `<button class="btn small" data-bhist="${esc(e.id)}">이력 ${n}개</button>` : ''}</div>
       <div id="bh-${esc(e.id)}"></div>
     </div>`; }).join('')}</div>`
-    : `<div class="card quiet">${entries.length ? '이 분류에는 항목이 없습니다.' : '아직 항목이 없습니다. "+ 항목 추가"로 린·탄부터 등록하세요.'}</div>`}
+    : `<div class="card quiet">${entries.length ? '이 분류에는 항목이 없습니다.' : '아직 항목이 없습니다. "+ 항목 추가"로 주요 인물부터 등록하세요.'}</div>`}
   <div id="bEditor" style="margin-top:12px"></div>
   <h3>연속성 기록</h3>
   <p class="quiet">화가 끝났을 때 인물·소품의 상태(헤어, 의상, 상처, 들고 있는 물건)를 남깁니다. 다음 화의 감독은 직전 화의 마지막 상태를 먼저 읽고 시작합니다.</p>
@@ -1693,12 +1693,12 @@ function openBibleEditor({ entry, base, urls, fromId }) {
   const imgs = base?.image_paths || [];
   $('#bEditor').innerHTML = `<div class="card" style="border-color:var(--accent)">
     <b>${isNew ? '새 바이블 항목' : esc(entry.name) + ' 새 버전 작성'}</b>
-    ${isNew ? `<div class="row"><div style="flex:2;min-width:160px"><label>이름</label><input id="bname" placeholder="예: 린 (LIN)"></div>
+    ${isNew ? `<div class="row"><div style="flex:2;min-width:160px"><label>이름</label><input id="bname" placeholder="예: 주인공 이름 (영문 표기)"></div>
       <div style="flex:1;min-width:120px"><label>분류</label><select id="bcat">${Object.entries(BIBLE_CAT).map(([k, l]) =>
         `<option value="${k}" ${S.bibleCat === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>` : ''}
     <label>한 줄 설명 (화면 표시용)</label><input id="bsum" value="${esc(entry?.summary || '')}" placeholder="예: 주인공. 태국에서 온 연습생">
     <label>고정 묘사 문장: 감독이 프롬프트에 그대로 넣는 문장입니다</label>
-    <textarea id="bdesc" style="min-height:120px" placeholder="예: LIN, early-20s Thai woman, shoulder-length straight black hair, ...">${esc(base?.description || '')}</textarea>
+    <textarea id="bdesc" style="min-height:120px" placeholder="예: early-20s woman, shoulder-length straight black hair, almond eyes, slim build, ...">${esc(base?.description || '')}</textarea>
     <label>세부 사항 (화별 의상, 바뀌면 안 되는 특징, 금지 사항)</label>
     <textarea id="bdet" style="min-height:100px">${esc(base?.details || '')}</textarea>
     <label>목소리 ID (음성 도구에서 고정한 목소리 번호, 선택)</label><input id="bvid" value="${esc(base?.voice_id || '')}">
@@ -1814,7 +1814,7 @@ async function viewDirectives(main) {
   <h2>대표 지시</h2>
   <div class="card">
     <label style="margin-top:0">지시 내용</label>
-    <textarea id="dtxt" style="min-height:90px" placeholder="예: 1화 3씬에서 린의 의상을 연습복으로 통일해줘"></textarea>
+    <textarea id="dtxt" style="min-height:90px" placeholder="예: 1화 3씬에서 주인공 의상을 연습복으로 통일해줘"></textarea>
     <div class="row">
       <div style="flex:2;min-width:180px"><label>관련 화 (선택)</label><select id="dep"><option value="">없음</option>
         ${eps.map(e => `<option value="${esc(e.id)}">${esc(e.series?.title)} ${e.number}화</option>`).join('')}</select></div>

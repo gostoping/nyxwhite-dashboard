@@ -44,7 +44,7 @@ begin
   if v_staff is not null and not exists (select 1 from public.staff_guidelines where staff_id = v_staff) then
     insert into public.staff_guidelines (staff_id, version_no, content, change_reason, status) values (v_staff, 1,
 $g$[공통 규칙: 모든 직원]
-1. 우선순위: 배우(린·탄) 일관성 > 대본 충실도 > 영상 완성도 > 속도·비용.
+1. 우선순위: 배우(바이블에 등록된 인물) 일관성 > 대본 충실도 > 영상 완성도 > 속도·비용.
 2. 대본은 고치지 않는다. 대본이 애매하면 "대본 문제"로 보고하고 대표의 판단을 기다린다.
 3. 인물·이름·호칭·고유명사는 시리즈 바이블의 '적용 중' 버전(특히 '용어집')만 근거로 쓴다.
 4. 모든 판단에 근거를 단다: 컷 ID, 한국어 원문 대사, 용어집 항목.
