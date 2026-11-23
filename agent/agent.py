@@ -9,7 +9,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 import json
 import os
@@ -270,6 +270,16 @@ def http_json(url, headers, method="GET", body=None, timeout=60):
             return e.code, {"raw": raw[:300].decode("utf-8", "replace")}
 
 
+def higgsfield_cred(k):
+    """Higgsfield 인증 값 'ID:Secret'. 한 칸에 'ID:Secret'을 통째로 넣은 경우도 받아 준다."""
+    hid = (k.get("higgsfield_key_id") or "").strip().strip('"\'')
+    hsec = (k.get("higgsfield_key_secret") or "").strip().strip('"\'')
+    for v in (hid, hsec):
+        if ":" in v and len(v.split(":", 1)[1]) > 8:
+            return v
+    return f"{hid}:{hsec}" if hid and hsec else ""
+
+
 def test_keys():
     """키가 맞는지 비용 없이 확인한다(생성 요청을 보내지 않음)."""
     k = secrets("anthropic_api_key", "higgsfield_key_id", "higgsfield_key_secret")
@@ -286,15 +296,20 @@ def test_keys():
         else:
             msg = ((data or {}).get("error") or {}).get("message") if isinstance(data, dict) else ""
             out.append(f"Claude: 실패 {code} {msg or ''}".strip())
-    hid, hsec = k.get("higgsfield_key_id"), k.get("higgsfield_key_secret")
-    if not (hid and hsec):
+    cred = higgsfield_cred(k)
+    if not cred:
         out.append("Higgsfield: 키 미등록")
     else:
         # 없는 요청 번호의 상태를 물어 인증만 확인한다: 401/403이면 키가 틀림, 그 밖이면 키는 받아들여짐
         code, data = http_json("https://api.higgsfield.ai/requests/00000000-0000-0000-0000-000000000000/status",
-                               {"Authorization": f"Key {hid}:{hsec}", "Accept": "application/json"})
-        out.append("Higgsfield: 키가 맞지 않음 (" + str(code) + ")" if code in (401, 403)
-                   else f"Higgsfield: 인증 통과 (응답 {code})")
+                               {"Authorization": f"Key {cred}", "Accept": "application/json"})
+        if code in (401, 403):
+            hint = ""
+            if isinstance(data, dict):
+                hint = str(data.get("detail") or data.get("message") or data.get("error") or data.get("raw") or "")[:120]
+            out.append(f"Higgsfield: 키가 맞지 않음 ({code}) {hint}".strip())
+        else:
+            out.append(f"Higgsfield: 인증 통과 (응답 {code})")
     return " / ".join(out), all("실패" not in o and "맞지 않음" not in o and "미등록" not in o for o in out)
 
 
