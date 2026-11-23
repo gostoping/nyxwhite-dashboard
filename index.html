@@ -2342,6 +2342,59 @@ def t_photo_describe(t):
     return f"{info.get('name')} 묘사 {len(desc)}자"
 
 
+@task("bible_place")
+def t_bible_place(t):
+    """대표가 추가한 소품(등)을 대본 어느 화·씬에 넣으면 좋을지 제작자가 판단해 추천한다. 필요하면 영어 고정 묘사도 쓴다."""
+    p = t.get("payload") or {}
+    info = rpc("agent_bible_place_info", p_token=TOKEN, p_entry=p.get("entry_id")) or {}
+    e = info.get("entry") or {}
+    if not e:
+        return "항목이 없습니다(삭제됨)"
+    eps = [x for x in info.get("episodes") or [] if (x.get("text") or "").strip()]
+    if not eps and p.get("place") is not False:
+        raise RuntimeError("대본이 들어간 화가 없어 추천할 수 없습니다. 대본 탭에서 대본을 먼저 넣어 주세요")
+    want_desc = bool(p.get("write_description"))
+    progress(f"제작자가 대본 {len(eps)}개 화를 읽고 '{e.get('name')}'을 넣을 화·씬을 고르는 중")
+    budget = max(8000, 240000 // max(1, len(eps)))
+    scripts = "\n\n".join(f"[{x['number']}화 {x.get('title') or ''}]\n{(x.get('text') or '')[:budget]}" for x in eps)
+    system = """너는 드라마 제작자(프로듀서)다. 대표가 바이블에 새로 넣은 항목을 대본의 어느 화·씬에 넣으면 이야기와 화면이 가장 좋아질지 판단해 추천한다.
+- 대본 흐름을 해치지 않고 자연스럽게 들어가는 곳, 인물의 감정·관계를 보여 주거나 복선·반복으로 기억에 남는 곳을 고른다.
+- 씬 번호는 그 화 대본의 씬 순서(1부터). 대본에 실제로 있는 씬만 고른다.
+- 추천은 2~5곳, 좋은 순서대로. 각 추천: reason(왜 여기인지, 한국어 1~2문장), how(화면에서 어떻게 보이게 할지: 누가 들고/어디 놓이고/카메라가 어떻게 잡는지, 한국어 1~2문장).
+- 대사를 새로 쓰거나 줄거리를 바꾸자고 하지 않는다. 화면 안 배치·행동으로 넣는다.
+- description: 요청이 있을 때만. 영상·사진 모델에 그대로 넣을 영어 고정 묘사 3~6문장(모양·비율·크기·재질·질감·색·무늬·낡은 정도). 실존 브랜드 이름 금지. 요청이 없으면 빈 문자열.
+답 형식: <json>{"placements": [{"ep": 1, "scene": 1, "reason": "", "how": ""}], "description": ""}</json>"""
+    user = (f"시리즈: {(info.get('series') or {}).get('title', '')}\n"
+            f"새 항목: {e.get('name')} ({e.get('category')})\n대표 설명: {e.get('summary') or '-'}\n"
+            f"지금 묘사: {e.get('description') or '-'}\n세부 사항·대표 희망: {e.get('details') or '-'}\n"
+            f"대표가 원하는 쓰임(있으면 우선 반영): {p.get('hint') or '-'}\n"
+            f"영어 고정 묘사 필요: {'예' if want_desc else '아니오'}\n\n"
+            f"[바이블의 다른 항목]\n{json.dumps(info.get('others') or [], ensure_ascii=False)[:6000]}\n\n[대본]\n{scripts}")
+    text, _ = claude("claude-opus-5-5", system, user, max_tokens=4000, stage="other", note=f"바이블 항목 배치 추천: {e.get('name')}")
+    d = pick_json(text)
+    desc = (d.get("description") or "").strip()
+    if want_desc and desc and e.get("version_id"):
+        rpc("agent_bible_set_description", p_token=TOKEN, p_version=e["version_id"], p_description=desc, p_details=e.get("details") or "",
+            p_reason="대표가 소품 추가 · 설명을 보고 묘사 자동 작성")
+    if p.get("place") is False:  # 대표가 추천을 원하지 않음: 묘사만
+        return f"{e.get('name')} 묘사 {len(desc)}자"
+    nums = {int(x["number"]) for x in eps}
+    items = []
+    for x in d.get("placements") or []:
+        try:
+            ep, sc = int(x.get("ep")), int(x.get("scene"))
+        except (TypeError, ValueError):
+            continue
+        if ep in nums and sc > 0:
+            items.append({"ep": ep, "scene": sc, "reason": str(x.get("reason") or "")[:400], "how": str(x.get("how") or "")[:400],
+                          "accepted": False, "note_id": None})
+    if not items:
+        raise RuntimeError("추천할 화·씬을 찾지 못했습니다")
+    rpc("agent_bible_save_placement", p_token=TOKEN, p_entry=e["id"], p_items=items[:5])
+    notify(f"{e.get('name')} 넣을 곳 추천 {len(items[:5])}곳", "바이블 탭 카드에서 '넣기'를 누르면 그 씬 감독 메모로 들어갑니다")
+    return f"{e.get('name')} 추천 {len(items[:5])}곳"
+
+
 @task("voice_cast")
 def t_voice_cast(t):
     """시리즈 인물 전체의 목소리 설명·시험 대사를 Claude가 쓰고, 인물마다 후보 3개를 만들도록 이어서 맡긴다."""
@@ -2828,7 +2881,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기","photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
@@ -4272,13 +4325,68 @@ async function renderExtractBox(episodes) {
   return t;
 }
 
+// 제작자가 추천한 '넣을 화·씬': 넣기를 누르면 그 씬의 감독 메모(episode_notes)로 들어간다
+function placementBox(e) {
+  const list = Array.isArray(e.placement) ? e.placement : [];
+  if (!list.length) return '';
+  return `<div style="margin-top:8px;padding:8px 10px;border:1px dashed var(--line);border-radius:8px">
+    <div class="quiet" style="margin-bottom:4px">제작자 추천: 넣을 화·씬</div>
+    ${list.map((p, i) => `<div class="row" style="gap:6px;align-items:flex-start;padding:4px 0">
+      <b style="min-width:58px">${esc(p.ep)}화 S${esc(p.scene)}</b>
+      <div style="flex:1;min-width:180px">${esc(p.how || '')}${p.reason ? `<div class="quiet">이유: ${esc(p.reason)}</div>` : ''}</div>
+      ${p.accepted ? pill('넣음 · 감독 메모', 'good') : `<button class="btn primary small" data-plok="${esc(e.id)}" data-i="${i}">넣기</button>
+        <button class="btn small" data-plno="${esc(e.id)}" data-i="${i}">빼기</button>`}</div>`).join('')}</div>`;
+}
+
+// 소품 빨리 추가: 이름·한국어 설명(사진 선택) → 사진이 있으면 사진 보고 묘사, 없으면 설명으로 묘사 + 넣을 화·씬 추천
+function openPropForm() {
+  $('#bEditor').innerHTML = `<div class="card" style="border-color:var(--accent)">
+    <b>소품 추가</b>
+    <p class="quiet" style="margin:4px 0 0">영어 묘사는 쓰지 않아도 됩니다. 사진을 넣으면 사진을 보고, 없으면 설명을 보고 작가실이 씁니다. 제작자가 대본을 읽고 넣을 화·씬을 추천합니다.</p>
+    <label>소품 이름</label><input id="ppname" placeholder="예: 할머니의 은반지">
+    <label>어떤 소품인가요</label><textarea id="ppdesc" style="min-height:80px" placeholder="예: 오래된 은반지. 안쪽에 이니셜이 새겨져 있고 조금 긁혀 있다. 주인공이 늘 끼고 다닌다"></textarea>
+    <label>어디에 쓰고 싶나요 (선택)</label><input id="pphint" placeholder="예: 주인공이 힘들 때 만지는 버릇으로, 마지막 화에 상대에게 건넨다">
+    <label>사진 (선택: 외부에서 구한 사진)</label><input type="file" id="ppimg" accept="image/*" multiple>
+    <label class="quiet" style="margin-top:8px"><input type="checkbox" id="ppplace" style="width:auto" checked> 제작자에게 넣을 화·씬 추천받기</label>
+    <div class="row" style="margin-top:10px"><button class="btn primary" id="ppsave">추가</button><button class="btn" id="ppcancel">취소</button></div></div>`;
+  $('#ppcancel').onclick = () => { $('#bEditor').innerHTML = ''; };
+  $('#ppsave').onclick = guard(async () => {
+    const name = $('#ppname').value.trim(), desc = $('#ppdesc').value.trim(), hint = $('#pphint').value.trim();
+    if (!name) return toast('소품 이름을 적어 주세요');
+    if (!desc) return toast('어떤 소품인지 한두 줄 적어 주세요');
+    const files = [...$('#ppimg').files];
+    if (files.some(f => f.size > 15e6)) return toast('사진이 너무 큽니다 (15MB까지)');
+    const btn = $('#ppsave'); btn.disabled = true; btn.textContent = '추가하는 중…';
+    try {
+      const row = { series_id: S.seriesId, category: 'prop', name, summary: desc.slice(0, 300) };
+      const ent = await q(S.sb.from('bible_entries').insert({ ...row, photo_source: files.length ? 'upload' : 'auto' }).select('id').single())
+        .catch(() => q(S.sb.from('bible_entries').insert(row).select('id').single()));
+      const paths = [];
+      for (const f of files) paths.push(await uploadBibleFile(ent.id, f));
+      const v = await q(S.sb.from('bible_versions').insert({
+        entry_id: ent.id, description: desc, details: hint ? `대표 희망 쓰임: ${hint}` : null, image_paths: paths,
+        change_reason: '대표가 소품 추가', status: 'proposed',
+      }).select('id,version_no').single());
+      await q(S.sb.rpc('activate_bible_version', { p_id: v.id }));
+      const jobs = [];
+      if (files.length) jobs.push({ kind: 'photo_describe', series_id: S.seriesId, payload: { entry_id: ent.id, version_id: v.id } });
+      if ($('#ppplace').checked || !files.length)
+        jobs.push({ kind: 'bible_place', series_id: S.seriesId, payload: { entry_id: ent.id, write_description: !files.length, hint, place: $('#ppplace').checked } });
+      if (jobs.length) await q(S.sb.from('pipeline_tasks').insert(jobs));
+      S.bibleCat = 'prop';
+      toast(`${name}을(를) 추가했습니다. 작가실·제작자가 묘사와 넣을 곳을 준비합니다`); go('bible');
+    } finally { const b = $('#ppsave'); if (b) { b.disabled = false; b.textContent = '추가'; } }
+  });
+  $('#bEditor').scrollIntoView({ behavior: 'smooth' });
+}
+
 async function viewBible(main) {
   const series = await q(S.sb.from('series').select('id,title').order('created_at'));
   if (!S.seriesId || !series.some(s => s.id === S.seriesId)) S.seriesId = series[0]?.id || null;
   if (!S.seriesId) { main.innerHTML = '<h2>시리즈 바이블</h2><div class="card quiet">먼저 대본 탭에서 시리즈를 만드세요.</div>'; return; }
   const [entries, episodes] = await Promise.all([
     // photo_source(사진 방식) 칸이 아직 DB에 없으면(반영 전) 없이 다시 읽는다
-    q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin,photo_source').eq('series_id', S.seriesId).order('sort_order').order('created_at'))
+    q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin,photo_source,placement').eq('series_id', S.seriesId).order('sort_order').order('created_at'))
       .catch(() => q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin').eq('series_id', S.seriesId).order('sort_order').order('created_at'))),
     q(S.sb.from('episodes').select('id,number,title').eq('series_id', S.seriesId).order('number')),
   ]);
@@ -4313,6 +4421,7 @@ async function viewBible(main) {
       <button class="btn small" id="bextract" title="작가실이 대본을 화별로 읽고 씬마다 필요한 인물·장소·소품을 찾아 바이블 항목으로 올립니다">대본에서 필요한 것 찾기</button>
       ${showPhotoBtn ? `<button class="btn small" id="bphotos" title="지금 고른 분류에서, 적용된 묘사는 있고 사진이 없는 항목의 사진 후보를 만듭니다. '사진: 직접 올리기'로 정한 항목은 빠집니다(인물은 Soul 2 실사)">${catLabel ? esc(catLabel) + ' ' : '사진 없는 항목 '}사진 만들기 (${photoTodo.length})</button>` : ''}
       <button class="btn small" id="bcast" title="작가실이 대본을 읽고 인물마다 목소리 설명·시험 대사를 쓰고, ElevenLabs 후보 3개씩 만듭니다">인물 목소리 한꺼번에 만들기</button>
+      <button class="btn small" id="bprop" title="넣고 싶은 소품을 이름·설명(사진은 선택)만으로 추가하면, 제작자가 대본을 읽고 넣을 화·씬을 추천합니다">+ 소품 추가</button>
       <button class="btn primary small" id="bnew">+ 항목 추가</button></div>
     <div class="row" style="margin-top:10px">${[['all', `전체 ${entries.length}`], ...Object.entries(BIBLE_CAT).map(([k, l]) => [k, `${l} ${cnt(k)}`])].map(([k, l]) =>
       `<button class="btn small ${S.bibleCat === k ? 'primary' : ''}" data-bc="${k}">${esc(l)}</button>`).join('')}</div>
@@ -4337,6 +4446,7 @@ async function viewBible(main) {
       <div class="row"><b style="font-size:16px">${esc(e.name)}</b>${pill(BIBLE_CAT[e.category])}${c ? pill('v' + c.version_no, 'accent') : pill('승인본 없음', 'bad')}</div>
       ${e.summary ? `<div class="quiet" style="margin-top:4px">${esc(e.summary)}</div>` : ''}
       ${appearsLine(e, c)}
+      ${placementBox(e)}
       <div data-dsc="${esc(e.id)}"></div>
       ${c ? thumbs(c.image_paths, urls) : ''}
       ${c ? `<div class="bdesc">${esc(c.description)}</div>` : ''}
@@ -4352,7 +4462,8 @@ async function viewBible(main) {
         ${hasPhotoSrc ? `<select data-psrc="${esc(e.id)}" style="width:auto" title="직접 올리기로 정하면 '사진 만들기'를 한꺼번에 눌러도 이 항목은 만들지 않습니다">
           <option value="auto" ${e.photo_source !== 'upload' ? 'selected' : ''}>자동으로 만들기</option>
           <option value="upload" ${e.photo_source === 'upload' ? 'selected' : ''}>직접 올리기</option></select>` : ''}
-        <label class="btn small" style="margin:0" title="외부에서 구한 사진을 이 항목의 기준 사진으로 넣고 바로 적용합니다">사진 올리기<input type="file" accept="image/*" multiple hidden data-pup="${esc(e.id)}"></label></div>` : ''}
+        <label class="btn small" style="margin:0" title="외부에서 구한 사진을 이 항목의 기준 사진으로 넣고 바로 적용합니다">사진 올리기<input type="file" accept="image/*" multiple hidden data-pup="${esc(e.id)}"></label>
+        ${'placement' in e ? `<button class="btn small" data-plc="${esc(e.id)}" title="제작자가 대본을 읽고 이 항목을 넣으면 좋을 화·씬을 추천합니다">넣을 곳 추천받기</button>` : ''}</div>` : ''}
       <div id="pd-${esc(e.id)}"></div>
       <div id="vd-${esc(e.id)}"></div>
       <div id="bh-${esc(e.id)}"></div>
@@ -4401,26 +4512,30 @@ async function viewBible(main) {
     if (S.dscTimer) { clearInterval(S.dscTimer); S.dscTimer = null; }
     const sid = S.seriesId;
     const paint = async () => {
-      const rows = await q(S.sb.from('pipeline_tasks').select('id,status,progress,error,attempts,payload,created_at,started_at,finished_at')
-        .eq('kind', 'photo_describe').eq('series_id', sid).order('created_at', { ascending: false }).limit(200));
+      const rows = await q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,error,attempts,payload,created_at,started_at,finished_at')
+        .in('kind', ['photo_describe', 'bible_place']).eq('series_id', sid).order('created_at', { ascending: false }).limit(300));
       if (S.seriesId !== sid || S.tab !== 'bible') return null;
-      const last = {}; rows.forEach(r => { const id = r.payload?.entry_id; if (id && !last[id]) last[id] = r; });
+      const last = {}; rows.forEach(r => { const k = (r.payload?.entry_id || '') + '|' + r.kind; if (r.payload?.entry_id && !last[k]) last[k] = r; });
+      const LBL = { photo_describe: ['프롬프트 쓰는 중', '작가실이 사진을 보고 묘사를 쓰는 중', '묘사 작성 실패'],
+        bible_place: ['넣을 곳 고르는 중', '제작자가 대본을 읽고 넣을 화·씬을 고르는 중', '추천 실패'] };
       let open = 0;
       main.querySelectorAll('[data-dsc]').forEach(box => {
-        const t = last[box.dataset.dsc];
-        const isOpen = t && ['queued', 'running'].includes(t.status);
-        if (isOpen) open++;
-        box.innerHTML = !t ? ''
-          : isOpen ? `<div class="row" style="gap:6px;margin-top:6px">${pill('프롬프트 쓰는 중', 'warn')}<span class="quiet">${t.status === 'queued'
+        box.innerHTML = ['photo_describe', 'bible_place'].map(kind => {
+          const t = last[box.dataset.dsc + '|' + kind]; if (!t) return '';
+          const [busy, doing, fail] = LBL[kind];
+          const isOpen = ['queued', 'running'].includes(t.status);
+          if (isOpen) open++;
+          return isOpen ? `<div class="row" style="gap:6px;margin-top:6px">${pill(busy, 'warn')}<span class="quiet">${t.status === 'queued'
               ? (t.attempts > 0 ? `잠시 뒤 다시 시도${t.error || t.progress ? ' · ' + esc(t.error || t.progress) : ''}` : `에이전트가 받아 가기를 기다리는 중 · 요청 ${esc(agoText(t.created_at))}`)
-              : `${esc(t.progress || '작가실이 사진을 보고 묘사를 쓰는 중')} · 시작 ${esc(agoText(t.started_at))}`}</span></div>`
-          : t.status === 'failed' ? `<div class="row" style="gap:6px;margin-top:6px">${pill('묘사 작성 실패', 'bad')}<span style="color:var(--bad)">${esc(t.error || '이유가 남지 않았습니다')}</span>
-              <button class="btn small" data-dscre="${esc(box.dataset.dsc)}" data-ver="${esc(t.payload?.version_id || '')}">다시 시도</button></div>`
-          : '';
+              : `${esc(t.progress || doing)} · 시작 ${esc(agoText(t.started_at))}`}</span></div>`
+            : t.status === 'failed' ? `<div class="row" style="gap:6px;margin-top:6px">${pill(fail, 'bad')}<span style="color:var(--bad)">${esc(t.error || '이유가 남지 않았습니다')}</span>
+              <button class="btn small" data-dscre="${esc(t.id)}">다시 시도</button></div>`
+            : '';
+        }).join('');
       });
       main.querySelectorAll('[data-dscre]').forEach(b => b.onclick = guard(async () => {
-        const ver = b.dataset.ver || cur(b.dataset.dscre)?.id; if (!ver) return toast('다시 쓸 버전을 찾지 못했습니다');
-        await queueDescribe(b.dataset.dscre, ver); toast('다시 맡겼습니다'); watchDescribe();
+        const t = rows.find(r => r.id === b.dataset.dscre); if (!t) return;
+        await q(S.sb.from('pipeline_tasks').insert({ kind: t.kind, series_id: sid, payload: t.payload })); toast('다시 맡겼습니다'); watchDescribe();
       }));
       return open;
     };
@@ -4432,12 +4547,40 @@ async function viewBible(main) {
       if (open === null) { clearInterval(S.dscTimer); S.dscTimer = null; return; }
       if (open) return;
       clearInterval(S.dscTimer); S.dscTimer = null;
-      toast('사진을 보고 쓴 묘사가 도착했습니다');
+      toast('작가실·제작자 작업이 끝났습니다. 카드에서 확인해 주세요');
       const busy = $('#bEditor')?.innerHTML.trim() || document.querySelector('#main input:focus, #main textarea:focus');
       if (!busy) go('bible');
     }, 8000);
   };
   watchDescribe();
+  // 소품 추가 · 넣을 곳 추천
+  $('#bprop').onclick = () => openPropForm();
+  main.querySelectorAll('[data-plc]').forEach(b => b.onclick = guard(async () => {
+    const e = entryOf(b.dataset.plc); if (!e) return;
+    const hint = prompt(`제작자가 대본을 읽고 '${e.name}'을(를) 넣으면 좋을 화·씬을 추천합니다. (Claude 수백 원)\n원하는 쓰임이 있으면 적어 주세요(비워도 됩니다).`, '');
+    if (hint === null) return;
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'bible_place', series_id: S.seriesId, payload: { entry_id: e.id, write_description: false, hint: hint.trim() } }));
+    toast('제작자에게 맡겼습니다. 카드에 진행 상황이 나옵니다'); watchDescribe();
+  }));
+  const savePlacement = (e, list) => q(S.sb.from('bible_entries').update({ placement: list }).eq('id', e.id));
+  main.querySelectorAll('[data-plok]').forEach(b => b.onclick = guard(async () => {
+    const e = entryOf(b.dataset.plok); const list = [...(e?.placement || [])]; const p = list[+b.dataset.i]; if (!p) return;
+    const ep = episodes.find(x => Number(x.number) === Number(p.ep));
+    if (!ep) return toast(`${p.ep}화를 찾지 못했습니다`);
+    const c = cur(e.id);
+    const note = await q(S.sb.from('episode_notes').insert({ episode_id: ep.id, scene_no: Number(p.scene) || null, priority: 'must', important: false,
+      content: `[바이블 ${BIBLE_CAT[e.category] || ''}] '${e.name}'을(를) 이 씬에 넣는다. ${p.how || ''}${p.reason ? ` (이유: ${p.reason})` : ''}${c?.description ? `\n묘사: ${c.description}` : ''}` })
+      .select('id').single());
+    list[+b.dataset.i] = { ...p, accepted: true, note_id: note.id };
+    const appears = [...(e.appears || [])];
+    if (!appears.some(a => Number(a.ep) === Number(p.ep) && Number(a.scene) === Number(p.scene))) appears.push({ ep: Number(p.ep), scene: Number(p.scene) });
+    await q(S.sb.from('bible_entries').update({ placement: list, appears }).eq('id', e.id));
+    toast(`${p.ep}화 S${p.scene}에 넣었습니다. 그 씬 감독 메모로 들어갔습니다`); go('bible');
+  }));
+  main.querySelectorAll('[data-plno]').forEach(b => b.onclick = guard(async () => {
+    const e = entryOf(b.dataset.plno); const list = [...(e?.placement || [])]; list.splice(+b.dataset.i, 1);
+    await savePlacement(e, list); go('bible');
+  }));
   const bphotos = $('#bphotos');
   if (bphotos) bphotos.onclick = guard(async () => {
     if (!photoTodo.length) return toast(`사진을 만들 ${catLabel || ''} 항목이 없습니다(적용된 묘사가 있고, 사진이 없고, '자동으로 만들기'인 항목만 만듭니다)`);
@@ -4966,7 +5109,7 @@ async function directiveDetail(id) {
       <td>${esc(e.actor)}<br><span class="quiet">${esc(e.devices?.name || '')}</span></td><td>${esc(human(e.summary))}</td></tr>`).join('')}</table>` : '<p class="quiet">기록이 없습니다.</p>'}`;
 }
 const JOB_NAME = {
-  bible_extract: '대본에서 필요 항목 찾기', photo_describe: '사진 보고 묘사 쓰기',photo_design: '사진 디자인', photo_set: '얼굴 학습·기준 사진', prep_cut: '컷 준비(사진·목소리)', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보 만들기', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성 (Seedance)', store: '집 PC 보관', video_review: '영상 감수',
+  bible_extract: '대본에서 필요 항목 찾기', photo_describe: '사진 보고 묘사 쓰기', bible_place: '넣을 화·씬 추천',photo_design: '사진 디자인', photo_set: '얼굴 학습·기준 사진', prep_cut: '컷 준비(사진·목소리)', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보 만들기', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성 (Seedance)', store: '집 PC 보관', video_review: '영상 감수',
   ping: '연결 시험', summarize_script_diff: '대본 변경 요약', split_scenes: '씬 나누기', summarize_directive: '지시 읽고 담당 정하기',
   write_prompts: '프롬프트 작성 (감독)', review_prompts: '프롬프트 감수 (감정감수자)', generate_keyframe: '키프레임 생성',
   review_keyframe: '키프레임 검사 (영상감수자)', generate_video: '영상 생성', review_video: '영상 검사 (영상감수자)',
@@ -5541,7 +5684,7 @@ const CUT_STATUS = {
   designed: ['설계됨 · 승인 대기', 'accent'], approved: ['승인 · 생성 대기', 'warn'], generating: ['생성 중', 'warn'],
   reviewing: ['감수 중', 'warn'], passed: ['통과', 'good'], failed: ['불합격·실패', 'bad'], hold: ['보류', ''], cancelled: ['취소', ''],
 };
-const TASK_LABEL = { bible_extract: '대본에서 필요 항목 찾기', photo_describe: '사진 보고 묘사 쓰기',photo_design: '사진 디자인', photo_set: '얼굴 학습', prep_cut: '사진·목소리 준비', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
+const TASK_LABEL = { bible_extract: '대본에서 필요 항목 찾기', photo_describe: '사진 보고 묘사 쓰기', bible_place: '넣을 화·씬 추천',photo_design: '사진 디자인', photo_set: '얼굴 학습', prep_cut: '사진·목소리 준비', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
 const PROD_STEPS = [['원고', '대본 탭에서 넣기'], ['작가실', '감정선 정리본'], ['컷 설계', '컷 나누기·대사 미리 듣기·장면 사진'], ['생성 승인', '대표가 컷별로'], ['영상·감수', 'Seedance + 영상감수'], ['씬 보관', '집 PC · OneDrive']];
 const usdKrw = (usd, rate) => usd == null ? '-' : won(usd * (rate || 1340));
 

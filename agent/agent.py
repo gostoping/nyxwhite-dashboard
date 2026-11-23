@@ -2070,6 +2070,59 @@ def t_photo_describe(t):
     return f"{info.get('name')} 묘사 {len(desc)}자"
 
 
+@task("bible_place")
+def t_bible_place(t):
+    """대표가 추가한 소품(등)을 대본 어느 화·씬에 넣으면 좋을지 제작자가 판단해 추천한다. 필요하면 영어 고정 묘사도 쓴다."""
+    p = t.get("payload") or {}
+    info = rpc("agent_bible_place_info", p_token=TOKEN, p_entry=p.get("entry_id")) or {}
+    e = info.get("entry") or {}
+    if not e:
+        return "항목이 없습니다(삭제됨)"
+    eps = [x for x in info.get("episodes") or [] if (x.get("text") or "").strip()]
+    if not eps and p.get("place") is not False:
+        raise RuntimeError("대본이 들어간 화가 없어 추천할 수 없습니다. 대본 탭에서 대본을 먼저 넣어 주세요")
+    want_desc = bool(p.get("write_description"))
+    progress(f"제작자가 대본 {len(eps)}개 화를 읽고 '{e.get('name')}'을 넣을 화·씬을 고르는 중")
+    budget = max(8000, 240000 // max(1, len(eps)))
+    scripts = "\n\n".join(f"[{x['number']}화 {x.get('title') or ''}]\n{(x.get('text') or '')[:budget]}" for x in eps)
+    system = """너는 드라마 제작자(프로듀서)다. 대표가 바이블에 새로 넣은 항목을 대본의 어느 화·씬에 넣으면 이야기와 화면이 가장 좋아질지 판단해 추천한다.
+- 대본 흐름을 해치지 않고 자연스럽게 들어가는 곳, 인물의 감정·관계를 보여 주거나 복선·반복으로 기억에 남는 곳을 고른다.
+- 씬 번호는 그 화 대본의 씬 순서(1부터). 대본에 실제로 있는 씬만 고른다.
+- 추천은 2~5곳, 좋은 순서대로. 각 추천: reason(왜 여기인지, 한국어 1~2문장), how(화면에서 어떻게 보이게 할지: 누가 들고/어디 놓이고/카메라가 어떻게 잡는지, 한국어 1~2문장).
+- 대사를 새로 쓰거나 줄거리를 바꾸자고 하지 않는다. 화면 안 배치·행동으로 넣는다.
+- description: 요청이 있을 때만. 영상·사진 모델에 그대로 넣을 영어 고정 묘사 3~6문장(모양·비율·크기·재질·질감·색·무늬·낡은 정도). 실존 브랜드 이름 금지. 요청이 없으면 빈 문자열.
+답 형식: <json>{"placements": [{"ep": 1, "scene": 1, "reason": "", "how": ""}], "description": ""}</json>"""
+    user = (f"시리즈: {(info.get('series') or {}).get('title', '')}\n"
+            f"새 항목: {e.get('name')} ({e.get('category')})\n대표 설명: {e.get('summary') or '-'}\n"
+            f"지금 묘사: {e.get('description') or '-'}\n세부 사항·대표 희망: {e.get('details') or '-'}\n"
+            f"대표가 원하는 쓰임(있으면 우선 반영): {p.get('hint') or '-'}\n"
+            f"영어 고정 묘사 필요: {'예' if want_desc else '아니오'}\n\n"
+            f"[바이블의 다른 항목]\n{json.dumps(info.get('others') or [], ensure_ascii=False)[:6000]}\n\n[대본]\n{scripts}")
+    text, _ = claude("claude-opus-5-5", system, user, max_tokens=4000, stage="other", note=f"바이블 항목 배치 추천: {e.get('name')}")
+    d = pick_json(text)
+    desc = (d.get("description") or "").strip()
+    if want_desc and desc and e.get("version_id"):
+        rpc("agent_bible_set_description", p_token=TOKEN, p_version=e["version_id"], p_description=desc, p_details=e.get("details") or "",
+            p_reason="대표가 소품 추가 · 설명을 보고 묘사 자동 작성")
+    if p.get("place") is False:  # 대표가 추천을 원하지 않음: 묘사만
+        return f"{e.get('name')} 묘사 {len(desc)}자"
+    nums = {int(x["number"]) for x in eps}
+    items = []
+    for x in d.get("placements") or []:
+        try:
+            ep, sc = int(x.get("ep")), int(x.get("scene"))
+        except (TypeError, ValueError):
+            continue
+        if ep in nums and sc > 0:
+            items.append({"ep": ep, "scene": sc, "reason": str(x.get("reason") or "")[:400], "how": str(x.get("how") or "")[:400],
+                          "accepted": False, "note_id": None})
+    if not items:
+        raise RuntimeError("추천할 화·씬을 찾지 못했습니다")
+    rpc("agent_bible_save_placement", p_token=TOKEN, p_entry=e["id"], p_items=items[:5])
+    notify(f"{e.get('name')} 넣을 곳 추천 {len(items[:5])}곳", "바이블 탭 카드에서 '넣기'를 누르면 그 씬 감독 메모로 들어갑니다")
+    return f"{e.get('name')} 추천 {len(items[:5])}곳"
+
+
 @task("voice_cast")
 def t_voice_cast(t):
     """시리즈 인물 전체의 목소리 설명·시험 대사를 Claude가 쓰고, 인물마다 후보 3개를 만들도록 이어서 맡긴다."""
@@ -2556,7 +2609,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기","photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
