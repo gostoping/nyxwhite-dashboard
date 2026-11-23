@@ -57,7 +57,7 @@ jobs:
                    -c "insert into public.nyx_migrations (name) values ('$n')"; then
                 ok=1; break
               fi
-              echo "  잠금 충돌로 실패, $((attempt * 10))초 뒤 다시 시도 ($attempt/5)"
+              echo "  실패(에이전트와 잠금이 겹쳤을 수 있음), $((attempt * 10))초 뒤 다시 시도 ($attempt/5)"
               sleep $((attempt * 10))
             done
             if [ "$ok" != "1" ]; then echo "::error::$n 적용 실패"; exit 1; fi

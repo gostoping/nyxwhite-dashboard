@@ -40,6 +40,12 @@ declare cols text[]; c text := 'name'; v text := quote_literal('현지화감수�
 begin
   if exists (select 1 from public.staff where name = '현지화감수자') then return; end if;
   select array_agg(column_name::text) into cols from information_schema.columns where table_schema = 'public' and table_name = 'staff';
+  -- 직원 코드에 허용 목록 규칙이 있으면 새 코드를 목록에 더한다
+  if exists (select 1 from pg_constraint where conname = 'staff_code_check' and conrelid = 'public.staff'::regclass) then
+    execute 'alter table public.staff drop constraint staff_code_check';
+    execute (select format('alter table public.staff add constraint staff_code_check check (code in (%s))', string_agg(quote_literal(x), ', '))
+               from (select distinct code as x from public.staff where code is not null union select 'localization_reviewer') t);
+  end if;
   if 'code' = any(cols) then c := c || ', code'; v := v || ', ' || quote_literal('localization_reviewer'); end if;
   if 'role_summary' = any(cols) then c := c || ', role_summary';
     v := v || ', ' || quote_literal('한국어 확정 대사를 영어·일본어·중국어로 옮기고, 자막·더빙·립싱크 결과를 검사합니다.'); end if;
