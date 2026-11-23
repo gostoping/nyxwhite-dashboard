@@ -9,7 +9,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 import json
 import os
@@ -250,6 +250,54 @@ def set_cost_outcome(ids, outcome, reason=None, cause=None):
         return 0
 
 
+# ------------------------------------------------------------------ API 키
+def secrets(*names):
+    """대표가 대시보드에 등록한 API 키를 꺼낸다. 키는 기록이나 화면에 절대 남기지 않는다."""
+    return rpc("agent_get_secrets", p_token=TOKEN, p_names=list(names)) or {}
+
+
+def http_json(url, headers, method="GET", body=None, timeout=60):
+    req = urllib.request.Request(url, data=json.dumps(body).encode() if body is not None else None, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw)
+        except Exception:
+            return e.code, {"raw": raw[:300].decode("utf-8", "replace")}
+
+
+def test_keys():
+    """키가 맞는지 비용 없이 확인한다(생성 요청을 보내지 않음)."""
+    k = secrets("anthropic_api_key", "higgsfield_key_id", "higgsfield_key_secret")
+    out = []
+    a = k.get("anthropic_api_key")
+    if not a:
+        out.append("Claude: 키 미등록")
+    else:
+        code, data = http_json("https://api.anthropic.com/v1/models?limit=20",
+                               {"x-api-key": a, "anthropic-version": "2023-06-01"})
+        if code == 200:
+            ids = [m.get("id") for m in (data or {}).get("data", [])]
+            out.append(f"Claude: 연결 정상 (모델 {len(ids)}개 확인)")
+        else:
+            msg = ((data or {}).get("error") or {}).get("message") if isinstance(data, dict) else ""
+            out.append(f"Claude: 실패 {code} {msg or ''}".strip())
+    hid, hsec = k.get("higgsfield_key_id"), k.get("higgsfield_key_secret")
+    if not (hid and hsec):
+        out.append("Higgsfield: 키 미등록")
+    else:
+        # 없는 요청 번호의 상태를 물어 인증만 확인한다: 401/403이면 키가 틀림, 그 밖이면 키는 받아들여짐
+        code, data = http_json("https://api.higgsfield.ai/requests/00000000-0000-0000-0000-000000000000/status",
+                               {"Authorization": f"Key {hid}:{hsec}", "Accept": "application/json"})
+        out.append("Higgsfield: 키가 맞지 않음 (" + str(code) + ")" if code in (401, 403)
+                   else f"Higgsfield: 인증 통과 (응답 {code})")
+    return " / ".join(out), all("실패" not in o and "맞지 않음" not in o and "미등록" not in o for o in out)
+
+
 # ------------------------------------------------------------------ 잠자기 방지
 def keep_awake():
     try:
@@ -278,6 +326,9 @@ def handle_command(cmd):
         if name == "ping":
             rpc("agent_command_done", p_token=TOKEN, p_id=cid, p_ok=True,
                 p_result=f"응답 정상 · {socket.gethostname()} · {platform.system()} {platform.release()} · v{VERSION}")
+        elif name == "test_keys":
+            msg, ok = test_keys()
+            rpc("agent_command_done", p_token=TOKEN, p_id=cid, p_ok=ok, p_result=msg)
         elif name == "restart":
             rpc("agent_command_done", p_token=TOKEN, p_id=cid, p_ok=True, p_result="재시작합니다")
             raise Restart()
