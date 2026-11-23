@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.7.0"
+VERSION = "1.8.1"
 
 import base64
 import glob
@@ -446,6 +446,13 @@ def run_job(j):
 TASKS = {}
 
 
+class Retry(Exception):
+    """지금은 할 수 없고 잠시 뒤 다시: 작업을 대기열로 돌려놓는다."""
+    def __init__(self, seconds, why):
+        super().__init__(why)
+        self.seconds, self.why = seconds, why
+
+
 def task(name):
     def wrap(fn):
         TASKS[name] = fn
@@ -635,7 +642,11 @@ CUT_SCHEMA = """{"scene_no": 1, "cut_no": 1, "code": "E01-S01-C01", "scene_headi
  "seconds": 10, "summary": "이 컷에서 일어나는 일", "dialogue": "린: (떨리며, 점점 높아지며) 대사 그대로",
  "emotion": "감정선", "expression_beats": [{"t": "0-3", "who": "린", "face": "놀람 → 입술을 깨묾"}, {"t": "3-5", "who": "린", "face": "…"}],
  "camera": "샷·앵글·움직임", "reference_names": ["린(과거)", "연습실"],
- "prompt": "Seedance에 보낼 영어 프롬프트(대사는 한국어 원문 그대로 따옴표)", "director_note": "반영한 메모·교훈"}"""
+ "prompt": "Seedance에 보낼 영어 프롬프트(대사는 한국어 원문 그대로 따옴표)", "director_note": "반영한 메모·교훈",
+ "voice_lines": [{"speaker": "린", "text": "대사 그대로(괄호 지문 빼고)", "tags": "[nervous] [whispers]", "direction": "작게 떨리며 시작 → 끝에서 목소리가 갈라지며 높아짐"}],
+ "frame_first": {"prompt": "첫 장면 사진용 영어 프롬프트: 인물 고정 묘사·의상·자세·첫 표정·장소·조명·구도"},
+ "use_end_frame": false, "frame_last": {"prompt": "끝 장면이 중요할 때만: 마지막 순간의 자세·표정·위치"},
+ "continue_prev": false}"""
 
 
 def director_system(ctx):
@@ -655,6 +666,9 @@ def director_system(ctx):
 - 소리: 대사와 현장음만. 배경음악은 넣지 않는다 → 프롬프트 끝에 "No background music, no score. Dialogue and natural ambient sound only." 를 반드시 붙인다(편집에서 음악을 따로 깐다).
 - 화면 비율 {asp}. 자막·글자를 화면에 넣지 않는다(화면 글자가 대본에 있으면 summary에만 적는다).
 - reference_names에는 사진이 있는 바이블 항목 중 이 컷에 나오는 인물(최대 3)과 장소(최대 1)만.
+- voice_lines: 대사 한 줄마다 화자·대사·감정 지시. tags는 ElevenLabs v3 영어 감정 태그(예: [nervous] [whispers] [excited] [sighs] [crying] [laughs])로, direction은 한국어로 크기·높낮이·속도 변화를 적는다.
+- frame_first: 모든 컷. 첫 0.5초의 정지 장면(얼굴·의상·배경 고정의 기준). use_end_frame은 컷 안에서 자세·위치·감정이 크게 바뀌어 끝 상태가 중요할 때만 true(일어서기·문 나가기·웃다가 울기 등). 대부분 false.
+- continue_prev: 같은 씬에서 앞 컷과 동작이 바로 이어지면 true(앞 컷 마지막 장면에서 시작).
 
 [답 형식]
 <json>{{"cuts": [{CUT_SCHEMA}]}}</json>"""
@@ -690,8 +704,8 @@ def review_cuts(ctx, ep, cuts, model):
 
 def est_cut_usd(ctx, seconds, refs):
     res = setting(ctx, "generation", "resolution", "480p")
-    model = f"seedance-2.5-{'ref' if refs else 't2v'}-{res}"
-    u = price("higgsfield", model, "per_second")
+    model = f"seedance-2.5-i2v-{res}"   # 컷 설계에서 첫 장면 사진을 만들어 사진→영상으로 만든다
+    u = price("higgsfield", model, "per_second") or price("higgsfield", f"seedance-2.5-{'ref' if refs else 't2v'}-{res}", "per_second")
     return round(u * seconds, 4) if u else None
 
 
@@ -761,6 +775,9 @@ def t_director(t):
     for sc, cs in sorted(by_scene.items()):
         n += rpc("agent_save_cuts", p_token=TOKEN, p_episode=ep, p_version=script["id"], p_scene=sc, p_cuts=cs) or 0
     total = sum(c.get("est_usd") or 0 for c in cuts)
+    if setting(ctx, "generation", "auto_prep", True):
+        for sc in sorted(by_scene):
+            rpc("agent_add_task", p_token=TOKEN, p={"kind": "prep_cut", "episode_id": ep, "scene_no": sc, "payload": {}})
     notify(f"{e.get('number')}화 컷 설계 완료", f"씬 {len(by_scene)}개 · 컷 {n}개 · 감수 수정 {len(fixes)}건\n"
            f"영상 생성 예상 ${total:.2f}. 제작 탭에서 확인하고 생성 승인을 눌러 주세요.")
     return f"씬 {len(by_scene)}개 · 컷 {n}개 설계 (감수 수정 {len(fixes)}건) · 생성 예상 ${total:.2f}"
@@ -792,8 +809,12 @@ def director_revise(t, cut_id):
     rpc("agent_update_cut", p_token=TOKEN, p_id=cut_id, p={
         "status": "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"),
         "reference_names": refs, "director_note": new.get("director_note"), "est_usd": est_cut_usd(ctx, secs, refs), "clear_fix": True,
+        "voice_lines": new.get("voice_lines") or cut.get("voice_lines") or [], "frame_first": new.get("frame_first") or {"prompt": (cut.get("frame_first") or {}).get("prompt")},
+        "frame_last": new.get("frame_last") or {}, "use_end_frame": bool(new.get("use_end_frame")), "continue_prev": bool(new.get("continue_prev")), "prep_status": "none",
         "review": {"verdict": "revised", "issues": [], "fix": "대표 요청·영상 감수 반영"}})
-    notify(f"{cut.get('code')} 수정 완료", "제작 탭에서 다시 생성 승인을 눌러 주세요")
+    if setting(ctx, "generation", "auto_prep", True):
+        rpc("agent_add_task", p_token=TOKEN, p={"kind": "prep_cut", "episode_id": ep, "scene_no": cut.get("scene_no"), "cut_id": cut_id, "payload": {"force": True}})
+    notify(f"{cut.get('code')} 수정 완료", "사진·목소리를 다시 준비한 뒤 제작 탭에서 생성 승인을 눌러 주세요")
     return f"{cut.get('code')} 프롬프트 수정"
 
 
@@ -1011,6 +1032,355 @@ def find_video_url(d):
     return None
 
 
+# ---------------- 컷 설계 ②③: 대사 미리 듣기(ElevenLabs) · 장면 사진(첫·끝) · 감수
+def audio_curve(path, step=0.25):
+    """소리를 초 단위 숫자로: 구간마다 크기(dBFS)와 높낮이(Hz). Claude는 소리를 못 들으니 이것으로 판단한다."""
+    import array
+    import math
+    r = subprocess.run([ffmpeg(), "-hide_banner", "-loglevel", "error", "-i", path, "-ac", "1", "-ar", "8000", "-f", "s16le", "-"],
+                       capture_output=True, timeout=300)
+    pcm = array.array("h", r.stdout[: len(r.stdout) // 2 * 2])
+    sr, n = 8000, int(8000 * step)
+    out = []
+    for i in range(0, max(0, len(pcm) - n), n):
+        seg = pcm[i:i + n]
+        rms = math.sqrt(sum(x * x for x in seg) / n) or 1e-9
+        db = round(20 * math.log10(rms / 32768), 1)
+        hz = None
+        if db > -40:   # 소리가 있을 때만 높낮이(자기상관)
+            w = seg[:320]
+            best, lag_best = 0.0, 0
+            e0 = sum(x * x for x in w) or 1
+            for lag in range(20, 160):      # 50~400Hz
+                c = sum(w[j] * w[j + lag] for j in range(0, len(w) - lag))
+                if c > best:
+                    best, lag_best = c, lag
+            if lag_best and best / e0 > 0.3:
+                hz = round(sr / lag_best)
+        out.append({"t": round(i / sr, 2), "db": db, "hz": hz})
+    return out
+
+
+def curve_summary(curve):
+    """감수용 요약: 1초 단위 평균 크기·높낮이와 전체 범위."""
+    if not curve:
+        return {}
+    secs = {}
+    for p in curve:
+        secs.setdefault(int(p["t"]), []).append(p)
+    rows = []
+    for s, ps in sorted(secs.items()):
+        dbs = [p["db"] for p in ps]
+        hzs = [p["hz"] for p in ps if p["hz"]]
+        rows.append({"s": s, "db": round(sum(dbs) / len(dbs), 1), "hz": round(sum(hzs) / len(hzs)) if hzs else None})
+    voiced = [p for p in curve if p["db"] > -40]
+    hz_all = [p["hz"] for p in voiced if p["hz"]]
+    return {"per_second": rows, "loud_max": max(p["db"] for p in curve), "voiced_ratio": round(len(voiced) / len(curve), 2),
+            "pitch_median": sorted(hz_all)[len(hz_all) // 2] if hz_all else None, "pitch_range": [min(hz_all), max(hz_all)] if hz_all else None}
+
+
+def parse_dialogue(dialogue):
+    out = []
+    for line in str(dialogue or "").splitlines():
+        m = re.match(r"\s*([^:：]{1,15})[:：]\s*(.+)", line)
+        if not m:
+            continue
+        spk, rest = m.group(1).strip(), m.group(2).strip()
+        direction = " ".join(re.findall(r"\(([^)]*)\)", rest))
+        text = re.sub(r"\([^)]*\)", "", rest).strip()
+        if text:
+            out.append({"speaker": spk, "text": text, "direction": direction, "tags": ""})
+    return out
+
+
+def voice_for(ctx, speaker):
+    for b in ctx.get("bible") or []:
+        if b.get("category") in ("character", "voice") and b.get("voice_id"):
+            nm = b.get("name") or ""
+            base = re.sub(r"\s*\(.*?\)\s*", "", nm)
+            if speaker == nm or speaker == base or speaker.startswith(base) or base.startswith(speaker):
+                return b["voice_id"], nm
+    return None, None
+
+
+def tts_line(voice_id, text, tags, model):
+    key = el_key()
+    body = {"text": (tags + " " if tags else "") + text, "model_id": model or "eleven_v3"}
+    req = urllib.request.Request(f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format=mp3_44100_128",
+                                 data=json.dumps(body).encode(), method="POST",
+                                 headers={"xi-api-key": key, "Content-Type": "application/json", "Accept": "audio/mpeg"})
+    try:
+        with urllib.request.urlopen(req, timeout=180) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"목소리 만들기 실패 {e.code}: {e.read()[:200]!r}") from None
+
+
+def stt_words(path, model="scribe_v1"):
+    """ElevenLabs 받아쓰기: 단어와 시간. 영상 소리 감수에 쓴다."""
+    key = el_key()
+    boundary = "----nyx" + uuid.uuid4().hex
+    with open(path, "rb") as f:
+        data = f.read()
+    def part(name, value):
+        return f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+    last = None
+    for mdl in (model, "scribe_v2", "scribe_v1"):
+        body = part("model_id", mdl) + part("language_code", "kor") + part("timestamps_granularity", "word") + \
+            (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="a.wav"\r\nContent-Type: audio/wav\r\n\r\n').encode() + data + f"\r\n--{boundary}--\r\n".encode()
+        req = urllib.request.Request("https://api.elevenlabs.io/v1/speech-to-text", data=body, method="POST",
+                                     headers={"xi-api-key": key, "Content-Type": f"multipart/form-data; boundary={boundary}"})
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r:
+                d = json.loads(r.read())
+            words = [{"w": w.get("text"), "s": round(w.get("start") or 0, 2), "e": round(w.get("end") or 0, 2)}
+                     for w in d.get("words") or [] if w.get("type", "word") == "word"]
+            return d.get("text") or "", words
+        except urllib.error.HTTPError as e:
+            last = f"{e.code}: {e.read()[:160]!r}"
+            if e.code not in (400, 404, 422):
+                break
+    raise RuntimeError(f"받아쓰기 실패 {last}")
+
+
+def hf_image(prompt, refs, aspect, model_path):
+    """Higgsfield 사진 생성(참고 사진으로 얼굴·의상·장소 고정). 경로는 설정에서 바꿀 수 있다."""
+    if not model_path:
+        raise RuntimeError("사진 모델 경로가 설정되지 않았습니다(설정 → 제작 → 사진 모델)")
+    body = {"prompt": prompt, "aspect_ratio": aspect}
+    if refs:
+        body["image_urls"] = refs[:6]
+    code, data = http_json(f"https://api.higgsfield.ai/{model_path.strip('/')}",
+                           {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json"}, "POST", body, timeout=120)
+    if code in (400, 422) and refs:
+        log(f"사진 모델이 image_urls를 받지 않음, input_images로 다시: {str(data)[:160]}")
+        body.pop("image_urls")
+        body["input_images"] = [{"type": "image_url", "image_url": u} for u in refs[:6]]
+        code, data = http_json(f"https://api.higgsfield.ai/{model_path.strip('/')}",
+                               {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json"}, "POST", body, timeout=120)
+    if code not in (200, 201, 202) or not isinstance(data, dict):
+        raise RuntimeError(f"사진 요청 실패 {code}: {str(data)[:300]}")
+    rid = data.get("request_id") or data.get("id")
+    url = find_image_url(data)
+    status_url = data.get("status_url") or f"https://api.higgsfield.ai/requests/{rid}/status"
+    deadline = time.time() + 600
+    while not url and time.time() < deadline:
+        time.sleep(4)
+        try:
+            _, st = http_json(status_url, {**hf_auth_headers(), "Accept": "application/json"}, timeout=60)
+        except Exception:
+            continue
+        s = (st or {}).get("status") if isinstance(st, dict) else None
+        if s in ("failed", "nsfw", "canceled"):
+            raise RuntimeError(f"사진 생성 {s}")
+        if s == "completed":
+            url = find_image_url(st)
+            if not url:
+                raise RuntimeError(f"사진 주소를 찾지 못함: {str(st)[:200]}")
+    if not url:
+        raise RuntimeError("사진 생성 시간 초과")
+    return url
+
+
+def find_image_url(d):
+    if isinstance(d, dict):
+        for k in ("images", "image", "output", "outputs", "result", "results", "data"):
+            if k in d:
+                u = find_image_url(d[k])
+                if u:
+                    return u
+        if isinstance(d.get("url"), str) and d["url"].startswith("http"):
+            return d["url"]
+        for v in d.values():
+            u = find_image_url(v)
+            if u:
+                return u
+    elif isinstance(d, list):
+        for x in d:
+            u = find_image_url(x)
+            if u:
+                return u
+    elif isinstance(d, str) and d.startswith("http") and re.search(r"\.(png|jpe?g|webp)(\?|$)", d, re.I):
+        return d
+    return None
+
+
+def bible_ref_urls(ctx, names, limit=4):
+    imgs = {b["name"]: b.get("images") or [] for b in (ctx.get("bible") or [])}
+    out = []
+    for n in names or []:
+        for p in imgs.get(n, [])[:1]:
+            try:
+                out.append(storage_signed_url("bible", p, 7200))
+            except Exception as ex:
+                log(f"참고 사진 주소 실패({n}): {ex}")
+    return out[:limit]
+
+
+def bible_ref_blocks(ctx, names, limit=4):
+    """감수용: 바이블 기준 사진을 Claude에게 보여 준다(작게)."""
+    blocks = []
+    for n, url in zip(names or [], bible_ref_urls(ctx, names, limit)):
+        try:
+            tmp = os.path.join(HOME, "work", f"ref_{uuid.uuid4().hex[:6]}.img")
+            fetch_to(url, tmp)
+            small = tmp + ".jpg"
+            ff("-i", tmp, "-vf", "scale=448:-2", "-q:v", "4", small)
+            with open(small, "rb") as f:
+                blocks += [{"type": "text", "text": f"[바이블 기준 사진: {n}]"},
+                           {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.b64encode(f.read()).decode()}}]
+            for p in (tmp, small):
+                os.remove(p)
+        except Exception as ex:
+            log(f"기준 사진 준비 실패({n}): {ex}")
+    return blocks
+
+
+def img_block(path, label):
+    small = path + ".s.jpg"
+    ff("-i", path, "-vf", "scale=448:-2", "-q:v", "4", small)
+    with open(small, "rb") as f:
+        b = [{"type": "text", "text": label}, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.b64encode(f.read()).decode()}}]
+    os.remove(small)
+    return b
+
+
+@task("prep_cut")
+def t_prep_cut(t):
+    """컷 설계 ②③: 승인 전 컷마다 대사 미리 듣기 + 장면 사진(첫·끝) + 영상감수자·감정감수자 사전 감수."""
+    p = t.get("payload") or {}
+    ep = t["episode_id"]
+    cuts = [rpc("agent_get_cut", p_token=TOKEN, p_id=t["cut_id"])] if t.get("cut_id") else \
+        rpc("agent_list_cuts", p_token=TOKEN, p_episode=ep, p_scene=t.get("scene_no"))
+    cuts = [c for c in cuts if c and c.get("status") in ("designed", "failed", "hold") and (p.get("force") or c.get("prep_status") in ("none", "failed", "fix"))]
+    if not cuts:
+        return "준비할 컷이 없습니다"
+    ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep, p_version=cuts[0].get("script_version_id"))
+    gen = (ctx.get("settings") or {}).get("generation") or {}
+    sid = ((ctx.get("series") or {}).get("id")) or "series"
+    enum = int((ctx.get("episode") or {}).get("number") or 0)
+    done = []
+    for c in cuts:
+        code = c.get("code") or f"S{c['scene_no']}C{c['cut_no']}"
+        rpc("agent_update_cut", p_token=TOKEN, p_id=c["id"], p={"prep_status": "preparing"})
+        base = f"{sid}/E{enum:02d}/S{int(c['scene_no']):02d}/prep/C{int(c['cut_no']):02d}_{uuid.uuid4().hex[:6]}"
+        problems = []
+        # ② 대사 미리 듣기
+        lines = c.get("voice_lines") or parse_dialogue(c.get("dialogue"))
+        for i, ln in enumerate(lines):
+            vid, vname = voice_for(ctx, ln.get("speaker") or "")
+            if not vid:
+                ln["error"] = "바이블에 이 인물의 목소리가 없습니다(바이블 → 목소리 디자인)"
+                problems.append(f"{ln.get('speaker')} 목소리 없음")
+                continue
+            progress(f"{code} 대사 {i + 1}/{len(lines)} 미리 듣기 만드는 중 ({vname})")
+            try:
+                audio = tts_line(vid, ln["text"], ln.get("tags") or "", gen.get("tts_model") or "eleven_v3")
+                local = os.path.join(HOME, "work", f"vl_{c['id']}_{i}.mp3")
+                with open(local, "wb") as f:
+                    f.write(audio)
+                curve = audio_curve(local)
+                ln["analysis"] = curve_summary(curve)
+                ln["seconds"] = round(len(curve) * 0.25, 2)
+                ln["path"] = storage_upload(f"{base}_v{i}.mp3", local, "audio/mpeg")
+                ln.pop("error", None)
+                os.remove(local)
+                log_cost("audio", "elevenlabs", gen.get("tts_model") or "eleven_v3", {"characters": len(ln["text"])},
+                         episode_id=ep, scene_no=c["scene_no"], cut_id=code, outcome="success", note="대사 미리 듣기")
+            except Exception as ex:
+                ln["error"] = str(ex)[:200]
+                problems.append(f"대사 {i + 1} 실패")
+        # ③ 장면 사진 (첫 장면, 필요하면 끝 장면)
+        frames = {}
+        aspect = gen.get("aspect_ratio", "9:16")
+        refs = bible_ref_urls(ctx, c.get("reference_names"))
+        for key, want in (("frame_first", True), ("frame_last", bool(c.get("use_end_frame")))):
+            fr = dict(c.get(key) or {})
+            if not want:
+                continue
+            fprompt = fr.get("prompt") or (c.get("prompt") or "")[:900] + (" — opening frame, still image." if key == "frame_first" else " — closing frame, still image.")
+            progress(f"{code} {'첫' if key == 'frame_first' else '끝'} 장면 사진 만드는 중")
+            try:
+                url = hf_image(fprompt + " Photorealistic film still, no text, no subtitles.", refs, aspect, gen.get("image_model"))
+                local = os.path.join(HOME, "work", f"kf_{c['id']}_{key}.img")
+                fetch_to(url, local)
+                jpg = local + ".jpg"
+                ff("-i", local, "-q:v", "2", jpg)
+                fr.update({"prompt": fprompt, "path": storage_upload(f"{base}_{key}.jpg", jpg, "image/jpeg"), "status": "ready", "error": None})
+                frames[key] = jpg
+                os.remove(local)
+                log_cost("keyframe", "higgsfield", gen.get("image_model") or "image", {"images": 1}, episode_id=ep, scene_no=c["scene_no"],
+                         cut_id=code, outcome="success", note=f"{'첫' if key == 'frame_first' else '끝'} 장면 사진")
+            except Exception as ex:
+                fr.update({"prompt": fprompt, "status": "failed", "error": str(ex)[:300]})
+                problems.append(f"{'첫' if key == 'frame_first' else '끝'} 장면 사진 실패")
+            c[key] = fr
+        # 사전 감수: 영상감수자(사진 ↔ 바이블) + 감정감수자(목소리 ↔ 감정선)
+        review = {}
+        if frames or any(ln.get("analysis") for ln in lines):
+            progress(f"{code} 영상감수자·감정감수자 사전 감수")
+            content = bible_ref_blocks(ctx, c.get("reference_names"))
+            for key, jpg in frames.items():
+                content += img_block(jpg, f"[{'첫' if key == 'frame_first' else '끝'} 장면 사진]")
+            content.append({"type": "text", "text": "[컷 설계]\n" + json.dumps({k: c.get(k) for k in (
+                "code", "seconds", "summary", "dialogue", "emotion", "expression_beats", "camera")}, ensure_ascii=False)
+                + "\n\n[대사 미리 듣기 분석: 1초마다 크기(dBFS, 0에 가까울수록 큼)·높낮이(Hz)]\n"
+                + json.dumps([{k: ln.get(k) for k in ("speaker", "text", "direction", "tags", "seconds", "analysis", "error")} for ln in lines], ensure_ascii=False)})
+            system = (guide(ctx, "영상감수자") or "") + "\n\n" + (guide(ctx, "감정감수자") or "") + f"""
+
+[시리즈 바이블]
+{bible_text(ctx)}
+
+[지금 할 일: 영상을 만들기 전 사전 감수]
+- 영상감수자: 장면 사진의 얼굴이 바이블 기준 사진과 같은 사람인가, 의상·소품·배경이 바이블·설계와 같은가, 첫 표정·자세가 감정 시작점에 맞는가, 화면 글자·왜곡이 없는가.
+- 감정감수자: 대사 미리 듣기의 크기·높낮이 흐름이 지시(direction)와 감정선대로 움직이는가(예: '점점 커짐'이면 뒤로 갈수록 dB가 올라야 함), 같은 인물 목소리 높이가 바이블·다른 대사와 비슷한가, 대사 길이가 컷 안에 들어가는가.
+- 고칠 점은 감독이 프롬프트·사진 지시·목소리 태그에 바로 옮길 수 있는 문장으로.
+[답 형식]
+<json>{{"video": {{"verdict": "pass|fix", "issues": [""], "fix_prompt": "사진 프롬프트를 이렇게"}},
+ "emotion": {{"verdict": "pass|fix", "issues": [""], "fix_tags": [{{"line": 0, "tags": "[whispers] 같은 영어 감정 태그", "direction": "한국어 지시"}}]}},
+ "summary": "대표용 한두 줄"}}</json>"""
+            try:
+                text, _ = claude(gen.get("claude_reviewer") or "claude-sonnet-5-5", system, content, max_tokens=2500, stage="keyframe_review",
+                                 episode_id=ep, scene_no=c["scene_no"], cut_code=code, note="사진·목소리 사전 감수")
+                review = pick_json(text)
+            except Exception as ex:
+                review = {"summary": f"사전 감수 실패: {ex}"}
+        # 한 번은 스스로 고친다: 감정 태그 → 목소리 다시, 사진 프롬프트 → 사진 다시 (그래도 안 되면 대표 확인)
+        fixed = []
+        if (review.get("emotion") or {}).get("verdict") == "fix" and not p.get("second_pass"):
+            for ft in review["emotion"].get("fix_tags") or []:
+                i = int(ft.get("line") or 0)
+                if 0 <= i < len(lines):
+                    lines[i]["tags"] = ft.get("tags") or lines[i].get("tags")
+                    lines[i]["direction"] = ft.get("direction") or lines[i].get("direction")
+                    fixed.append("목소리")
+        if (review.get("video") or {}).get("verdict") == "fix" and not p.get("second_pass") and review["video"].get("fix_prompt"):
+            for key in frames:
+                c[key]["prompt"] = review["video"]["fix_prompt"]
+            fixed.append("사진")
+        status = "ready"
+        if fixed:
+            status = "fix"
+        elif problems or any((review.get(k) or {}).get("verdict") == "fix" for k in ("video", "emotion")):
+            status = "fix" if p.get("second_pass") else "fix"
+        rpc("agent_update_cut", p_token=TOKEN, p_id=c["id"], p={
+            "voice_lines": lines, "frame_first": c.get("frame_first") or {}, "frame_last": c.get("frame_last") or {},
+            "prep_review": {**review, "problems": problems, "auto_fixed": fixed}, "prep_status": status})
+        for jpg in frames.values():
+            try:
+                os.remove(jpg)
+            except OSError:
+                pass
+        if fixed and not p.get("second_pass"):
+            rpc("agent_add_task", p_token=TOKEN, p={"kind": "prep_cut", "episode_id": ep, "scene_no": c["scene_no"], "cut_id": c["id"],
+                                                   "payload": {"force": True, "second_pass": True}})
+        done.append(f"{code}:{'다시 준비' if fixed else status}")
+    ready = sum(1 for d in done if d.endswith(":ready"))
+    if not t.get("cut_id") or p.get("second_pass"):
+        notify(f"{enum}화 컷 준비 {ready}/{len(done)}", "제작 탭에서 장면 사진을 보고 대사를 들어 본 뒤 생성 승인을 눌러 주세요")
+    return "컷 준비: " + ", ".join(done)
+
+
 @task("generate")
 def t_generate(t):
     cut = rpc("agent_get_cut", p_token=TOKEN, p_id=t["cut_id"])
@@ -1022,23 +1392,56 @@ def t_generate(t):
     ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep, p_version=cut.get("script_version_id"))
     gen = (ctx.get("settings") or {}).get("generation") or {}
     res = cut.get("resolution") or gen.get("resolution", "480p")
-    refs = []
-    imgs = {b["name"]: b.get("images") or [] for b in (ctx.get("bible") or [])}
-    for n in cut.get("reference_names") or []:
-        for pth in imgs.get(n, [])[:1]:
-            try:
-                refs.append(storage_signed_url("bible", pth, 7200))
-            except Exception as ex:
-                log(f"참고 사진 주소 실패({n}): {ex}")
-    refs = refs[:4]
-    route = "reference-to-video" if refs else "text-to-video"
+    refs, first_url, last_url = [], None, None
+    # 앞 컷에서 이어 시작: 통과한 앞 컷의 실제 마지막 장면을 첫 장면으로
+    if cut.get("continue_prev"):
+        try:
+            prev = next((x for x in rpc("agent_list_cuts", p_token=TOKEN, p_episode=ep, p_scene=cut["scene_no"]) or []
+                         if x["cut_no"] == cut["cut_no"] - 1 and x.get("best_take_id")), None)
+            waiting = next((x for x in rpc("agent_list_cuts", p_token=TOKEN, p_episode=ep, p_scene=cut["scene_no"]) or []
+                            if x["cut_no"] == cut["cut_no"] - 1 and not x.get("best_take_id") and x.get("status") in ("approved", "generating", "reviewing")), None)
+            if waiting and (t.get("attempts") or 1) < 3:
+                raise Retry(600, f"앞 컷 {waiting.get('code')}이 끝나면 그 마지막 장면에서 이어 시작합니다")
+            if prev:
+                ptk = rpc("agent_get_take", p_token=TOKEN, p_id=prev["best_take_id"])
+                src = take_source(prev["best_take_id"], ptk)
+                lastjpg = os.path.join(HOME, "work", f"last_{prev['id']}.jpg")
+                ff("-sseof", "-0.1", "-i", src, "-frames:v", "1", "-q:v", "2", lastjpg)
+                sid = ((ctx.get("series") or {}).get("id")) or "series"
+                pth = storage_upload(f"{sid}/chain/{prev['id']}_{uuid.uuid4().hex[:6]}.jpg", lastjpg, "image/jpeg")
+                first_url = storage_signed_url("takes", pth, 7200)
+                progress(f"{cut['code']} 앞 컷({prev.get('code')}) 마지막 장면에서 이어 시작")
+        except Retry:
+            raise
+        except Exception as ex:
+            log(f"앞 컷 이어 붙이기 실패, 첫 장면 사진 사용: {ex}")
+    if not first_url and (cut.get("frame_first") or {}).get("path"):
+        first_url = storage_signed_url("takes", cut["frame_first"]["path"], 7200)
+    if cut.get("use_end_frame") and (cut.get("frame_last") or {}).get("path"):
+        last_url = storage_signed_url("takes", cut["frame_last"]["path"], 7200)
+    if not first_url:
+        imgs = {b["name"]: b.get("images") or [] for b in (ctx.get("bible") or [])}
+        for n in cut.get("reference_names") or []:
+            for pth in imgs.get(n, [])[:1]:
+                try:
+                    refs.append(storage_signed_url("bible", pth, 7200))
+                except Exception as ex:
+                    log(f"참고 사진 주소 실패({n}): {ex}")
+        refs = refs[:4]
+    route = "image-to-video" if first_url else "reference-to-video" if refs else "text-to-video"
     body = {"prompt": cut["prompt"], "duration": int(cut["seconds"]), "resolution": res,
-            "aspect_ratio": gen.get("aspect_ratio", "9:16"), "output_format": "mp4", "generate_audio": bool(gen.get("audio", True))}
-    if refs:
+            "output_format": "mp4", "generate_audio": bool(gen.get("audio", True))}
+    if route != "image-to-video":
+        body["aspect_ratio"] = gen.get("aspect_ratio", "9:16")
+    if first_url:
+        body["image_url"] = first_url
+        if last_url:
+            body["end_image_url"] = last_url
+    elif refs:
         body["image_urls"] = refs
-    pmodel = f"seedance-2.5-{'ref' if refs else 't2v'}-{res}"
+    pmodel = f"seedance-2.5-{'i2v' if first_url else 'ref' if refs else 't2v'}-{res}"
     rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "generating"})
-    progress(f"{cut['code']} Seedance 2.5 {res} {cut['seconds']}초 생성 요청" + (f" (참고 사진 {len(refs)}장)" if refs else ""))
+    progress(f"{cut['code']} Seedance 2.5 {res} {cut['seconds']}초 생성 요청 · " + ("첫 장면 사진" + (" + 끝 장면" if last_url else "") if first_url else f"참고 사진 {len(refs)}장" if refs else "글로만"))
     code, data = http_json(f"https://api.higgsfield.ai/bytedance/seedance-2.5/{route}",
                            {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json"}, "POST", body, timeout=120)
     if code not in (200, 201, 202) or not isinstance(data, dict):
@@ -1135,7 +1538,8 @@ def queue_store(take_id, ep, cut):
 
 
 # ---------------- 영상감수자(최종감수 겸) + 평가(점수는 코드로)
-WEIGHTS = {"face_consistency": 0.2, "costume_background": 0.1, "expression_changes": 0.15, "gesture_action": 0.15, "pace": 0.1, "emotion": 0.1, "motion_quality": 0.1, "prompt_match": 0.1}
+WEIGHTS = {"face_consistency": 0.15, "costume_background": 0.1, "expression_changes": 0.12, "gesture_action": 0.12, "pace": 0.08, "emotion": 0.08,
+           "motion_quality": 0.08, "prompt_match": 0.07, "voice_emotion": 0.12, "voice_consistency": 0.08}
 
 
 def review_take(take_id, local_mp4=None):
@@ -1166,9 +1570,32 @@ def review_take(take_id, local_mp4=None):
             content.append({"type": "text", "text": f"{i}초"})
             content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.b64encode(f.read()).decode()}})
     shutil.rmtree(fdir, ignore_errors=True)
+    sound = None
+    if has_audio(src):
+        try:
+            progress(f"{cut['code']} 감정감수자가 소리를 분석하는 중(받아쓰기·크기·높낮이)")
+            wav = os.path.join(HOME, "work", f"aud_{take_id}.wav")
+            ff("-i", src, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav)
+            text_heard, words = "", []
+            try:
+                text_heard, words = stt_words(wav, setting(ctx, "generation", "stt_model", "scribe_v1"))
+                log_cost("audio", "elevenlabs", "speech-to-text", {"seconds": cut.get("seconds")}, episode_id=ep, scene_no=cut.get("scene_no"),
+                         cut_id=cut.get("code"), outcome="success", note="영상 소리 받아쓰기")
+            except Exception as ex:
+                log(f"받아쓰기 실패(크기·높낮이로만 감수): {ex}")
+            sound = {"heard_text": text_heard, "words": words[:120], "curve": curve_summary(audio_curve(wav)),
+                     "planned": [{k: ln.get(k) for k in ("speaker", "text", "direction", "tags", "analysis")} for ln in (cut.get("voice_lines") or [])]}
+            os.remove(wav)
+        except Exception as ex:
+            log(f"소리 분석 실패: {ex}")
+    if sound:
+        content.append({"type": "text", "text": "[영상 소리 분석 — 감정감수자용]\n들린 대사(받아쓰기): " + (sound["heard_text"] or "(실패)")
+                        + "\n단어별 시간: " + json.dumps(sound["words"], ensure_ascii=False)
+                        + "\n1초마다 크기(dBFS)·높낮이(Hz): " + json.dumps(sound["curve"], ensure_ascii=False)
+                        + "\n컷 설계 때 승인된 대사 미리 듣기(목표): " + json.dumps(sound["planned"], ensure_ascii=False)})
     content.append({"type": "text", "text": "[컷 설계]\n" + json.dumps({k: cut.get(k) for k in (
         'code', 'seconds', 'summary', 'dialogue', 'emotion', 'expression_beats', 'camera', 'reference_names', 'prompt')}, ensure_ascii=False)})
-    system = (guide(ctx, "영상감수자", "최종감수자") or "너는 영상감수자다.") + f"""
+    system = (guide(ctx, "영상감수자", "감정감수자", "최종감수자") or "너는 영상감수자다.") + f"""
 
 [시리즈 바이블]
 {bible_text(ctx)}
@@ -1183,15 +1610,21 @@ expression_changes(2~3초마다 감정에 맞게 표정이 바뀌는가), gestur
 pace(움직임·카메라 속도가 감정 템포에 맞는가: 너무 빠르거나 느리지 않은가), emotion(화면 전체가 이 컷의 감정선을 전달하는가),
 motion_quality(손·몸 왜곡, 깜빡임, AI 티), prompt_match(설계대로인가).
 치명 문제(얼굴이 다른 사람, 의상이 바뀜, 심한 왜곡, 화면 글자)가 있으면 verdict는 fail.
+감정감수자는 '소리 분석'이 있으면 함께 판정한다(소리 분석이 없으면 이 두 항목은 빼고 답한다):
+voice_emotion(들린 대사의 크기·높낮이 흐름이 감정선·목표 미리 듣기와 맞는가, 대사가 대본과 같은가, 배경음악이 섞이지 않았는가),
+voice_consistency(같은 인물 목소리 높이·음색이 목표 미리 듣기·다른 컷과 비슷한가 — 높낮이 중앙값이 크게 다르면 감점).
+대사가 대본과 다르게 들리거나 다른 사람 목소리면 치명.
 
 [답 형식]
-<json>{{"verdict": "pass|fail", "scores": {{"face_consistency": 0, "costume_background": 0, "expression_changes": 0, "gesture_action": 0, "pace": 0, "emotion": 0, "motion_quality": 0, "prompt_match": 0}},
+<json>{{"verdict": "pass|fail", "scores": {{"face_consistency": 0, "costume_background": 0, "expression_changes": 0, "gesture_action": 0, "pace": 0, "emotion": 0, "motion_quality": 0, "prompt_match": 0, "voice_emotion": 0, "voice_consistency": 0}},
  "issues": [{{"t": "3초", "problem": "", "fix": ""}}], "fix_for_director": "다음 생성에서 고칠 프롬프트 방향",
  "summary": "대표용 한두 줄",
  "lessons": [{{"fingerprint": "", "category": "face|costume|location|prop|continuity|expression|emotion_tone|dialogue|camera|motion|prompt|other", "problem": "", "rule": "", "bad_example": "", "severity": "보통|치명"}}]}}</json>"""
     text, rcost = claude(model, system, content, max_tokens=4000, stage="video_review", episode_id=ep,
-                         scene_no=cut.get("scene_no"), cut_code=cut.get("code"), note="영상 감수(장면 사진)")
+                         scene_no=cut.get("scene_no"), cut_code=cut.get("code"), note="영상·소리 감수")
     rv = pick_json(text)
+    if sound:
+        rv["sound"] = {"heard_text": sound["heard_text"], "curve": sound["curve"]}
     sc = rv.get("scores") or {}
     got = {k: w for k, w in WEIGHTS.items() if sc.get(k) is not None}
     score = round(sum(float(sc[k]) * w for k, w in got.items()) / (sum(got.values()) or 1), 1)
@@ -1781,6 +2214,9 @@ def run_task(tk):
         result = TASKS[kind](tk)
         rpc("agent_task_update", p_token=TOKEN, p_id=tk["id"], p_status="done", p_progress="완료", p_result=str(result or "완료"))
         log(f"제작 작업 완료: {kind} · {result}")
+    except Retry as r:
+        log(f"잠시 뒤 다시: {kind}: {r.why}")
+        rpc("agent_task_update", p_token=TOKEN, p_id=tk["id"], p_status="queued", p_progress=r.why[:200], p_retry_in=int(r.seconds))
     except Exception as e:
         log(f"제작 작업 실패: {kind}: {e}\n{traceback.format_exc()}")
         retry = 120 if (tk.get("attempts") or 1) < 2 and kind in ("store", "video_review") else None
@@ -1791,7 +2227,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
