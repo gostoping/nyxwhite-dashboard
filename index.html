@@ -658,7 +658,7 @@ const V_STATUS = { draft: '초안', confirmed: '확정(현재)', superseded: '�
 const DIR_STATUS = { received: '접수', assigned: '배정', in_progress: '처리 중', done: '완료', rejected: '반려', cancelled: '취소' };
 const G_STATUS = { proposed: '수정안', active: '적용 중', retired: '이전', rejected: '반려' };
 const CHANGE = { added: '추가', modified: '수정', removed: '삭제', unchanged: '변화 없음' };
-const BIBLE_CAT = { character: '캐릭터', location: '장소', prop: '소품', style: '스타일·톤', voice: '목소리' };
+const BIBLE_CAT = { character: '캐릭터', location: '장소', prop: '소품', style: '스타일·톤', voice: '목소리', glossary: '용어집' };
 const BUCKET = 'bible';
 
 const S = { sb: null, user: null, device: null, tab: 'home', seriesId: null, episodeId: null, versionId: null };
@@ -1186,7 +1186,8 @@ async function viewGuide(main) {
       <tr><td>캐릭터</td><td>정면·측면·전신 기준 사진, 고정 묘사 문장, 화별 의상, 바뀌면 안 되는 특징</td></tr>
       <tr><td>장소·소품</td><td>기준 이미지와 고정 묘사 문장</td></tr>
       <tr><td>스타일·톤</td><td>색감, 조명, 카메라 원칙</td></tr>
-      <tr><td>목소리</td><td>음성 도구에서 고정한 목소리 ID와 샘플 음성</td></tr>
+      <tr><td>목소리</td><td>음성 도구에서 고정한 목소리 ID와 샘플 음성. 더빙용 언어별 목소리도 여기에</td></tr>
+      <tr><td>용어집</td><td>인물 이름·호칭·고유명사의 언어별 표기(예: "오빠"를 영어·일본어·중국어로 어떻게 옮길지)</td></tr>
       <tr><td>연속성 기록</td><td>화가 끝났을 때 인물·소품의 상태(헤어, 의상, 상처, 들고 있는 물건). 다음 화 감독이 먼저 읽고 시작합니다.</td></tr>
     </table>
     <ul>
@@ -1258,7 +1259,7 @@ async function viewGuide(main) {
       <dt>비용</dt><dd>모든 지출 장부, 순수 제작비와 실패(누수) 비용 구분, 화별 견적서와 배포 시점 최종 견적서, 매출 대비 비용, 만들기 전 사전 견적, 단가표</dd>
       <dt>지시</dt><dd>대표님 지시 보내기. 지시마다 보낸 사람 → 받는 직원, 접수 → 배정 → 처리 중 → 완료 단계와 결과가 표시되고, 단계가 바뀔 때마다 종 모양 알림이 옵니다.</dd>
       <dt>기록</dt><dd>모든 활동. 기기별·주체별·내용으로 찾아볼 수 있습니다.</dd>
-      <dt>설정</dt><dd>이 기기 이름, 2단계 인증, 로그아웃</dd>
+      <dt>설정</dt><dd>이 기기 이름, 2단계 인증, 다국어(언어별 자막·더빙·립싱크 등급), 로그아웃</dd>
     </dl>
   </div>
 
@@ -1268,6 +1269,7 @@ async function viewGuide(main) {
       <dt>시리즈 바이블</dt><dd>인물·장소·소품·톤·목소리의 기준 원본. 모든 화가 이걸 보고 만들어집니다.</dd>
       <dt>연속성 기록</dt><dd>화가 끝났을 때 인물·소품의 상태. 다음 화가 이어지도록 감독이 먼저 읽습니다.</dd>
       <dt>업스케일</dt><dd>720p처럼 작게 만든 영상을 AI로 선명하게 키우는 작업. 생성 비용을 줄일 때 씁니다.</dd>
+      <dt>마스터·현지화</dt><dd>영상은 한국어 마스터로 한 번만 만들고, 영어는 립싱크까지, 일본어·중국어는 더빙으로 옮깁니다. 언어마다 영상을 새로 만들지 않아 얼굴 일관성과 비용을 지킵니다.</dd>
       <dt>편집 준비 폴더</dt><dd>맥북이 만들어 두는 폴더. 순서대로 정리된 영상, 자막, 음량을 맞춘 대사·음악이 들어 있어 쌤컷에서 바로 불러옵니다.</dd>
       <dt>초안</dt><dd>저장만 한 대본. 고칠 수 있고 번호가 없습니다.</dd>
       <dt>확정</dt><dd>대표가 "이걸로 만든다"고 정한 대본. 번호가 붙고 내용은 바꿀 수 없습니다. 고치려면 새 초안을 만듭니다.</dd>
@@ -2089,7 +2091,7 @@ async function renderAgentList(newest) {
 const STAGE = { script_revision: '대본 수정·변경 요약', cut_card: '컷 카드·프롬프트(감독)', prompt_review: '프롬프트 감수',
   keyframe: '키프레임 생성', keyframe_review: '키프레임 검사', video: '영상 생성(Higgsfield)', video_review: '영상 검사',
   final_review: '최종 감수', evaluate: '채점(평가자)', upscale: '업스케일(맥)', subtitle: '자막(맥)', audio: '음량·음성(맥)',
-  edit: '편집(쌤컷)', directive: '지시 처리', fixed: '고정비(구독 등)', other: '기타' };
+  edit: '편집(쌤컷)', directive: '지시 처리', localization: '현지화(자막·더빙·립싱크)', fixed: '고정비(구독 등)', other: '기타' };
 const OUTCOME = { success: ['순수 제작비', 'good'], failed: ['실패(누수)', 'bad'], pending: ['진행 중', 'accent'], hold: ['보류', 'warn'] };
 const CAUSE = { director: '감독(프롬프트)', tool: '영상 도구 한계', script: '대본', standard: '기준', other: '기타' };
 const UNIT = { per_second: '초당', per_1m_input_tokens: '입력 100만 토큰당', per_1m_output_tokens: '출력 100만 토큰당', per_image: '이미지 1장당', per_call: '1회당', per_month: '월' };
@@ -2380,6 +2382,34 @@ async function viewLog(main) {
   await load();
 }
 
+// 다국어: 언어별 등급
+const TIER = { master: ['마스터(원본)', 'good'], lipsync: ['립싱크까지', 'accent'], dub: ['더빙', 'accent'], subtitle: ['자막만', ''], off: ['사용 안 함', ''] };
+async function renderLanguages() {
+  const box = $('#langBox'); if (!box) return;
+  const langs = await q(S.sb.from('languages').select('*').order('sort_order'));
+  box.innerHTML = `<b>다국어</b>
+    <p class="quiet" style="margin:4px 0 8px">영상은 한국어 마스터로 한 번만 만들고, 다른 언어는 등급에 따라 자막·더빙·립싱크로 옮깁니다.
+    립싱크는 얼굴이 크게 나오는 대사 컷 위주로 합니다. 이름·호칭 표기는 바이블의 '용어집'에 정해 두세요.</p>
+    <table>${langs.map(l => `<tr><td><b>${esc(l.name)}</b><br><span class="quiet">${esc(l.code)}</span></td>
+      <td><select data-lt="${esc(l.code)}" style="width:auto" ${l.tier === 'master' ? 'disabled' : ''}>${Object.entries(TIER).filter(([k]) => k !== 'master' || l.tier === 'master').map(([k, [t]]) =>
+        `<option value="${k}" ${k === l.tier ? 'selected' : ''}>${t}</option>`).join('')}</select></td>
+      <td class="quiet">${esc(l.note || '')}</td></tr>`).join('')}</table>
+    <div class="row" style="margin-top:10px;align-items:flex-end">
+      <div style="width:110px"><label>언어 코드</label><input id="lCode" placeholder="th"></div>
+      <div style="width:150px"><label>이름</label><input id="lName" placeholder="태국어"></div>
+      <div style="width:150px"><label>등급</label><select id="lTier">${Object.entries(TIER).filter(([k]) => k !== 'master').map(([k, [t]]) => `<option value="${k}" ${k === 'subtitle' ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+      <button class="btn" id="lAdd">언어 추가</button></div>`;
+  box.querySelectorAll('[data-lt]').forEach(sel => sel.onchange = guard(async () => {
+    await q(S.sb.from('languages').update({ tier: sel.value, updated_at: new Date().toISOString() }).eq('code', sel.dataset.lt));
+    toast('언어 등급을 바꿨습니다');
+  }));
+  $('#lAdd').onclick = guard(async () => {
+    const code = $('#lCode').value.trim(), name = $('#lName').value.trim(); if (!code || !name) return toast('코드와 이름을 넣어 주세요');
+    await q(S.sb.from('languages').insert({ code, name, tier: $('#lTier').value, sort_order: langs.length + 1 }));
+    toast('언어를 추가했습니다'); renderLanguages();
+  });
+}
+
 // ------------------------------------------------------------------
 // 설정: 기기, 2단계 인증, 로그아웃
 // ------------------------------------------------------------------
@@ -2399,8 +2429,10 @@ async function viewSettings(main) {
     <p class="quiet">이 화면이 열려 있지만 다른 창을 보고 있을 때도 알림 창을 띄웁니다. 화면을 완전히 닫았을 때의 휴대폰 알림은 다음 단계(푸시 알림)에서 추가됩니다.</p>
     <div class="row">${'Notification' in window ? (Notification.permission === 'granted' ? pill('허용됨', 'good')
       : `<button class="btn" id="perm">알림 허용하기</button>`) : '<span class="quiet">이 브라우저는 알림을 지원하지 않습니다.</span>'}</div></div>
+  <div class="card" id="langBox"><b>다국어</b><p class="quiet">불러오는 중…</p></div>
   <div class="card"><b>계정</b><p class="quiet">${esc(S.user.email)}</p>
     <div class="row"><button class="btn" id="out">로그아웃</button><button class="btn small" id="cfg" style="margin-left:auto">서버 설정 초기화</button></div></div>`;
+  renderLanguages().catch(e => { const b = $('#langBox'); if (b) b.innerHTML = `<b>다국어</b><div class="msg err">${esc(errText(e))}</div>`; });
   if ($('#perm')) $('#perm').onclick = async () => {
     const r = await Notification.requestPermission();
     toast(r === 'granted' ? '알림을 허용했습니다' : '알림이 허용되지 않았습니다. 브라우저 설정에서 바꿀 수 있습니다'); go('settings');
