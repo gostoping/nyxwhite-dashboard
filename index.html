@@ -1,0 +1,1902 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111318">
+<title>NYX WHITE DIRECTOR</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --ink: #17181c; --quiet: #6b6f78; --line: #e3e3df;
+    --accent: #2b59c3; --accent-soft: #e8eefb; --good: #1f8a4c; --warn: #b7791f; --bad: #c53030;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111318; --panel: #1a1d23; --ink: #ecedf0; --quiet: #9aa0aa; --line: #2c3038;
+            --accent: #7aa2ff; --accent-soft: #1f2a44; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", system-ui, sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 12px;
+    padding: 12px 18px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header .brand { font-weight: 700; letter-spacing: .04em; }
+  header .who { margin-left: auto; color: var(--quiet); font-size: 13px; text-align: right; }
+  nav.tabs { display: flex; gap: 4px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; }
+  nav.tabs button { border: 0; background: none; color: var(--quiet); padding: 8px 12px; border-radius: 8px; font: inherit; white-space: nowrap; cursor: pointer; }
+  nav.tabs button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  main { max-width: 1100px; margin: 0 auto; padding: 18px 14px 90px; }
+  h2 { font-size: 19px; margin: 6px 0 14px; }
+  h3 { font-size: 16px; margin: 18px 0 8px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 12px; }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+  .stat .n { font-size: 26px; font-weight: 700; }
+  .stat .l { color: var(--quiet); font-size: 13px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .quiet { color: var(--quiet); font-size: 13px; }
+  .guide svg { width: 100%; max-width: 560px; height: auto; display: block; margin: 6px auto 4px; }
+  .guide p, .guide li { line-height: 1.7; }
+  .guide .who { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
+  .guide .staffcard h3 { margin-top: 0; }
+  .guide dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; }
+  .guide dt { font-weight: 600; }
+  .guide dd { margin: 0; color: var(--quiet); }
+  .guide td:first-child, .guide th:first-child, .guide .nw { white-space: nowrap; }
+  .pill { white-space: nowrap; display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; border: 1px solid var(--line); color: var(--quiet); }
+  .pill.good { color: var(--good); border-color: var(--good); }
+  .pill.warn { color: var(--warn); border-color: var(--warn); }
+  .pill.bad { color: var(--bad); border-color: var(--bad); }
+  .pill.accent { color: var(--accent); border-color: var(--accent); }
+  button.btn, a.btn { display: inline-block; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+    padding: 8px 14px; border-radius: 8px; font: inherit; cursor: pointer; text-decoration: none; }
+  button.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.btn.danger { color: var(--bad); border-color: var(--bad); }
+  button.btn.small { padding: 4px 10px; font-size: 13px; }
+  button.btn:disabled { opacity: .5; cursor: default; }
+  input, select, textarea { width: 100%; font: inherit; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; }
+  textarea { min-height: 220px; font-family: ui-monospace, "D2Coding", Menlo, Consolas, monospace; font-size: 14px; }
+  label { display: block; margin: 10px 0 4px; font-size: 13px; color: var(--quiet); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--quiet); font-weight: 500; font-size: 13px; }
+  tr.click { cursor: pointer; }
+  tr.click:hover td { background: var(--accent-soft); }
+  pre.doc { white-space: pre-wrap; word-break: break-word; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 12px; max-height: 480px; overflow: auto; font-size: 14px; margin: 0; }
+  .diff { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; border: 1px solid var(--line); border-radius: 8px; overflow: auto; max-height: 560px; }
+  .diff div { padding: 1px 10px; white-space: pre-wrap; word-break: break-word; }
+  .diff .add { background: rgba(31,138,76,.14); }
+  .diff .del { background: rgba(197,48,48,.14); text-decoration: line-through; }
+  .msg { padding: 10px 14px; border-radius: 8px; margin: 10px 0; }
+  .msg.err { background: rgba(197,48,48,.12); color: var(--bad); }
+  .msg.ok { background: rgba(31,138,76,.12); color: var(--good); }
+  .center { max-width: 420px; margin: 8vh auto; }
+  .split { display: grid; gap: 12px; grid-template-columns: 300px 1fr; }
+  @media (max-width: 760px) {
+    .split { grid-template-columns: 1fr; }
+    nav.tabs { position: fixed; bottom: 0; left: 0; right: 0; border-top: 1px solid var(--line); border-bottom: 0;
+      justify-content: space-around; padding-bottom: calc(8px + env(safe-area-inset-bottom)); z-index: 6; }
+    nav.tabs button { padding: 8px 3px; font-size: 12px; }
+    .hide-m { display: none; }
+  }
+  .bell { position: relative; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 8px;
+    padding: 6px 9px; cursor: pointer; line-height: 0; }
+  .bell .badge { position: absolute; top: -6px; right: -6px; background: var(--bad); color: #fff; border-radius: 99px;
+    font-size: 11px; line-height: 16px; min-width: 16px; padding: 0 4px; text-align: center; }
+  .npanel { position: fixed; top: 58px; right: 10px; width: min(380px, calc(100vw - 20px)); max-height: 70vh; overflow: auto; z-index: 15;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 8px 30px rgba(0,0,0,.18); }
+  .npanel .it { padding: 10px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .npanel .it.unread { background: var(--accent-soft); }
+  .npanel .it b { font-size: 14px; }
+  .lvl-success { color: var(--good); } .lvl-warning { color: var(--warn); } .lvl-urgent { color: var(--bad); }
+  .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin: 12px 0 4px; }
+  .step { position: relative; padding: 0 6px 0 0; }
+  .step .dot { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line); background: var(--panel);
+    display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: var(--quiet); position: relative; z-index: 1; }
+  .step::before { content: ''; position: absolute; top: 10px; left: 22px; right: 0; height: 2px; background: var(--line); }
+  .step:last-child::before { display: none; }
+  .step.done .dot { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .step.done::before { background: var(--accent); }
+  .step.now .dot { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+  .step.fail .dot { background: var(--bad); border-color: var(--bad); color: #fff; }
+  .step .t { font-weight: 600; font-size: 13.5px; margin-top: 6px; }
+  .step .d { font-size: 12px; color: var(--quiet); line-height: 1.45; word-break: keep-all; overflow-wrap: anywhere; }
+  .route { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 14px; }
+  .route .node { border: 1px solid var(--line); border-radius: 8px; padding: 3px 10px; background: var(--bg); }
+  .route .arrow { color: var(--quiet); }
+  .dcard.focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .toast { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
+    padding: 10px 16px; border-radius: 8px; z-index: 20; font-size: 14px; }
+  .bgrid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+  .bgrid .card { margin-bottom: 0; }
+  .thumbs { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+  .thumbs img { width: 76px; height: 76px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); display: block; }
+  .keep { position: relative; display: inline-block; margin: 0; }
+  .keep input { position: absolute; top: 3px; left: 3px; width: auto; }
+  .bdesc { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 14px; white-space: pre-wrap; margin-top: 8px; }
+  audio { width: 100%; height: 36px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div id="app"><div class="center quiet">불러오는 중…</div></div>
+
+<!-- 에이전트 프로그램 원본: "저장소에 배포" 버튼이 이 내용을 Supabase 저장소(agent)에 올립니다. -->
+<!--AGENT_FILES_START-->
+<script type="text/plain" id="f-agent.py">
+#!/usr/bin/env python3
+"""NYX WHITE DIRECTOR 에이전트
+
+Supabase(중앙 기록 창고)만 바라보고 일합니다.
+- 15초마다 "살아 있음" 신호를 보내고, 대시보드에서 누른 명령(연결 시험·재시작·업데이트)을 받아 처리합니다.
+- 일시정지가 아니면 작업 대기열에서 이 에이전트가 할 수 있는 일을 가져가 처리합니다.
+- 컴퓨터가 잠들지 않게 막습니다(화면은 꺼져도 됨).
+표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
+"""
+VERSION = "1.0.0"
+
+import json
+import os
+import platform
+import socket
+import subprocess
+import sys
+import time
+import traceback
+import urllib.error
+import urllib.request
+from datetime import datetime
+
+try:  # 콘솔 문자 코드가 달라도 기록 때문에 멈추지 않게
+    sys.stdout.reconfigure(errors="replace")
+except Exception:
+    pass
+
+HOME = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(HOME, "config.json"), encoding="utf-8-sig") as f:
+    CFG = json.load(f)
+URL = CFG["url"].rstrip("/")
+KEY = CFG["key"]
+TOKEN = CFG["token"]
+PLATFORM = "mac" if sys.platform == "darwin" else "windows" if os.name == "nt" else "linux"
+BEAT_SECONDS = int(CFG.get("beat_seconds", 15))
+LOG_PATH = os.path.join(HOME, "agent.log")
+STARTED = datetime.now().isoformat(timespec="seconds")
+
+# 이 에이전트가 처리할 수 있는 작업 종류. 기능이 늘면 여기에 추가됩니다.
+HANDLERS = {}
+
+
+def job(name):
+    def wrap(fn):
+        HANDLERS[name] = fn
+        return fn
+    return wrap
+
+
+# ------------------------------------------------------------------ 기록
+def log(msg):
+    line = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}"
+    print(line, flush=True)
+    try:
+        if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 2_000_000:
+            os.replace(LOG_PATH, LOG_PATH + ".old")
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+# ------------------------------------------------------------------ 창고 연결
+DEVICE_ID = None
+
+
+def rpc(fn, **args):
+    headers = {"apikey": KEY, "Content-Type": "application/json", "Accept": "application/json"}
+    if not KEY.startswith("sb_"):  # 예전 형식(anon JWT) 키는 Authorization에도 넣는다
+        headers["Authorization"] = "Bearer " + KEY
+    if DEVICE_ID:
+        headers["x-device-id"] = DEVICE_ID
+    req = urllib.request.Request(f"{URL}/rest/v1/rpc/{fn}", data=json.dumps(args).encode("utf-8"),
+                                 method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            body = r.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")
+        try:
+            detail = json.loads(detail).get("message", detail)
+        except Exception:
+            pass
+        raise RuntimeError(f"{fn}: {detail}") from None
+    return json.loads(body) if body else None
+
+
+def download(path):
+    with urllib.request.urlopen(f"{URL}/storage/v1/object/public/agent/{path}?t={int(time.time())}", timeout=60) as r:
+        return r.read()
+
+
+# ------------------------------------------------------------------ 잠자기 방지
+def keep_awake():
+    try:
+        if PLATFORM == "mac":
+            # -i 유휴 잠자기, -m 디스크, -s 전원 연결 시 시스템 잠자기를 막는다. 화면(-d)은 꺼져도 됨.
+            subprocess.Popen(["caffeinate", "-ims", "-w", str(os.getpid())],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif PLATFORM == "windows":
+            import ctypes
+            ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+        log("잠자기 방지 켜짐 (화면은 꺼질 수 있음)")
+    except Exception as e:
+        log(f"잠자기 방지 실패: {e}")
+
+
+# ------------------------------------------------------------------ 대시보드 명령
+class Restart(Exception):
+    pass
+
+
+def handle_command(cmd):
+    cid, name = cmd["id"], cmd["command"]
+    log(f"명령 받음: {name}")
+    try:
+        if name == "ping":
+            rpc("agent_command_done", p_token=TOKEN, p_id=cid, p_ok=True,
+                p_result=f"응답 정상 · {socket.gethostname()} · {platform.system()} {platform.release()} · v{VERSION}")
+        elif name == "restart":
+            rpc("agent_command_done", p_token=TOKEN, p_id=cid, p_ok=True, p_result="재시작합니다")
+            raise Restart()
+        elif name == "update":
+            code = download("agent.py")
+            text = code.decode("utf-8")
+            compile(text, "agent.py", "exec")  # 문법이 깨진 파일이면 여기서 멈추고 기존 버전 유지
+            new_ver = next((l.split("=")[1].strip().strip('"') for l in text.splitlines() if l.startswith("VERSION =")), "?")
+            if new_ver == VERSION:
+                rpc("agent_command_done", p_token=TOKEN, p_id=cid, p_ok=True, p_result=f"이미 최신 버전입니다 (v{VERSION})")
+                return
+            tmp = os.path.join(HOME, "agent.py.new")
+            with open(tmp, "wb") as f:
+                f.write(code)
+            os.replace(tmp, os.path.join(HOME, "agent.py"))
+            rpc("agent_command_done", p_token=TOKEN, p_id=cid, p_ok=True, p_result=f"v{VERSION} → v{new_ver} 업데이트, 재시작합니다")
+            raise Restart()
+        else:
+            rpc("agent_command_done", p_token=TOKEN, p_id=cid, p_ok=False, p_result=f"모르는 명령: {name}")
+    except Restart:
+        raise
+    except Exception as e:
+        log(f"명령 실패: {name}: {e}")
+        rpc("agent_command_done", p_token=TOKEN, p_id=cid, p_ok=False, p_result=str(e)[:500])
+
+
+# ------------------------------------------------------------------ 작업
+@job("ping")
+def do_ping(j):
+    return f"연결 시험 완료 ({socket.gethostname()})"
+
+
+def run_job(j):
+    jid, jtype = j["id"], j["type"]
+    log(f"작업 시작: {jtype} ({jid})")
+    try:
+        HANDLERS[jtype](j)
+        rpc("agent_finish_job", p_token=TOKEN, p_job=jid, p_ok=True, p_error=None)
+        log(f"작업 완료: {jtype}")
+    except Exception as e:
+        log(f"작업 실패: {jtype}: {e}\n{traceback.format_exc()}")
+        rpc("agent_finish_job", p_token=TOKEN, p_job=jid, p_ok=False, p_error=str(e)[:1000])
+
+
+# ------------------------------------------------------------------ 본체
+def main():
+    global DEVICE_ID
+    log(f"NYX 에이전트 v{VERSION} 시작 ({PLATFORM}, {socket.gethostname()})")
+    keep_awake()
+    last_error, paused = None, False
+    info = {"hostname": socket.gethostname(), "os": f"{platform.system()} {platform.release()}",
+            "python": platform.python_version(), "started_at": STARTED, "jobs": sorted(HANDLERS)}
+    while True:
+        busy = False
+        try:
+            hb = rpc("agent_heartbeat", p_token=TOKEN, p_platform=PLATFORM, p_version=VERSION,
+                     p_state="error" if last_error else ("paused" if paused else "idle"),
+                     p_current_job=None, p_last_error=last_error, p_info=info)
+            DEVICE_ID, paused = hb.get("device_id"), bool(hb.get("paused"))
+            last_error = None
+            for c in hb.get("commands") or []:
+                handle_command(c)
+            if not paused:
+                j = rpc("agent_claim_job", p_token=TOKEN, p_types=sorted(HANDLERS))
+                if j and j.get("id"):
+                    busy = True
+                    run_job(j)
+        except Restart:
+            log("재시작")
+            sys.exit(0)  # 자동 시작 장치(맥 launchd / Windows 실행기)가 다시 켭니다
+        except Exception as e:
+            last_error = str(e)[:500]
+            log(f"오류: {last_error}")
+            if "invalid agent token" in last_error:
+                log("토큰이 맞지 않습니다. 대시보드에서 토큰을 다시 발급하고 설치 명령을 다시 실행하세요.")
+                time.sleep(300)
+                continue
+        if not busy:
+            time.sleep(BEAT_SECONDS)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        log("사용자가 중지함")
+</script>
+<script type="text/plain" id="f-install.sh">
+#!/bin/bash
+# NYX WHITE DIRECTOR 에이전트 설치 (맥)
+# 대시보드 → 에이전트 탭에서 복사한 한 줄 명령으로 실행됩니다. 관리자 비밀번호는 필요 없습니다.
+#   curl -fsSL <저장소>/install.sh | bash -s -- <URL> <KEY> <TOKEN>
+set -euo pipefail
+
+URL="${1:?Project URL이 빠졌습니다}"
+KEY="${2:?공개용 키가 빠졌습니다}"
+TOKEN="${3:?에이전트 토큰이 빠졌습니다}"
+URL="${URL%/}"
+DIR="$HOME/NYX/agent"
+LABEL="com.nyxwhite.agent"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+
+echo "▶ NYX 에이전트 설치를 시작합니다 ($DIR)"
+mkdir -p "$DIR" "$HOME/Library/LaunchAgents"
+
+# 1) 실행 도구(uv): 파이썬을 관리자 권한 없이 설치·실행
+UV="$(command -v uv 2>/dev/null || true)"
+if [ -z "$UV" ] && [ -x "$HOME/.local/bin/uv" ]; then UV="$HOME/.local/bin/uv"; fi
+if [ -z "$UV" ]; then
+  echo "▶ 실행 도구(uv)를 설치합니다"
+  curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh >/dev/null
+  UV="$HOME/.local/bin/uv"
+fi
+echo "▶ 파이썬 준비"
+"$UV" python install 3.12 >/dev/null
+
+# 2) 에이전트 프로그램과 설정
+echo "▶ 에이전트 프로그램 내려받기"
+curl -fsSL "$URL/storage/v1/object/public/agent/agent.py?t=$(date +%s)" -o "$DIR/agent.py"
+cat > "$DIR/config.json" <<EOF
+{"url": "$URL", "key": "$KEY", "token": "$TOKEN"}
+EOF
+chmod 600 "$DIR/config.json"
+
+# 3) 로그인하면 자동 시작, 꺼지면 자동 재시작
+cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$UV</string><string>run</string><string>--python</string><string>3.12</string>
+    <string>--no-project</string><string>$DIR/agent.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>$DIR</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>$DIR/agent.out.log</string>
+  <key>StandardErrorPath</key><string>$DIR/agent.out.log</string>
+</dict>
+</plist>
+EOF
+launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$PLIST"
+
+echo ""
+echo "✅ 설치 완료. 1분 안에 대시보드 에이전트 탭에서 '온라인'으로 바뀝니다."
+echo "   맥북은 전원 어댑터를 연결하고 덮개를 열어 두세요(덮으면 잠듭니다)."
+echo "   기록 파일: $DIR/agent.log"
+</script>
+<script type="text/plain" id="f-install.ps1">
+# NYX WHITE DIRECTOR 에이전트 설치 (Windows)
+# 대시보드 → 에이전트 탭에서 복사한 한 줄 명령을 PowerShell에 붙여 넣으면 실행됩니다. 관리자 권한은 필요 없습니다.
+$ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$URL = $env:NYX_URL; $KEY = $env:NYX_KEY; $TOKEN = $env:NYX_TOKEN
+if (-not $URL -or -not $KEY -or -not $TOKEN) { throw '설치 정보가 빠졌습니다. 대시보드에서 설치 명령을 다시 복사하세요.' }
+$URL = $URL.TrimEnd('/')
+$Dir = Join-Path $env:USERPROFILE 'NYX\agent'
+New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+Write-Host "NYX 에이전트 설치를 시작합니다 ($Dir)"
+
+# 0) 이미 돌고 있는 에이전트가 있으면 멈춤
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -and $_.CommandLine -like '*NYX\agent*' -and $_.ProcessId -ne $PID } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+# 1) 실행 도구(uv): 파이썬을 관리자 권한 없이 설치·실행
+$uv = (Get-Command uv -ErrorAction SilentlyContinue).Source
+if (-not $uv) { $uv = Join-Path $env:USERPROFILE '.local\bin\uv.exe' }
+if (-not (Test-Path $uv)) {
+  Write-Host '실행 도구(uv)를 설치합니다'
+  $env:UV_NO_MODIFY_PATH = '1'
+  Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
+}
+Write-Host '파이썬 준비'
+& $uv python install 3.12 | Out-Null
+
+# 2) 에이전트 프로그램과 설정
+Write-Host '에이전트 프로그램 내려받기'
+Invoke-WebRequest "$URL/storage/v1/object/public/agent/agent.py?t=$([DateTimeOffset]::Now.ToUnixTimeSeconds())" -OutFile (Join-Path $Dir 'agent.py') -UseBasicParsing
+@{ url = $URL; key = $KEY; token = $TOKEN } | ConvertTo-Json | Set-Content -Path (Join-Path $Dir 'config.json') -Encoding UTF8
+
+# 3) 꺼지면 다시 켜는 실행기 + 로그인하면 자동 시작(창 없이)
+$runner = Join-Path $Dir 'runner.ps1'
+@"
+Set-Location '$Dir'
+`$env:PYTHONIOENCODING = 'utf-8'
+while (`$true) {
+  & '$uv' run --python 3.12 --no-project '$Dir\agent.py' *>> '$Dir\agent.out.log'
+  Start-Sleep -Seconds 10
+}
+"@ | Set-Content -Path $runner -Encoding UTF8
+$vbs = Join-Path ([Environment]::GetFolderPath('Startup')) 'NYX-agent.vbs'
+"CreateObject(""Wscript.Shell"").Run ""powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """"$runner"""""", 0, False" |
+  Set-Content -Path $vbs -Encoding Unicode
+
+# 4) 전원 연결 시 절전·최대 절전 끄기 (화면 끄기는 그대로)
+try { powercfg /change standby-timeout-ac 0 | Out-Null; powercfg /change hibernate-timeout-ac 0 | Out-Null } catch {}
+
+Start-Process wscript.exe -ArgumentList "`"$vbs`""
+Write-Host ''
+Write-Host '설치 완료. 1분 안에 대시보드 에이전트 탭에서 온라인으로 바뀝니다.'
+Write-Host "기록 파일: $Dir\agent.log"
+Write-Host '참고: Windows 업데이트의 사용 시간을 지정해 두면 마음대로 재부팅하지 않습니다.'
+</script>
+<!--AGENT_FILES_END-->
+
+<script type="module">
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+
+// ------------------------------------------------------------------
+// 설정
+// ------------------------------------------------------------------
+const DEFAULT_URL = 'https://fqjorcstghuiyjsirysv.supabase.co';
+const LS = { cfg: 'nix.cfg', device: 'nix.device' };
+const TABS = [
+  ['home', '홈'], ['guide', '안내'], ['scripts', '대본'], ['bible', '바이블'], ['staff', '직원'], ['directives', '지시'], ['agents', '에이전트'], ['log', '기록'], ['settings', '설정'],
+];
+const EP_STATUS = { writing: '집필', ready: '준비', in_production: '제작 중', review: '검토', approved: '승인', editing: '편집', done: '완료', on_hold: '보류' };
+const V_STATUS = { draft: '초안', confirmed: '확정(현재)', superseded: '이전 확정본' };
+const DIR_STATUS = { received: '접수', assigned: '배정', in_progress: '처리 중', done: '완료', rejected: '반려', cancelled: '취소' };
+const G_STATUS = { proposed: '수정안', active: '적용 중', retired: '이전', rejected: '반려' };
+const CHANGE = { added: '추가', modified: '수정', removed: '삭제', unchanged: '변화 없음' };
+const BIBLE_CAT = { character: '캐릭터', location: '장소', prop: '소품', style: '스타일·톤', voice: '목소리' };
+const BUCKET = 'bible';
+
+const S = { sb: null, user: null, device: null, tab: 'home', seriesId: null, episodeId: null, versionId: null };
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = t => t ? new Date(t).toLocaleString('ko-KR', { year: '2-digit', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-';
+const loadJSON = k => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch { return null; } };
+const saveJSON = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+
+function toast(text) {
+  const t = document.createElement('div'); t.className = 'toast'; t.textContent = text;
+  document.body.appendChild(t); setTimeout(() => t.remove(), 2600);
+}
+function errText(e) {
+  const m = e?.message || String(e);
+  if (/row-level security/i.test(m)) return '권한이 없습니다. 대표 계정으로 로그인했는지 확인하세요.';
+  if (/Failed to fetch/i.test(m)) return '서버에 연결할 수 없습니다. 인터넷 연결을 확인하세요.';
+  if (/Could not find the (table|function)|schema cache|does not exist|Bucket not found/i.test(m))
+    return '필요한 표가 아직 없습니다. Supabase SQL Editor에서 nyx_bible.sql(바이블 추가 스크립트)을 실행했는지 확인하세요.';
+  if (/duplicate key/i.test(m)) return '같은 이름이 이미 있습니다.';
+  return m;
+}
+async function q(promise) {
+  const { data, error } = await promise;
+  if (error) throw error;
+  return data;
+}
+function guard(fn) {
+  return async (...a) => { try { await fn(...a); } catch (e) { console.error(e); toast('오류: ' + errText(e)); } };
+}
+
+// 서버 연결은 하나만 만든다(여러 개를 만들면 로그인 처리가 서로 기다리며 멈출 수 있음).
+// 기기 표시(x-device-id)는 요청할 때마다 붙인다.
+function makeClient(cfg) {
+  const withDevice = (input, init = {}) => {
+    const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+    const dev = loadJSON(LS.device);
+    if (dev?.id) headers.set('x-device-id', dev.id);
+    return fetch(input, { ...init, headers });
+  };
+  return createClient(cfg.url, cfg.key, {
+    global: { fetch: withDevice },
+    auth: { persistSession: true, autoRefreshToken: true, storageKey: 'nix.auth' },
+  });
+}
+function resetClient() { S.sb = null; }
+
+// ------------------------------------------------------------------
+// 시작: 설정 → 로그인 → 2단계 인증 → 대표 확인 → 기기 등록
+// ------------------------------------------------------------------
+async function boot() {
+  const cfg = loadJSON(LS.cfg);
+  if (!cfg?.url || !cfg?.key) return renderSetup();
+  const dev = loadJSON(LS.device);
+  if (!S.sb) S.sb = makeClient(cfg);
+  const { data: { session } } = await S.sb.auth.getSession();
+  if (!session) return renderLogin();
+  S.user = session.user;
+
+  const aal = await S.sb.auth.mfa.getAuthenticatorAssuranceLevel();
+  if (aal.data && aal.data.nextLevel === 'aal2' && aal.data.currentLevel !== 'aal2') return renderMfaChallenge();
+
+  const member = await q(S.sb.from('app_members').select('role,label').eq('user_id', S.user.id).maybeSingle());
+  if (!member || member.role !== 'owner') return renderNotOwner();
+
+  if (dev?.id) {
+    const found = await q(S.sb.from('devices').select('id,name,kind').eq('id', dev.id).maybeSingle());
+    if (found) { S.device = found; return renderShell(); }
+  }
+  renderDeviceSetup();
+}
+
+function renderSetup() {
+  $('#app').innerHTML = `
+  <div class="center card">
+    <h2>NYX WHITE DIRECTOR 첫 설정</h2>
+    <p class="quiet">Supabase 대시보드 → Project Settings → API Keys에서 <b>공개용 키</b>(publishable 또는 anon)를 복사해 넣으세요.
+    secret / service_role 키는 넣지 마세요.</p>
+    <label>Project URL</label><input id="u" value="${esc(DEFAULT_URL)}">
+    <label>공개용 키</label><input id="k" placeholder="sb_publishable_… 또는 eyJ…">
+    <div id="m"></div>
+    <div class="row" style="margin-top:14px"><button class="btn primary" id="go">저장</button></div>
+  </div>`;
+  $('#go').onclick = () => {
+    const url = $('#u').value.trim().replace(/\/+$/, ''), key = $('#k').value.trim();
+    if (!/^https:\/\/.+\.supabase\.co$/.test(url)) return $('#m').innerHTML = '<div class="msg err">URL 형식이 맞지 않습니다.</div>';
+    if (key.length < 20) return $('#m').innerHTML = '<div class="msg err">키를 확인하세요.</div>';
+    if (/service_role|sb_secret_/.test(key) || /"role":"service_role"/.test(atobSafe(key.split('.')[1] || ''))) {
+      return $('#m').innerHTML = '<div class="msg err">이건 비밀 키입니다. 공개용 키(publishable/anon)를 넣으세요.</div>';
+    }
+    saveJSON(LS.cfg, { url, key }); boot();
+  };
+}
+function atobSafe(s) { try { return atob(s.replace(/-/g, '+').replace(/_/g, '/')); } catch { return ''; } }
+
+function renderLogin() {
+  $('#app').innerHTML = `
+  <div class="center card">
+    <h2>대표 로그인</h2>
+    <label>이메일</label><input id="e" type="email" autocomplete="username">
+    <label>비밀번호</label><input id="p" type="password" autocomplete="current-password">
+    <div id="m"></div>
+    <div class="row" style="margin-top:14px"><button class="btn primary" id="go">로그인</button>
+      <button class="btn small" id="reset" style="margin-left:auto">서버 설정 바꾸기</button></div>
+  </div>`;
+  const go = async () => {
+    const btn = $('#go'); if (btn.disabled) return;
+    btn.disabled = true; btn.textContent = '로그인 중…'; $('#m').innerHTML = '';
+    try {
+      const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('TIMEOUT')), 20000));
+      const { error } = await Promise.race([
+        S.sb.auth.signInWithPassword({ email: $('#e').value.trim(), password: $('#p').value }), timeout]);
+      if (error) {
+        const m = error.message || '';
+        const text = /Invalid login credentials/i.test(m) ? '이메일 또는 비밀번호가 틀립니다'
+          : /Email not confirmed/i.test(m) ? '이메일 인증이 안 된 계정입니다. Supabase에서 계정을 만들 때 Auto Confirm을 체크했는지 확인하세요'
+          : /Invalid API key|No API key/i.test(m) ? '공개용 키가 맞지 않습니다. "서버 설정 바꾸기"로 키를 다시 넣으세요'
+          : m;
+        $('#m').innerHTML = `<div class="msg err">로그인 실패: ${esc(text)}</div>`;
+        return;
+      }
+      await boot();
+    } catch (e) {
+      console.error(e);
+      $('#m').innerHTML = `<div class="msg err">${e.message === 'TIMEOUT'
+        ? '서버 응답이 없습니다. 인터넷 연결과 Project URL을 확인하세요.' : esc(errText(e))}</div>`;
+    } finally {
+      const b = $('#go'); if (b) { b.disabled = false; b.textContent = '로그인'; }
+    }
+  };
+  $('#go').onclick = go;
+  $('#p').onkeydown = e => { if (e.key === 'Enter') go(); };
+  $('#reset').onclick = () => { localStorage.removeItem(LS.cfg); resetClient(); boot(); };
+}
+
+async function renderMfaChallenge() {
+  $('#app').innerHTML = `
+  <div class="center card">
+    <h2>2단계 인증</h2>
+    <p class="quiet">인증 앱에 표시된 6자리 숫자를 입력하세요.</p>
+    <input id="c" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+    <div id="m"></div>
+    <div class="row" style="margin-top:14px"><button class="btn primary" id="go">확인</button>
+      <button class="btn small" id="out" style="margin-left:auto">로그아웃</button></div>
+  </div>`;
+  $('#out').onclick = async () => { await S.sb.auth.signOut(); boot(); };
+  $('#go').onclick = guard(async () => {
+    const factors = await S.sb.auth.mfa.listFactors();
+    const f = factors.data?.totp?.find(x => x.status === 'verified');
+    if (!f) return $('#m').innerHTML = '<div class="msg err">등록된 인증 앱이 없습니다.</div>';
+    const { error } = await S.sb.auth.mfa.challengeAndVerify({ factorId: f.id, code: $('#c').value.trim() });
+    if (error) return $('#m').innerHTML = '<div class="msg err">숫자가 맞지 않습니다.</div>';
+    boot();
+  });
+}
+
+function renderNotOwner() {
+  $('#app').innerHTML = `
+  <div class="center card">
+    <h2>대표 계정이 아닙니다</h2>
+    <p class="quiet">이 계정(${esc(S.user?.email)})은 대표로 등록되어 있지 않습니다. Supabase SQL Editor에서 대표 등록 스크립트를 실행했는지 확인하세요.</p>
+    <button class="btn" id="out">로그아웃</button>
+  </div>`;
+  $('#out').onclick = async () => { await S.sb.auth.signOut(); boot(); };
+}
+
+function guessKind() {
+  const ua = navigator.userAgent;
+  if (/Android|iPhone|iPad/i.test(ua)) return 'phone';
+  if (/Macintosh/i.test(ua)) return 'mac_browser';
+  return 'pc_browser';
+}
+function renderDeviceSetup() {
+  const kind = guessKind();
+  const suggested = { phone: '대표 휴대폰', mac_browser: '맥북', pc_browser: 'Windows 본부 PC' }[kind];
+  $('#app').innerHTML = `
+  <div class="center card">
+    <h2>이 기기 등록</h2>
+    <p class="quiet">모든 기록에 "어느 기기에서 했는지"가 남습니다. 이 기기의 이름을 정해 주세요. 기기마다 한 번만 하면 됩니다.</p>
+    <label>기기 이름</label><input id="n" value="${esc(suggested)}">
+    <label>종류</label>
+    <select id="k">
+      <option value="phone" ${kind === 'phone' ? 'selected' : ''}>휴대폰</option>
+      <option value="pc_browser" ${kind === 'pc_browser' ? 'selected' : ''}>Windows PC (브라우저)</option>
+      <option value="mac_browser" ${kind === 'mac_browser' ? 'selected' : ''}>맥북 (브라우저)</option>
+      <option value="other">기타</option>
+    </select>
+    <div id="m"></div>
+    <div id="existing"></div>
+    <div class="row" style="margin-top:14px"><button class="btn primary" id="go">등록</button></div>
+  </div>`;
+  q(S.sb.from('devices').select('id,name,kind').eq('is_agent', false).order('created_at')).then(list => {
+    if (!list.length) return;
+    $('#existing').innerHTML = `<label>이미 등록한 기기라면 선택</label>` + list.map(d =>
+      `<button class="btn small" data-id="${esc(d.id)}" style="margin:0 6px 6px 0">${esc(d.name)}</button>`).join('');
+    $('#existing').querySelectorAll('button').forEach(b => b.onclick = () => useDevice(list.find(d => d.id === b.dataset.id)));
+  }).catch(() => {});
+  $('#go').onclick = guard(async () => {
+    const name = $('#n').value.trim();
+    if (!name) return;
+    const row = await q(S.sb.from('devices').insert({ name, kind: $('#k').value, is_agent: false }).select('id,name,kind').single());
+    useDevice(row);
+  });
+}
+function useDevice(d) {
+  saveJSON(LS.device, { id: d.id, name: d.name });
+  location.reload();
+}
+
+// ------------------------------------------------------------------
+// 화면 틀
+// ------------------------------------------------------------------
+function renderShell() {
+  $('#app').innerHTML = `
+  <header><span class="brand">NYX WHITE DIRECTOR</span>
+    <span class="who">${esc(S.user.email)}<br><span class="hide-m">기기: </span>${esc(S.device.name)}</span>
+    <button class="bell" id="bell" aria-label="알림"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><span class="badge" id="badge" hidden></span></button></header>
+  <nav class="tabs">${TABS.map(([k, l]) => `<button data-t="${k}">${l}</button>`).join('')}</nav>
+  <main id="main"></main><div id="npanel"></div>`;
+  document.querySelectorAll('nav.tabs button').forEach(b => b.onclick = () => go(b.dataset.t));
+  $('#bell').onclick = toggleNotifPanel;
+  const fromHash = location.hash.slice(1);
+  go(TABS.some(t => t[0] === fromHash) ? fromHash : 'home');
+  startNotifications();
+}
+
+// ------------------------------------------------------------------
+// 알림: 화면 위 종 모양, 실시간 수신, 브라우저 알림
+// ------------------------------------------------------------------
+async function refreshBadge() {
+  const { count } = await S.sb.from('notifications').select('id', { count: 'exact', head: true }).is('read_at', null);
+  const b = $('#badge'); if (!b) return;
+  b.hidden = !count; b.textContent = count > 99 ? '99+' : String(count || '');
+}
+function showSystemNotification(n) {
+  try {
+    if ('Notification' in window && Notification.permission === 'granted' && document.visibilityState !== 'visible') {
+      const sn = new Notification('NYX · ' + n.title, { body: n.body || '', tag: n.id });
+      sn.onclick = () => { window.focus(); openNotification(n); sn.close(); };
+    }
+  } catch {}
+}
+function startNotifications() {
+  refreshBadge().catch(() => {});
+  if (S.notifTimer) clearInterval(S.notifTimer);
+  S.notifTimer = setInterval(() => refreshBadge().catch(() => {}), 60000);
+  try {
+    if (S.notifChannel) S.sb.removeChannel(S.notifChannel);
+    S.notifChannel = S.sb.channel('nyx-notifications')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'notifications' }, ({ new: n }) => {
+        toast(n.title + ' — ' + (n.body || ''));
+        showSystemNotification(n);
+        refreshBadge().catch(() => {});
+        // 지시를 쓰는 중이면 화면을 다시 그리지 않는다(쓰던 글이 지워지지 않도록)
+        const typing = $('#dtxt')?.value.trim() || ['TEXTAREA', 'INPUT'].includes(document.activeElement?.tagName);
+        if (S.tab === 'directives' && n.directive_id && !typing) go('directives');
+        if ($('#npanel').innerHTML) renderNotifPanel();
+      })
+      .subscribe();
+  } catch (e) { console.warn('실시간 알림 연결 실패, 1분마다 확인합니다', e); }
+}
+function stopNotifications() {
+  if (S.notifTimer) clearInterval(S.notifTimer);
+  S.notifTimer = null;
+  try { if (S.notifChannel) S.sb.removeChannel(S.notifChannel); } catch {}
+  S.notifChannel = null;
+}
+async function signOutAll() { stopNotifications(); await S.sb.auth.signOut(); }
+async function renderNotifPanel() {
+  const list = await q(S.sb.from('notifications').select('*').order('created_at', { ascending: false }).limit(40));
+  $('#npanel').innerHTML = `<div class="npanel">
+    <div class="row" style="padding:10px 14px;border-bottom:1px solid var(--line)"><b>알림</b>
+      <button class="btn small" id="readAll" style="margin-left:auto">모두 읽음</button></div>
+    ${list.length ? list.map(n => `<div class="it ${n.read_at ? '' : 'unread'}" data-n="${esc(n.id)}">
+      <b class="lvl-${esc(n.level)}">${esc(n.title)}</b> <span class="quiet">${fmt(n.created_at)}</span>
+      <div style="font-size:13.5px">${esc(n.body || '')}</div></div>`).join('')
+      : '<div class="it quiet">알림이 없습니다.</div>'}</div>`;
+  $('#readAll').onclick = guard(async () => {
+    await q(S.sb.from('notifications').update({ read_at: new Date().toISOString() }).is('read_at', null));
+    refreshBadge(); renderNotifPanel();
+  });
+  $('#npanel').querySelectorAll('[data-n]').forEach(el => el.onclick = () => openNotification(list.find(n => n.id === el.dataset.n)));
+}
+function toggleNotifPanel() {
+  if ($('#npanel').innerHTML) { $('#npanel').innerHTML = ''; return; }
+  renderNotifPanel().catch(e => toast('오류: ' + errText(e)));
+}
+async function openNotification(n) {
+  $('#npanel').innerHTML = '';
+  if (!n.read_at) { await S.sb.from('notifications').update({ read_at: new Date().toISOString() }).eq('id', n.id); refreshBadge(); }
+  if (n.directive_id) S.focusDirective = n.directive_id;
+  go(n.link_tab || 'home');
+}
+function go(tab) {
+  S.tab = tab; history.replaceState(null, '', '#' + tab);
+  document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('on', b.dataset.t === tab));
+  const main = $('#main'); main.innerHTML = '<p class="quiet">불러오는 중…</p>';
+  ({ home: viewHome, guide: viewGuide, scripts: viewScripts, bible: viewBible, staff: viewStaff, directives: viewDirectives, agents: viewAgents, log: viewLog, settings: viewSettings }[tab])(main)
+    .catch(e => { console.error(e); main.innerHTML = `<div class="msg err">${esc(errText(e))}</div>`; });
+}
+const pill = (text, kind = '') => `<span class="pill ${kind}">${esc(text)}</span>`;
+
+// ------------------------------------------------------------------
+// 홈
+// ------------------------------------------------------------------
+async function viewHome(main) {
+  const [agents, staff, directives, jobs, activity, episodes] = await Promise.all([
+    q(S.sb.from('v_agents').select('*')),
+    q(S.sb.from('v_staff').select('name,pending_proposals')),
+    q(S.sb.from('directives').select('id').in('status', ['received', 'in_progress'])),
+    q(S.sb.from('jobs').select('status,type,error,updated_at').in('status', ['queued', 'running', 'failed', 'on_hold']).order('updated_at', { ascending: false }).limit(200)),
+    q(S.sb.from('v_activity').select('*').limit(12)),
+    q(S.sb.from('episodes').select('id,status')),
+  ]);
+  // 바이블 표가 아직 없어도 홈은 열리도록 실패하면 0으로 둔다
+  const bibleProps = await S.sb.from('bible_versions').select('id', { count: 'exact', head: true }).eq('status', 'proposed')
+    .then(r => r.count || 0, () => 0);
+  const count = s => jobs.filter(j => j.status === s).length;
+  const proposals = staff.reduce((a, s) => a + Number(s.pending_proposals || 0), 0);
+  const failed = jobs.filter(j => j.status === 'failed').slice(0, 5);
+  main.innerHTML = `
+  <h2>현황</h2>
+  <div class="grid">
+    <div class="card stat"><div class="n">${episodes.length}</div><div class="l">등록된 화</div></div>
+    <div class="card stat"><div class="n">${count('running')} / ${count('queued')}</div><div class="l">실행 중 / 대기 작업</div></div>
+    <div class="card stat"><div class="n">${directives.length}</div><div class="l">처리 중인 대표 지시</div></div>
+    <div class="card stat"><div class="n" style="color:${proposals ? 'var(--warn)' : 'inherit'}">${proposals}</div><div class="l">검토할 지침 수정안</div></div>
+    <div class="card stat" id="bstat" style="cursor:pointer"><div class="n" style="color:${bibleProps ? 'var(--warn)' : 'inherit'}">${bibleProps}</div><div class="l">검토할 바이블 수정안</div></div>
+  </div>
+  <h3>에이전트</h3>
+  <div class="card">${agents.length ? `<table><tr><th>기기</th><th>상태</th><th>현재 작업</th><th>마지막 통신</th></tr>${agents.map(a => `
+    <tr><td>${esc(a.name)}</td><td>${a.alive ? pill('온라인', 'good') : pill('오프라인', 'bad')}</td>
+    <td>${esc(a.current_job || '-')}</td><td class="quiet">${fmt(a.last_seen_at)}</td></tr>`).join('')}</table>`
+    : '<p class="quiet">아직 등록된 에이전트가 없습니다. Windows 에이전트를 설치하면 여기에 표시됩니다.</p>'}</div>
+  ${failed.length ? `<h3>최근 실패한 작업</h3><div class="card"><table>${failed.map(j => `
+    <tr><td>${esc(JOB_NAME[j.type] || j.type)}</td><td class="quiet">${esc(j.error || '')}</td><td class="quiet">${fmt(j.updated_at)}</td></tr>`).join('')}</table></div>` : ''}
+  <h3>최근 활동</h3>
+  <div class="card">${activityTable(activity)}</div>
+  <div class="row"><button class="btn" id="more">활동 기록 전체 보기</button></div>`;
+  $('#more').onclick = () => go('log');
+  $('#bstat').onclick = () => go('bible');
+}
+function human(text) {
+  let t = String(text ?? '');
+  for (const [k, v] of Object.entries(JOB_NAME)) t = t.split(k).join(v);
+  const W = { queued: '대기', running: '실행 중', done: '완료', failed: '실패', cancelled: '취소', on_hold: '보류',
+    offline: '꺼짐', online: '켜짐', busy: '작업 중', error: '오류', proposed: '수정안', active: '적용', retired: '이전', rejected: '반려' };
+  return t.replace(/\b(queued|running|done|failed|cancelled|on_hold|offline|online|busy|error|proposed|active|retired|rejected)\b/g, m => W[m]);
+}
+function activityTable(rows) {
+  if (!rows.length) return '<p class="quiet">기록이 없습니다.</p>';
+  return `<table><tr><th>시각</th><th>누가</th><th>기기</th><th>내용</th></tr>${rows.map(r => `
+    <tr><td class="quiet" style="white-space:nowrap">${fmt(r.occurred_at)}</td><td>${esc(r.actor)}</td>
+    <td>${esc(r.device)}</td><td>${esc(human(r.summary))}</td></tr>`).join('')}</table>`;
+}
+
+// ------------------------------------------------------------------
+// 안내: 비개발자용 설명과 그림
+// ------------------------------------------------------------------
+const SC = { 대표: '#2b59c3', 감독: '#8e44ad', 대본감수자: '#16a085', 영상감수자: '#d35400', 최종감수자: '#c0392b', 평가자: '#b7950b', 외부: '#7f8c8d' };
+
+function svgSystem() {
+  const T = (x, y, s, o = {}) => `<text x="${x}" y="${y}" text-anchor="${o.a || 'middle'}" font-size="${o.fs || 13}" font-weight="${o.b ? 700 : 400}" fill="${o.c || 'var(--ink)'}">${s}</text>`;
+  const drawer = (x, y, t, s) => `<rect x="${x}" y="${y}" width="158" height="44" rx="8" fill="var(--bg)" stroke="var(--line)"/>
+    ${T(x + 79, y + 19, t, { fs: 13.5, b: 1 })}${T(x + 79, y + 35, s, { fs: 11.5, c: 'var(--quiet)' })}`;
+  return `<svg viewBox="0 0 400 690" role="img" aria-label="Supabase를 중심으로 기기들이 연결되는 구조">
+  <defs><marker id="ga" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--quiet)"/></marker></defs>
+  <rect x="20" y="8" width="360" height="78" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+  ${T(200, 36, '대표의 휴대폰 · PC = 결재판', { fs: 15, b: 1 })}
+  ${T(200, 58, '대본 초벌·지시를 넣고, 알림이 오면', { c: 'var(--quiet)' })}${T(200, 76, '열어서 확인하고 승인', { c: 'var(--quiet)' })}
+  <line x1="200" y1="88" x2="200" y2="125" stroke="var(--quiet)" stroke-width="1.5" marker-start="url(#ga)" marker-end="url(#ga)"/>
+  ${T(212, 111, '읽고 쓰기 · 알림 (로그인 필요)', { a: 'start', fs: 12, c: 'var(--quiet)' })}
+  <rect x="20" y="128" width="360" height="274" rx="12" fill="var(--panel)" stroke="var(--accent)" stroke-width="2.5"/>
+  ${T(200, 154, 'Supabase = 중앙 기록 창고', { fs: 15.5, b: 1, c: 'var(--accent)' })}
+  ${T(200, 174, '모든 기기가 여기만 보고 일합니다', { fs: 12.5, c: 'var(--quiet)' })}
+  ${drawer(36, 188, '대본·버전', '화·씬·변경 요약')}${drawer(206, 188, '시리즈 바이블', '인물·장소·목소리 기준')}
+  ${drawer(36, 240, 'AI 직원 지침', '버전·수정안')}${drawer(206, 240, '대표 지시', '원문·요약·결과')}
+  ${drawer(36, 292, '작업 대기열', '해야 할 일 목록')}${drawer(206, 292, '감수·점수·비용', '직원 보고서')}
+  ${drawer(36, 344, '연속성 기록', '화가 끝난 상태')}${drawer(206, 344, '활동 기록', '누가·언제·어느 기기')}
+  <line x1="106" y1="404" x2="106" y2="441" stroke="var(--quiet)" stroke-width="1.5" marker-start="url(#ga)" marker-end="url(#ga)"/>
+  <line x1="294" y1="404" x2="294" y2="441" stroke="var(--quiet)" stroke-width="1.5" marker-start="url(#ga)" marker-end="url(#ga)"/>
+  ${T(200, 427, '할 일 가져가기 · 결과 보고', { fs: 12, c: 'var(--quiet)' })}
+  <rect x="20" y="444" width="172" height="96" rx="10" fill="none" stroke="var(--quiet)" stroke-dasharray="5 4"/>
+  ${T(106, 468, 'Windows 에이전트 (집)', { fs: 13.5, b: 1 })}${T(106, 488, '제작 본부: AI 직원 5명', { fs: 12 })}
+  ${T(106, 506, '영상 생성: Kling·힉스필드', { fs: 11.5, c: 'var(--quiet)' })}${T(106, 528, '준비 중', { fs: 11.5, c: 'var(--warn)' })}
+  <rect x="208" y="444" width="172" height="96" rx="10" fill="none" stroke="var(--quiet)" stroke-dasharray="5 4"/>
+  ${T(294, 468, '맥북 에이전트 (회사)', { fs: 13.5, b: 1 })}${T(294, 488, '후반 작업실', { fs: 12 })}
+  ${T(294, 506, '정리·자막·음량·업스케일', { fs: 11.5, c: 'var(--quiet)' })}${T(294, 528, '준비 중', { fs: 11.5, c: 'var(--warn)' })}
+  <line x1="106" y1="542" x2="106" y2="577" stroke="var(--quiet)" stroke-width="1.5" marker-end="url(#ga)"/>
+  <line x1="294" y1="577" x2="294" y2="542" stroke="var(--quiet)" stroke-width="1.5" marker-end="url(#ga)"/>
+  ${T(118, 564, '합격 영상 넣기', { a: 'start', fs: 11.5, c: 'var(--quiet)' })}${T(282, 564, '자동으로 내려받기', { a: 'end', fs: 11.5, c: 'var(--quiet)' })}
+  <rect x="20" y="580" width="360" height="58" rx="10" fill="none" stroke="var(--quiet)" stroke-dasharray="5 4"/>
+  ${T(200, 604, '구글 드라이브 공유 폴더', { fs: 14, b: 1 })}${T(200, 624, '큰 영상 파일만 오갑니다 · 쌤컷에서 바로 열기', { fs: 12, c: 'var(--quiet)' })}
+  ${T(110, 668, '점선 = 아직 연결 전', { fs: 12, c: 'var(--quiet)' })}${T(290, 668, '실선 = 지금 작동', { fs: 12, c: 'var(--quiet)' })}
+  </svg>`;
+}
+
+function svgPipeline() {
+  const steps = [
+    ['대본 확정', '대표', '대표'], ['씬별 프롬프트 작성', '감독', '감독'], ['프롬프트 감수', '대본감수자', '대본감수자'],
+    ['키프레임 이미지 생성', '감독 지시로 자동', '감독'], ['키프레임 검사', '영상감수자', '영상감수자'], ['영상 생성', 'Kling·힉스필드 (등급별 해상도)', '외부'],
+    ['영상 검사 (동시 진행)', '영상감수자 + 최종감수자', '최종감수자'], ['채점·판정', '평가자', '평가자'], ['휴대폰 승인', '대표', '대표'], ['편집·완성', '맥북이 준비 → 대표가 쌤컷에서 편집', '외부'],
+  ];
+  const y = i => 8 + i * 54, yc = i => y(i) + 20;
+  const box = ([t, o, c], i) => `<rect x="64" y="${y(i)}" width="260" height="40" rx="8" fill="var(--panel)" stroke="var(--line)"/>
+    <rect x="64" y="${y(i)}" width="8" height="40" rx="3" fill="${SC[c]}"/>
+    <text x="82" y="${y(i) + 17}" font-size="14" font-weight="700" fill="var(--ink)">${i + 1}. ${t}</text>
+    <text x="82" y="${y(i) + 33}" font-size="12" fill="${SC[c]}">${o}</text>`;
+  const arrow = i => `<line x1="194" y1="${y(i) + 40}" x2="194" y2="${y(i + 1) - 1}" stroke="var(--quiet)" stroke-width="1.3" marker-end="url(#gb)"/>`;
+  const loop = (from, to, l1, l2) => `<path d="M64 ${yc(from)}H40V${yc(to)}H62" fill="none" stroke="var(--warn)" stroke-width="1.5" marker-end="url(#gw)"/>
+    <text x="332" y="${(yc(from) + yc(to)) / 2 - 2}" font-size="11.5" fill="var(--warn)">${l1}</text>
+    <text x="332" y="${(yc(from) + yc(to)) / 2 + 13}" font-size="11.5" fill="var(--warn)">${l2}</text>`;
+  return `<svg viewBox="0 0 410 548" role="img" aria-label="씬 하나가 만들어지는 10단계">
+  <defs><marker id="gb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--quiet)"/></marker>
+  <marker id="gw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--warn)"/></marker></defs>
+  ${steps.slice(0, -1).map((_, i) => arrow(i)).join('')}
+  ${loop(2, 1, '반려 시', '최대 3회')}${loop(4, 3, '불합격 시', '최대 2회')}${loop(7, 5, '미달 시', '재생성 1회')}
+  ${steps.map(box).join('')}
+  </svg>`;
+}
+
+async function viewGuide(main) {
+  const chip = k => `<span class="who" style="background:${SC[k]}"></span>`;
+  const staffCards = [
+    ['감독', '확정된 대본을 씬으로 나누고, 씬마다 이미지·영상을 만들 "주문서"(프롬프트)를 씁니다.',
+      '대본을 고치지 않습니다. 인물·의상·장소는 캐릭터 바이블에 적힌 표현만 씁니다.', '씬별 프롬프트, 씬 등급 제안(주요/일반/연결 컷)'],
+    ['대본감수자', '감독의 주문서가 대본 내용을 빠짐없이 담았는지, 인물 묘사가 바이블과 같은지 검사합니다.',
+      '주문서를 직접 고치지 않고 고칠 점만 적어 감독에게 돌려보냅니다(최대 3번).', '점수, 빠진 내용, 원인, 수정 제안'],
+    ['영상감수자', '영상을 만들기 전 대표 이미지(키프레임)와 완성 영상에서 얼굴·의상·배경이 일정한지 봅니다.',
+      '대본 내용 대조는 하지 않습니다(최종감수자 담당). 움직임·립싱크가 애매하면 "대표 확인 필요"로 표시합니다.', '문제 장면 위치(씬·시간·화면), 점수, 원인'],
+    ['최종감수자', '완성 영상에서 대본에 적힌 일이 실제로 일어났는지 대본·주문서·영상을 맞대어 봅니다.',
+      '화면 일관성은 보지 않습니다. 영상감수자와 동시에 일합니다.', '누락된 내용과 그 누락이 어느 단계에서 생겼는지'],
+    ['평가자', '감수자 보고를 모아 최종 점수를 매기고 합격·재생성·보류를 결정해 대표에게 알립니다.',
+      '지침을 직접 바꾸지 않습니다. 같은 문제가 반복되면 "지침 수정안"만 올립니다.', '최종 점수, 핵심 원인, 화 단위 요약 알림, 지침 수정안'],
+  ];
+  main.innerHTML = `<div class="guide">
+  <h2>NYX WHITE DIRECTOR 안내</h2>
+  <p class="quiet">이 시스템이 어떻게 움직이는지, 누가 무엇을 하는지를 설명합니다. 처음이라면 위에서부터 차례로 읽어 보세요.</p>
+
+  <div class="card">
+    <h3 style="margin-top:0">1. 전체 구조 한눈에 보기</h3>
+    <p>모든 기기는 서로 직접 연결되지 않습니다. <b>Supabase라는 중앙 기록 창고 하나</b>를 같이 봅니다.
+    대표님은 휴대폰이나 PC로 창고에 대본과 지시를 넣습니다. 집의 Windows PC에 있는 AI 직원들은 창고에서 할 일을 꺼내 영상을 만들고,
+    회사 맥북은 합격한 영상을 받아 후반 작업을 합니다. 영상처럼 큰 파일은 창고 대신 <b>구글 드라이브 공유 폴더</b>로 오갑니다.</p>
+    ${svgSystem()}
+    <p class="quiet">비유하자면 Supabase는 회사의 <b>공용 사무실</b>입니다. 서류함(대본·바이블·지침·지시), 업무 게시판(작업 대기열), 출입 기록부(활동 기록)가 다 여기 있어요.
+    직원들이 어디서 일하든 출근하면 이 사무실 게시판을 보고 일을 가져갑니다. 그래서 PC와 맥북이 서로 다른 장소에 있어도 문제없습니다.</p>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">2. 기기별 역할</h3>
+    <table>
+      <tr><th>기기</th><th class="nw">비유</th><th>하는 일</th></tr>
+      <tr><td><b>Windows PC</b><br><span class="quiet">집</span></td><td class="nw">제작 본부</td><td>AI 직원 5명이 대본을 씬·프롬프트로 바꾸고, 키프레임·영상을 만들고, 감수·채점까지 끝냅니다.</td></tr>
+      <tr><td><b>맥북</b><br><span class="quiet">회사</span></td><td class="nw">후반 작업실</td><td>합격 영상을 받아 편집 준비 폴더를 만듭니다(순서 정리·자막·음량·업스케일). 대표님은 쌤컷에서 마무리 편집만 합니다.</td></tr>
+      <tr><td><b>휴대폰</b></td><td class="nw">결재판</td><td>계속 열어 둘 필요가 없습니다. 승인이 필요할 때 알림이 오고, 열면 항상 최신 상태입니다. 대본 초벌과 지시도 여기서 넣을 수 있습니다.</td></tr>
+      <tr><td><b>구글 드라이브</b></td><td class="nw">택배 창고</td><td>영상처럼 큰 파일만 오갑니다. Windows가 넣으면 맥북에 자동으로 내려옵니다.</td></tr>
+    </table>
+    <p class="quiet">세 기기는 서로 직접 연결되지 않습니다. 한 기기가 꺼져도 나머지는 계속 일하고, 다시 켜지면 밀린 일을 이어서 합니다.</p>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">3. Supabase가 하는 일</h3>
+    <table>
+      <tr><th>역할</th><th class="nw">비유</th><th>여기서 하는 일</th></tr>
+      <tr><td><b>로그인</b></td><td class="nw">사무실 출입문</td><td>대표 계정과 등록된 기기만 들어올 수 있게 합니다. 2단계 인증을 켜면 비밀번호가 새도 못 들어옵니다.</td></tr>
+      <tr><td><b>데이터베이스</b></td><td class="nw">서류함·장부</td><td>대본 모든 버전, 직원 지침, 지시, 점수, 비용을 보관합니다.</td></tr>
+      <tr><td><b>권한 규칙</b></td><td class="nw">결재 규정</td><td>대본 확정과 지침 적용은 대표만, AI는 보고와 제안만 하도록 창고가 직접 막습니다.</td></tr>
+      <tr><td><b>자동 기록</b></td><td class="nw">출입 기록부</td><td>무엇이 바뀌든 누가·언제·어느 기기에서 했는지 자동으로 남깁니다. 이 기록은 누구도 고치거나 지울 수 없습니다.</td></tr>
+    </table>
+    <p class="quiet">대시보드 화면(이 페이지)은 창고를 들여다보는 창문입니다. 이 화면을 지워도 창고의 내용은 그대로입니다.</p>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">4. AI 직원 5명이 씬 하나를 만드는 과정</h3>
+    <p>비용이 거의 안 드는 앞 단계(주문서·대표 이미지)에서 최대한 걸러 내고, 비싼 영상 생성은 씬당 최대 2번만 돌립니다.</p>
+    ${svgPipeline()}
+    <p class="quiet">${Object.keys(SC).filter(k => k !== '외부').map(k => chip(k) + k).join(' &nbsp; ')} &nbsp; ${chip('외부')}외부 도구·기기</p>
+    <p>주황색 화살표는 "다시 하기"입니다. 정해진 횟수를 넘기면 그 씬은 멈추고 <b>대표님 휴대폰으로 알림</b>이 갑니다.
+    알림에는 점수, 감수자별 의견, 원인 판단(감독 문제 / 영상 도구 한계 / 대본 문제 / 기준 문제), 선택 버튼이 담깁니다. 다른 씬 작업은 계속 진행됩니다.</p>
+    <p>합격 점수는 씬 등급마다 다릅니다: <b>주요 장면 95점</b>, 일반 장면 90점, 연결 컷 85점.</p>
+  </div>
+
+  <h3>5. 직원별 역할</h3>
+  ${staffCards.map(([n, does, not, gives]) => `<div class="card staffcard">
+    <h3>${chip(n)}${n}</h3>
+    <dl><dt>하는 일</dt><dd>${does}</dd><dt>하지 않는 일</dt><dd>${not}</dd><dt>내놓는 것</dt><dd>${gives}</dd></dl></div>`).join('')}
+  <p class="quiet">실제로 적용 중인 지침 원문과 변경 이력은 <b>직원</b> 탭에서 볼 수 있습니다.</p>
+
+  <div class="card">
+    <h3 style="margin-top:0">${chip('대표')}6. 대표님의 역할</h3>
+    <p>AI 직원은 <b>제안과 보고</b>까지만 합니다. 아래 일은 대표님만 할 수 있고, 창고가 규칙으로 막아 둡니다.</p>
+    <ul>
+      <li>대본 <b>확정</b>: 확정을 눌러야 버전 번호가 붙고 제작이 시작됩니다.</li>
+      <li>시리즈 바이블 <b>적용</b>: 캐릭터·장소·목소리 기준을 바꾸는 일입니다.</li>
+      <li>직원 <b>지침 적용</b>: 감독 해고·재설정도 여기 포함됩니다. 언제든 이전 버전으로 되돌릴 수 있습니다.</li>
+      <li>불합격 씬 처리: 이대로 승인 / 고쳐서 다시 / 지침 수정 / 보류 중에서 고릅니다.</li>
+      <li>예산 설정과 비싼 작업 승인, 맥북 편집으로 넘기기 전 승인, 최종본 승인</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">7. 시리즈 바이블 (레퍼런스 창고)</h3>
+    <p>60부작 넘게 같은 얼굴·목소리·장소를 지키기 위한 <b>기준 원본</b>입니다. <b>바이블</b> 탭에서 관리합니다. ${pill('작동', 'good')}</p>
+    <table>
+      <tr><th>분류</th><th>담는 것</th></tr>
+      <tr><td>캐릭터</td><td>정면·측면·전신 기준 사진, 고정 묘사 문장, 화별 의상, 바뀌면 안 되는 특징</td></tr>
+      <tr><td>장소·소품</td><td>기준 이미지와 고정 묘사 문장</td></tr>
+      <tr><td>스타일·톤</td><td>색감, 조명, 카메라 원칙</td></tr>
+      <tr><td>목소리</td><td>음성 도구에서 고정한 목소리 ID와 샘플 음성</td></tr>
+      <tr><td>연속성 기록</td><td>화가 끝났을 때 인물·소품의 상태(헤어, 의상, 상처, 들고 있는 물건). 다음 화 감독이 먼저 읽고 시작합니다.</td></tr>
+    </table>
+    <ul>
+      <li>감독은 바이블에 적힌 문장만 프롬프트에 쓰고, 영상감수자는 바이블 사진과 비교해 채점합니다.</li>
+      <li>AI는 수정안만 올리고 적용은 대표님만 합니다. 버전으로 남아 언제든 이전으로 되돌릴 수 있습니다.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">8. 대본 한 편을 넣으면 생기는 일</h3>
+    <table>
+      <tr><th>순서</th><th>무슨 일이 일어나나</th><th>지금</th></tr>
+      <tr><td>1</td><td><b>대본</b> 탭에서 화를 고르고 대본을 붙여 넣거나 파일을 올려 "초안 저장"</td><td>${pill('작동', 'good')}</td></tr>
+      <tr><td>2</td><td>여러 번 저장해도 초안으로만 쌓입니다. 마음에 들면 "확정" → v1, v2 … 번호가 붙습니다.</td><td>${pill('작동', 'good')}</td></tr>
+      <tr><td>3</td><td>확정하면 "변경 요약"과 "씬 나누기" 할 일이 작업 대기열에 자동으로 올라갑니다.</td><td>${pill('작동', 'good')}</td></tr>
+      <tr><td>4</td><td>Windows 에이전트가 그 일을 가져가 직전 버전과 무엇이 달라졌는지 씬별로 요약합니다.</td><td>${pill('에이전트 설치 후', 'warn')}</td></tr>
+      <tr><td>5</td><td>감독이 바이블과 직전 화 연속성 기록을 읽고, 평가자까지의 제작 과정(4번 그림)이 진행됩니다.</td><td>${pill('에이전트 설치 후', 'warn')}</td></tr>
+      <tr><td>6</td><td>모든 단계가 <b>기록</b> 탭에 누가·언제·어느 기기로 남습니다.</td><td>${pill('작동', 'good')}</td></tr>
+    </table>
+    <p class="quiet">버전 기록에서 두 버전을 골라 "두 버전 비교"를 누르면 바뀐 줄이 초록(추가)·빨강(삭제)으로 표시됩니다. AI 요약이 없어도 바로 쓸 수 있습니다.</p>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">9. 비용을 아끼는 원칙</h3>
+    <p>비용을 가장 많이 잡아먹는 건 해상도가 아니라 <b>실패해서 다시 만드는 횟수</b>입니다. 효과가 큰 순서입니다.</p>
+    <ol>
+      <li><b>키프레임에서 거르기</b>: 영상보다 훨씬 싼 이미지 단계에서 얼굴·의상을 통과한 것만 영상으로 만듭니다.</li>
+      <li><b>시험 생성은 720p, 짧게</b>: 움직임과 구도만 확인합니다.</li>
+      <li><b>등급별 해상도</b>: 일반 장면·연결 컷은 720p로 만들어 맥북에서 업스케일하고, 주요 장면만 1080p로 바로 만듭니다. (Kling 기준 720p가 1080p보다 약 25% 저렴)</li>
+      <li><b>업스케일 도구는 생성량을 보고 고르기</b>: 무료나 1회 구매 도구로 시작하고, 매달 아끼는 금액이 구독료보다 커지면 Topaz로 넘어갑니다.</li>
+    </ol>
+    <p class="quiet">⚠️ 720p보다 낮게 만들지 않습니다. 업스케일하면서 AI가 얼굴을 새로 그려 린·탄이 미세하게 달라질 수 있습니다. 업스케일한 뒤에도 영상감수자가 한 번 더 확인합니다.</p>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">10. 컴퓨터를 계속 켜 두는 법</h3>
+    <table>
+      <tr><th>기기</th><th>할 일</th></tr>
+      <tr><td><b>Windows</b></td><td>설정 → 시스템 → 전원: 절전을 "안 함"으로, 화면 끄기만 설정 · Windows 업데이트 "사용 시간" 지정(마음대로 재부팅 방지) · 자동 로그인과 에이전트 자동 시작</td></tr>
+      <tr><td><b>맥북</b></td><td>전원 어댑터 항상 연결 · 시스템 설정 → 배터리 → 옵션 → "디스플레이가 꺼져 있을 때 자동으로 잠자기 방지" 켜기 · 덮개는 열어 두기(덮으면 잠듦) · 에이전트도 스스로 잠자기를 막음</td></tr>
+      <tr><td><b>설치 버튼</b></td><td>에이전트 탭의 설치 명령이 위 설정 대부분(자동 시작, 꺼지면 재시작, 잠자기 방지, Windows 절전 끄기)을 자동으로 해 줍니다. 맥북 덮개와 전원 어댑터만 직접 챙기면 됩니다.</td></tr>
+      <tr><td><b>공통</b></td><td>에이전트가 1분마다 "살아 있음" 신호를 보냅니다. 끊기면 휴대폰으로 오프라인 알림이 갑니다(홈 탭의 에이전트 표).</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">11. 맥북이 할 일과 만드는 순서</h3>
+    <p>맥북 작업은 이미 있는 무료 도구(영상 변환 ffmpeg, 음성 인식 Whisper 등)를 에이전트가 자동으로 돌리게 하는 일이라 개발 분량이 크지 않습니다.
+    다만 <b>처리할 영상이 생긴 뒤에</b> 만드는 게 맞습니다. 실제 파일로 시험해야 제대로 맞출 수 있기 때문입니다.</p>
+    <table>
+      <tr><th>순서</th><th>할 일</th><th>언제</th></tr>
+      <tr><td>1</td><td>에이전트 기본(맥·Windows 공통): 살아 있음 신호, 잠자기 방지, 대시보드에서 원격 통제·자동 업데이트</td><td>${pill('작동', 'good')}</td></tr>
+      <tr><td>1-1</td><td>드라이브 폴더 감시: 합격 영상이 들어오면 맥북이 자동으로 알아챔</td><td>첫 합격 영상이 나올 때</td></tr>
+      <tr><td>2</td><td>편집 준비 폴더: 합격 영상을 씬 순서대로 번호 붙여 정리</td><td>첫 합격 영상이 나올 때</td></tr>
+      <tr><td>3</td><td>자막 자동 생성(한국어·영어), 대사·음악 음량 자동 맞춤</td><td>1화 편집 시작 전</td></tr>
+      <tr><td>4</td><td>업스케일, 클립 간 색감 통일</td><td>720p 생성을 시작할 때</td></tr>
+      <tr><td>5</td><td>무료 1차 검사(바이블 얼굴과 자동 비교), 프레임 보간</td><td>생성량이 늘어 감수 비용이 커질 때</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">12. 탭 안내</h3>
+    <dl>
+      <dt>홈</dt><dd>에이전트가 켜져 있는지, 진행 중인 작업, 검토할 일, 최근 활동</dd>
+      <dt>대본</dt><dd>시리즈 → 화 → 버전. 대본 넣기, 확정, 버전 비교, 씬별 변경점</dd>
+      <dt>바이블</dt><dd>캐릭터·장소·소품·톤·목소리 기준 원본과 화별 연속성 기록. 수정안 적용·반려, 이전 버전으로 되돌리기</dd>
+      <dt>직원</dt><dd>5명의 현재 지침과 이력. 수정안 적용·반려, 새 지침 작성</dd>
+      <dt>에이전트</dt><dd>각 컴퓨터 프로그램의 설치·통제. 온라인 여부, 연결 시험, 일시정지, 재시작, 업데이트</dd>
+      <dt>지시</dt><dd>대표님 지시 보내기. 지시마다 보낸 사람 → 받는 직원, 접수 → 배정 → 처리 중 → 완료 단계와 결과가 표시되고, 단계가 바뀔 때마다 종 모양 알림이 옵니다.</dd>
+      <dt>기록</dt><dd>모든 활동. 기기별·주체별·내용으로 찾아볼 수 있습니다.</dd>
+      <dt>설정</dt><dd>이 기기 이름, 2단계 인증, 로그아웃</dd>
+    </dl>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">13. 용어 사전</h3>
+    <dl>
+      <dt>시리즈 바이블</dt><dd>인물·장소·소품·톤·목소리의 기준 원본. 모든 화가 이걸 보고 만들어집니다.</dd>
+      <dt>연속성 기록</dt><dd>화가 끝났을 때 인물·소품의 상태. 다음 화가 이어지도록 감독이 먼저 읽습니다.</dd>
+      <dt>업스케일</dt><dd>720p처럼 작게 만든 영상을 AI로 선명하게 키우는 작업. 생성 비용을 줄일 때 씁니다.</dd>
+      <dt>편집 준비 폴더</dt><dd>맥북이 만들어 두는 폴더. 순서대로 정리된 영상, 자막, 음량을 맞춘 대사·음악이 들어 있어 쌤컷에서 바로 불러옵니다.</dd>
+      <dt>초안</dt><dd>저장만 한 대본. 고칠 수 있고 번호가 없습니다.</dd>
+      <dt>확정</dt><dd>대표가 "이걸로 만든다"고 정한 대본. 번호가 붙고 내용은 바꿀 수 없습니다. 고치려면 새 초안을 만듭니다.</dd>
+      <dt>에이전트</dt><dd>컴퓨터에서 늘 켜져 있으며 창고에서 일을 가져와 처리하는 프로그램. AI 직원들이 여기서 일합니다.</dd>
+      <dt>작업 대기열</dt><dd>창고의 업무 게시판. 한 일은 한 에이전트만 가져가서 중복 작업이 없습니다.</dd>
+      <dt>지침</dt><dd>각 AI 직원의 업무 규칙. 버전으로 관리되며 대표만 적용할 수 있습니다.</dd>
+      <dt>프롬프트</dt><dd>영상 AI에게 주는 주문서. 장면·인물·카메라를 글로 지시합니다.</dd>
+      <dt>키프레임</dt><dd>영상을 만들기 전에 뽑는 대표 이미지 한 장. 싸고 빨라서 여기서 먼저 검사합니다.</dd>
+      <dt>공개용 키</dt><dd>이 화면이 창고에 접속할 때 쓰는 키. 로그인과 권한 규칙이 함께 지키므로 화면에 들어 있어도 괜찮습니다. 비밀 키(secret)는 절대 화면에 넣지 않습니다.</dd>
+    </dl>
+  </div>
+  </div>`;
+}
+
+// ------------------------------------------------------------------
+// 대본: 시리즈 → 화 → 버전
+// ------------------------------------------------------------------
+async function viewScripts(main) {
+  const series = await q(S.sb.from('series').select('id,title').order('created_at'));
+  if (!S.seriesId || !series.some(s => s.id === S.seriesId)) S.seriesId = series[0]?.id || null;
+  const episodes = S.seriesId ? await q(S.sb.from('episodes').select('id,number,title,status').eq('series_id', S.seriesId).order('number')) : [];
+  const latest = episodes.length ? await q(S.sb.from('v_script_versions').select('episode_id,version_no,status')
+    .in('episode_id', episodes.map(e => e.id)).eq('status', 'confirmed')) : [];
+  const drafts = episodes.length ? await q(S.sb.from('script_versions').select('episode_id').eq('status', 'draft')
+    .in('episode_id', episodes.map(e => e.id))) : [];
+
+  main.innerHTML = `
+  <div class="split">
+    <div>
+      <div class="card">
+        <label style="margin-top:0">시리즈</label>
+        <div class="row"><select id="ser" style="flex:1">${series.map(s => `<option value="${esc(s.id)}" ${s.id === S.seriesId ? 'selected' : ''}>${esc(s.title)}</option>`).join('')}</select>
+        <button class="btn small" id="addSer">+</button></div>
+      </div>
+      <div class="card">
+        <div class="row"><b>화 목록</b><button class="btn small" id="addEp" style="margin-left:auto">+ 화 추가</button></div>
+        ${episodes.length ? `<table>${episodes.map(e => {
+          const v = latest.find(l => l.episode_id === e.id);
+          const d = drafts.filter(x => x.episode_id === e.id).length;
+          return `<tr class="click" data-ep="${esc(e.id)}" ${e.id === S.episodeId ? 'style="background:var(--accent-soft)"' : ''}>
+            <td><b>${e.number}화</b> ${esc(e.title || '')}<br><span class="quiet">${v ? 'v' + v.version_no + ' 확정' : '확정본 없음'}${d ? ' · 초안 ' + d : ''}</span></td>
+            <td style="text-align:right">${pill(EP_STATUS[e.status] || e.status)}</td></tr>`; }).join('')}</table>`
+          : '<p class="quiet">아직 화가 없습니다. "+ 화 추가"를 누르세요.</p>'}
+      </div>
+    </div>
+    <div id="epPane">${S.episodeId && episodes.some(e => e.id === S.episodeId) ? '' : '<div class="card quiet">왼쪽에서 화를 고르세요.</div>'}</div>
+  </div>`;
+  $('#ser').onchange = e => { S.seriesId = e.target.value; S.episodeId = null; go('scripts'); };
+  $('#addSer').onclick = guard(async () => {
+    const title = prompt('새 시리즈 제목'); if (!title) return;
+    const r = await q(S.sb.from('series').insert({ title }).select('id').single());
+    S.seriesId = r.id; go('scripts');
+  });
+  $('#addEp').onclick = guard(async () => {
+    if (!S.seriesId) return toast('먼저 시리즈를 만드세요');
+    const next = (episodes.at(-1)?.number || 0) + 1;
+    const num = Number(prompt('몇 화인가요?', String(next))); if (!num) return;
+    const title = prompt('화 제목 (없으면 비워 두세요)', '') || null;
+    const r = await q(S.sb.from('episodes').insert({ series_id: S.seriesId, number: num, title }).select('id').single());
+    S.episodeId = r.id; S.versionId = null; go('scripts');
+  });
+  main.querySelectorAll('tr[data-ep]').forEach(tr => tr.onclick = () => { S.episodeId = tr.dataset.ep; S.versionId = null; go('scripts'); });
+  if (S.episodeId && episodes.some(e => e.id === S.episodeId)) await viewEpisode($('#epPane'), episodes.find(e => e.id === S.episodeId));
+}
+
+async function viewEpisode(pane, ep) {
+  const versions = await q(S.sb.from('v_script_versions').select('*').eq('episode_id', ep.id).order('created_at', { ascending: false }));
+  const confirmed = versions.filter(v => v.version_no != null).sort((a, b) => b.version_no - a.version_no);
+  const drafts = versions.filter(v => v.status === 'draft');
+  pane.innerHTML = `
+  <div class="card">
+    <div class="row"><h2 style="margin:0">${ep.number}화 ${esc(ep.title || '')}</h2>
+      <select id="epStatus" style="width:auto;margin-left:auto">${Object.entries(EP_STATUS).map(([k, l]) => `<option value="${k}" ${k === ep.status ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+  </div>
+  <div class="card">
+    <b>새 대본 넣기</b>
+    <p class="quiet">붙여 넣거나 .txt 파일을 고르면 초안으로 저장됩니다. 버전 번호와 변경 요약은 "확정"할 때 붙습니다.</p>
+    <input type="file" id="file" accept=".txt,.md,.fountain,text/plain" style="margin-bottom:8px">
+    <textarea id="txt" placeholder="대본 전체를 붙여 넣으세요"></textarea>
+    <label>메모 (선택)</label><input id="note" placeholder="예: 3씬 대사 수정">
+    <div class="row" style="margin-top:10px"><button class="btn primary" id="saveDraft">초안 저장</button></div>
+  </div>
+  ${drafts.length ? `<div class="card"><b>확정 대기 초안</b><table>${drafts.map(d => `
+    <tr><td>${fmt(d.created_at)}<br><span class="quiet">${esc(d.device)} · ${esc(d.note || '')}</span></td>
+    <td style="text-align:right;white-space:nowrap"><button class="btn small" data-view="${esc(d.id)}">보기</button>
+    <button class="btn small primary" data-confirm="${esc(d.id)}">확정</button></td></tr>`).join('')}</table></div>` : ''}
+  <div class="card">
+    <b>버전 기록</b>
+    ${confirmed.length ? `<table><tr><th>버전</th><th>변경 요약</th><th class="hide-m">기기</th><th>확정</th></tr>${confirmed.map(v => `
+      <tr class="click" data-view="${esc(v.id)}"><td><b>v${v.version_no}</b><br>${pill(V_STATUS[v.status], v.status === 'confirmed' ? 'good' : '')}</td>
+      <td>${esc(v.change_summary || (v.version_no === 1 ? '첫 확정본' : '요약 작성 대기 중'))}${v.note ? `<br><span class="quiet">메모: ${esc(v.note)}</span>` : ''}</td>
+      <td class="hide-m">${esc(v.device)}</td><td class="quiet">${fmt(v.confirmed_at)}</td></tr>`).join('')}</table>`
+      : '<p class="quiet">아직 확정된 버전이 없습니다.</p>'}
+    ${confirmed.length >= 2 ? `<div class="row" style="margin-top:10px">
+      <select id="cmpA" style="width:auto">${confirmed.map((v, i) => `<option value="${esc(v.id)}" ${i === 1 ? 'selected' : ''}>v${v.version_no}</option>`).join('')}</select>
+      <span>→</span>
+      <select id="cmpB" style="width:auto">${confirmed.map((v, i) => `<option value="${esc(v.id)}" ${i === 0 ? 'selected' : ''}>v${v.version_no}</option>`).join('')}</select>
+      <button class="btn small" id="cmp">두 버전 비교</button></div>` : ''}
+  </div>
+  <div id="detail"></div>`;
+
+  $('#epStatus').onchange = guard(async e => { await q(S.sb.from('episodes').update({ status: e.target.value }).eq('id', ep.id)); toast('상태를 바꿨습니다'); });
+  $('#file').onchange = e => {
+    const f = e.target.files[0]; if (!f) return;
+    const r = new FileReader(); r.onload = () => { $('#txt').value = r.result; }; r.readAsText(f, 'utf-8');
+  };
+  $('#saveDraft').onclick = guard(async () => {
+    const content = $('#txt').value;
+    if (!content.trim()) return toast('대본 내용이 비어 있습니다');
+    await q(S.sb.from('script_versions').insert({ episode_id: ep.id, content, note: $('#note').value.trim() || null }));
+    toast('초안을 저장했습니다'); go('scripts');
+  });
+  pane.querySelectorAll('[data-confirm]').forEach(b => b.onclick = guard(async () => {
+    if (!confirm('이 초안을 확정할까요? 확정하면 내용을 고칠 수 없고, 변경 요약과 씬 분할 작업이 자동으로 등록됩니다.')) return;
+    const no = await q(S.sb.rpc('confirm_script_version', { p_id: b.dataset.confirm, p_note: null }));
+    toast(`v${no}로 확정했습니다`); S.versionId = b.dataset.confirm; go('scripts');
+  }));
+  pane.querySelectorAll('[data-view]').forEach(el => el.onclick = guard(() => showVersion(el.dataset.view)));
+  if ($('#cmp')) $('#cmp').onclick = guard(() => compareVersions($('#cmpA').value, $('#cmpB').value));
+  if (S.versionId) await showVersion(S.versionId, false);
+}
+
+async function showVersion(id, scroll = true) {
+  S.versionId = id;
+  const v = await q(S.sb.from('script_versions').select('id,version_no,status,content,note,change_summary,created_by,created_at,confirmed_at,devices(name)').eq('id', id).single());
+  const [changes, scenes] = await Promise.all([
+    q(S.sb.from('scene_changes').select('scene_no,change_type,summary').eq('script_version_id', id).order('scene_no')),
+    q(S.sb.from('scenes').select('scene_no,heading,grade,status').eq('script_version_id', id).order('scene_no')),
+  ]);
+  const shown = changes.filter(c => c.change_type !== 'unchanged');
+  $('#detail').innerHTML = `
+  <div class="card">
+    <div class="row"><b>${v.version_no ? 'v' + v.version_no : '초안'}</b> ${pill(V_STATUS[v.status] || v.status)}
+      <span class="quiet">${esc(v.created_by)} · ${esc(v.devices?.name || '알 수 없음')} · ${fmt(v.confirmed_at || v.created_at)}</span>
+      <button class="btn small" id="copy" style="margin-left:auto">새 초안의 바탕으로 쓰기</button></div>
+    ${v.change_summary ? `<h3>변경 요약</h3><p>${esc(v.change_summary)}</p>` : ''}
+    ${shown.length ? `<h3>씬별 변경점</h3><table>${shown.map(c => `<tr><td style="white-space:nowrap">S#${c.scene_no}</td>
+      <td>${pill(CHANGE[c.change_type], c.change_type === 'removed' ? 'bad' : c.change_type === 'added' ? 'good' : 'warn')}</td><td>${esc(c.summary || '')}</td></tr>`).join('')}</table>` : ''}
+    ${scenes.length ? `<h3>씬 (${scenes.length})</h3><table>${scenes.map(s => `<tr><td>S#${s.scene_no}</td><td>${esc(s.heading || '')}</td>
+      <td>${pill({ main: '주요', normal: '일반', transition: '연결' }[s.grade])}</td><td class="quiet">${esc(s.status)}</td></tr>`).join('')}</table>` : ''}
+    <h3>대본</h3><pre class="doc">${esc(v.content)}</pre>
+  </div>`;
+  $('#copy').onclick = () => { $('#txt').value = v.content; $('#txt').scrollIntoView({ behavior: 'smooth' }); toast('입력창에 불러왔습니다. 고친 뒤 초안 저장하세요'); };
+  if (scroll) $('#detail').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// 줄 단위 비교 (LCS)
+function lineDiff(a, b) {
+  const A = a.split(/\r?\n/), B = b.split(/\r?\n/);
+  if (A.length * B.length > 4_000_000) return null;
+  const n = A.length, m = B.length, L = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+    L[i][j] = A[i] === B[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const out = []; let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { out.push([' ', A[i]]); i++; j++; }
+    else if (L[i + 1][j] >= L[i][j + 1]) out.push(['-', A[i++]]);
+    else out.push(['+', B[j++]]);
+  }
+  while (i < n) out.push(['-', A[i++]]);
+  while (j < m) out.push(['+', B[j++]]);
+  return out;
+}
+async function compareVersions(aId, bId) {
+  const [a, b] = await Promise.all([aId, bId].map(id => q(S.sb.from('script_versions').select('version_no,content').eq('id', id).single())));
+  const d = lineDiff(a.content, b.content);
+  const added = d ? d.filter(x => x[0] === '+').length : 0, removed = d ? d.filter(x => x[0] === '-').length : 0;
+  $('#detail').innerHTML = `<div class="card">
+    <div class="row"><b>v${a.version_no} → v${b.version_no}</b><span class="quiet">추가 ${added}줄 · 삭제 ${removed}줄</span>
+    <label class="quiet" style="margin:0 0 0 auto"><input type="checkbox" id="onlyCh" style="width:auto" checked> 바뀐 부분만</label></div>
+    <div class="diff" id="diffBox" style="margin-top:10px"></div></div>`;
+  const draw = () => {
+    if (!d) return $('#diffBox').innerHTML = '<div>대본이 너무 길어 화면 비교를 할 수 없습니다.</div>';
+    const only = $('#onlyCh').checked;
+    const rows = d.map((x, k) => ({ x, k })).filter(({ x, k }) => !only || x[0] !== ' ' ||
+      d.slice(Math.max(0, k - 2), k + 3).some(y => y[0] !== ' '));
+    $('#diffBox').innerHTML = rows.length ? rows.map(({ x }) =>
+      `<div class="${x[0] === '+' ? 'add' : x[0] === '-' ? 'del' : ''}">${x[0] === ' ' ? '  ' : x[0] + ' '}${esc(x[1]) || '&nbsp;'}</div>`).join('')
+      : '<div>두 버전의 내용이 같습니다.</div>';
+  };
+  $('#onlyCh').onchange = draw; draw();
+  $('#detail').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// ------------------------------------------------------------------
+// AI 직원
+// ------------------------------------------------------------------
+async function viewStaff(main) {
+  const [staff, all] = await Promise.all([
+    q(S.sb.from('staff').select('id,code,name,role_summary,sort_order').order('sort_order')),
+    q(S.sb.from('staff_guidelines').select('id,staff_id,version_no,content,change_reason,status,proposed_by,decided_by,decided_at,created_at,devices(name)').order('version_no', { ascending: false })),
+  ]);
+  const proposals = all.filter(g => g.status === 'proposed');
+  main.innerHTML = `
+  <h2>AI 직원</h2>
+  <p class="quiet">지침 적용(감독 해고·재설정 포함)은 대표만 할 수 있습니다. AI는 수정안만 올립니다.</p>
+  ${proposals.length ? `<h3>검토할 수정안 ${proposals.length}건</h3>${proposals.map(g => {
+    const st = staff.find(s => s.id === g.staff_id); const cur = all.find(x => x.staff_id === g.staff_id && x.status === 'active');
+    return `<div class="card" style="border-color:var(--warn)">
+      <div class="row"><b>${esc(st?.name)} 지침 v${g.version_no} 수정안</b><span class="quiet">${esc(g.proposed_by)} · ${fmt(g.created_at)}</span></div>
+      ${g.change_reason ? `<p><b>이유:</b> ${esc(g.change_reason)}</p>` : ''}
+      <div class="diff">${(lineDiff(cur?.content || '', g.content) || []).map(x =>
+        `<div class="${x[0] === '+' ? 'add' : x[0] === '-' ? 'del' : ''}">${esc(x[1]) || '&nbsp;'}</div>`).join('')}</div>
+      <div class="row" style="margin-top:10px"><button class="btn primary small" data-act="${esc(g.id)}">적용</button>
+      <button class="btn small" data-edit="${esc(g.id)}">고쳐서 적용</button>
+      <button class="btn danger small" data-rej="${esc(g.id)}">반려</button></div></div>`; }).join('')}` : ''}
+  ${staff.map(s => {
+    const cur = all.find(g => g.staff_id === s.id && g.status === 'active');
+    const hist = all.filter(g => g.staff_id === s.id && g.status !== 'proposed');
+    return `<div class="card">
+      <div class="row"><h3 style="margin:0">${esc(s.name)}</h3>${cur ? pill('지침 v' + cur.version_no, 'accent') : pill('지침 없음', 'bad')}
+        <button class="btn small" data-new="${esc(s.id)}" style="margin-left:auto">새 지침 작성</button></div>
+      <p class="quiet" style="margin:6px 0">${esc(s.role_summary)}</p>
+      ${cur ? `<pre class="doc">${esc(cur.content)}</pre><p class="quiet">적용: ${esc(cur.decided_by || '-')} · ${fmt(cur.decided_at)}</p>` : ''}
+      ${hist.length > 1 ? `<details><summary class="quiet">지침 이력 ${hist.length}개</summary><table>${hist.map(g => `
+        <tr><td>v${g.version_no}</td><td>${pill(G_STATUS[g.status], g.status === 'active' ? 'good' : '')}</td>
+        <td>${esc(g.change_reason || '')}</td><td class="quiet">${fmt(g.decided_at || g.created_at)}</td>
+        <td>${g.status === 'retired' ? `<button class="btn small" data-act="${esc(g.id)}">이 버전으로 되돌리기</button>` : ''}</td></tr>`).join('')}</table></details>` : ''}
+    </div>`; }).join('')}
+  <div id="editor"></div>`;
+
+  main.querySelectorAll('[data-act]').forEach(b => b.onclick = guard(async () => {
+    if (!confirm('이 지침을 적용할까요? 현재 지침은 이전 버전으로 보관됩니다.')) return;
+    await q(S.sb.rpc('activate_guideline', { p_id: b.dataset.act })); toast('적용했습니다'); go('staff');
+  }));
+  main.querySelectorAll('[data-rej]').forEach(b => b.onclick = guard(async () => {
+    await q(S.sb.from('staff_guidelines').update({ status: 'rejected' }).eq('id', b.dataset.rej)); toast('반려했습니다'); go('staff');
+  }));
+  const openEditor = (st, base, reason, fromId = null) => {
+    const nextNo = Math.max(0, ...all.filter(g => g.staff_id === st.id).map(g => g.version_no)) + 1;
+    $('#editor').innerHTML = `<div class="card" style="border-color:var(--accent)">
+      <b>${esc(st.name)} 지침 v${nextNo} 작성</b>
+      <textarea id="gtxt">${esc(base)}</textarea>
+      <label>바꾸는 이유 (나중에 어떤 변경이 효과 있었는지 비교할 때 씁니다)</label><input id="greason" value="${esc(reason || '')}">
+      <div class="row" style="margin-top:10px"><button class="btn primary" id="gsave">저장하고 바로 적용</button><button class="btn" id="gcancel">취소</button></div></div>`;
+    $('#gcancel').onclick = () => { $('#editor').innerHTML = ''; };
+    $('#gsave').onclick = guard(async () => {
+      const content = $('#gtxt').value.trim(); if (!content) return;
+      const r = await q(S.sb.from('staff_guidelines').insert({ staff_id: st.id, version_no: nextNo, content, change_reason: $('#greason').value.trim() || null, status: 'proposed' }).select('id').single());
+      await q(S.sb.rpc('activate_guideline', { p_id: r.id }));
+      // "고쳐서 적용"이면 원래 수정안은 저장에 성공한 뒤에만 반려 처리(취소하면 그대로 남음)
+      if (fromId) await q(S.sb.from('staff_guidelines').update({ status: 'rejected' }).eq('id', fromId).eq('status', 'proposed'));
+      toast(`${st.name} 지침 v${nextNo} 적용`); go('staff');
+    });
+    $('#editor').scrollIntoView({ behavior: 'smooth' });
+  };
+  main.querySelectorAll('[data-new]').forEach(b => b.onclick = () => {
+    const st = staff.find(s => s.id === b.dataset.new);
+    openEditor(st, all.find(g => g.staff_id === st.id && g.status === 'active')?.content || '', '');
+  });
+  main.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => {
+    const g = all.find(x => x.id === b.dataset.edit);
+    openEditor(staff.find(s => s.id === g.staff_id), g.content, g.change_reason, g.id);
+  });
+}
+
+// ------------------------------------------------------------------
+// 시리즈 바이블: 캐릭터·장소·소품·톤·목소리 기준 원본 + 연속성 기록
+// ------------------------------------------------------------------
+const diffRows = (a, b) => (lineDiff(a, b) || []).map(x =>
+  `<div class="${x[0] === '+' ? 'add' : x[0] === '-' ? 'del' : ''}">${esc(x[1]) || '&nbsp;'}</div>`).join('');
+async function signedUrls(paths) {
+  if (!paths.length) return {};
+  const { data, error } = await S.sb.storage.from(BUCKET).createSignedUrls(paths, 3600);
+  if (error || !data) return {};
+  return Object.fromEntries(data.filter(d => d.signedUrl).map(d => [d.path, d.signedUrl]));
+}
+async function uploadBibleFile(entryId, file) {
+  const ext = (file.name.split('.').pop() || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 5) || 'bin';
+  const path = `${S.seriesId}/${entryId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const { error } = await S.sb.storage.from(BUCKET).upload(path, file, { contentType: file.type || undefined, upsert: false });
+  if (error) throw error;
+  return path;
+}
+const thumbs = (paths, urls) => paths?.length ? `<div class="thumbs">${paths.map(p => urls[p]
+  ? `<a href="${esc(urls[p])}" target="_blank" rel="noopener"><img src="${esc(urls[p])}" alt="기준 사진" loading="lazy"></a>` : '').join('')}</div>` : '';
+
+async function viewBible(main) {
+  const series = await q(S.sb.from('series').select('id,title').order('created_at'));
+  if (!S.seriesId || !series.some(s => s.id === S.seriesId)) S.seriesId = series[0]?.id || null;
+  if (!S.seriesId) { main.innerHTML = '<h2>시리즈 바이블</h2><div class="card quiet">먼저 대본 탭에서 시리즈를 만드세요.</div>'; return; }
+  const [entries, episodes] = await Promise.all([
+    q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at').eq('series_id', S.seriesId).order('sort_order').order('created_at')),
+    q(S.sb.from('episodes').select('id,number,title').eq('series_id', S.seriesId).order('number')),
+  ]);
+  const versions = entries.length ? await q(S.sb.from('bible_versions')
+    .select('id,entry_id,version_no,description,details,voice_id,image_paths,voice_path,change_reason,status,proposed_by,decided_at,created_at,devices(name)')
+    .in('entry_id', entries.map(e => e.id)).order('version_no', { ascending: false })) : [];
+  const cur = id => versions.find(v => v.entry_id === id && v.status === 'active');
+  const proposals = versions.filter(v => v.status === 'proposed');
+  const urls = await signedUrls([...new Set(versions.filter(v => v.status === 'active' || v.status === 'proposed')
+    .flatMap(v => [...(v.image_paths || []), v.voice_path]).filter(Boolean))]);
+  S.bibleCat = S.bibleCat || 'all';
+  const shown = entries.filter(e => S.bibleCat === 'all' || e.category === S.bibleCat);
+  const cnt = k => entries.filter(e => e.category === k).length;
+
+  main.innerHTML = `
+  <h2>시리즈 바이블</h2>
+  <p class="quiet">모든 화가 따르는 기준 원본입니다. 감독은 여기 적힌 문장만 프롬프트에 쓰고, 영상감수자는 여기 사진과 비교해 채점합니다. 적용은 대표만 할 수 있습니다.</p>
+  <div class="card">
+    <div class="row"><select id="bser" style="flex:1;min-width:160px">${series.map(s => `<option value="${esc(s.id)}" ${s.id === S.seriesId ? 'selected' : ''}>${esc(s.title)}</option>`).join('')}</select>
+      <button class="btn primary small" id="bnew">+ 항목 추가</button></div>
+    <div class="row" style="margin-top:10px">${[['all', `전체 ${entries.length}`], ...Object.entries(BIBLE_CAT).map(([k, l]) => [k, `${l} ${cnt(k)}`])].map(([k, l]) =>
+      `<button class="btn small ${S.bibleCat === k ? 'primary' : ''}" data-bc="${k}">${esc(l)}</button>`).join('')}</div>
+  </div>
+  ${proposals.length ? `<h3>검토할 바이블 수정안 ${proposals.length}건</h3>${proposals.map(p => {
+    const e = entries.find(x => x.id === p.entry_id); const c = cur(p.entry_id);
+    return `<div class="card" style="border-color:var(--warn)">
+      <div class="row"><b>${esc(e?.name)} v${p.version_no} 수정안</b>${pill(BIBLE_CAT[e?.category] || '')}<span class="quiet">${esc(p.proposed_by)} · ${fmt(p.created_at)}</span></div>
+      ${p.change_reason ? `<p><b>이유:</b> ${esc(p.change_reason)}</p>` : ''}
+      <p class="quiet" style="margin:8px 0 4px">고정 묘사 문장</p><div class="diff">${diffRows(c?.description || '', p.description)}</div>
+      ${(p.details || '') !== (c?.details || '') ? `<p class="quiet" style="margin:8px 0 4px">세부 사항</p><div class="diff">${diffRows(c?.details || '', p.details || '')}</div>` : ''}
+      ${thumbs(p.image_paths, urls)}
+      <div class="row" style="margin-top:10px"><button class="btn primary small" data-bact="${esc(p.id)}">적용</button>
+        <button class="btn small" data-bfix="${esc(p.id)}">고쳐서 적용</button>
+        <button class="btn danger small" data-brej="${esc(p.id)}">반려</button></div></div>`; }).join('')}` : ''}
+  ${shown.length ? `<div class="bgrid">${shown.map(e => {
+    const c = cur(e.id); const n = versions.filter(v => v.entry_id === e.id && v.status !== 'proposed').length;
+    return `<div class="card">
+      <div class="row"><b style="font-size:16px">${esc(e.name)}</b>${pill(BIBLE_CAT[e.category])}${c ? pill('v' + c.version_no, 'accent') : pill('승인본 없음', 'bad')}</div>
+      ${e.summary ? `<div class="quiet" style="margin-top:4px">${esc(e.summary)}</div>` : ''}
+      ${c ? thumbs(c.image_paths, urls) : ''}
+      ${c ? `<div class="bdesc">${esc(c.description)}</div>` : ''}
+      ${c?.details ? `<details style="margin-top:8px"><summary class="quiet">세부 사항</summary><pre class="doc" style="margin-top:6px">${esc(c.details)}</pre></details>` : ''}
+      ${c?.voice_id ? `<div class="quiet" style="margin-top:8px">목소리 ID: <code>${esc(c.voice_id)}</code></div>` : ''}
+      ${c?.voice_path && urls[c.voice_path] ? `<audio controls preload="none" src="${esc(urls[c.voice_path])}"></audio>` : ''}
+      <div class="row" style="margin-top:10px"><button class="btn small" data-bedit="${esc(e.id)}">${c ? '새 버전 작성' : '내용 채우기'}</button>
+        ${n > 1 ? `<button class="btn small" data-bhist="${esc(e.id)}">이력 ${n}개</button>` : ''}</div>
+      <div id="bh-${esc(e.id)}"></div>
+    </div>`; }).join('')}</div>`
+    : `<div class="card quiet">${entries.length ? '이 분류에는 항목이 없습니다.' : '아직 항목이 없습니다. "+ 항목 추가"로 린·탄부터 등록하세요.'}</div>`}
+  <div id="bEditor" style="margin-top:12px"></div>
+  <h3>연속성 기록</h3>
+  <p class="quiet">화가 끝났을 때 인물·소품의 상태(헤어, 의상, 상처, 들고 있는 물건)를 남깁니다. 다음 화의 감독은 직전 화의 마지막 상태를 먼저 읽고 시작합니다.</p>
+  <div class="card" id="contBox"><p class="quiet">불러오는 중…</p></div>`;
+
+  const activate = id => guard(async () => {
+    if (!confirm('이 버전을 적용할까요? 현재 버전은 이전 버전으로 보관됩니다.')) return;
+    await q(S.sb.rpc('activate_bible_version', { p_id: id })); toast('적용했습니다'); go('bible');
+  });
+  $('#bser').onchange = e => { S.seriesId = e.target.value; S.episodeId = null; S.contEp = null; go('bible'); };
+  main.querySelectorAll('[data-bc]').forEach(b => b.onclick = () => { S.bibleCat = b.dataset.bc; go('bible'); });
+  $('#bnew').onclick = () => openBibleEditor({ urls });
+  main.querySelectorAll('[data-bedit]').forEach(b => b.onclick = () => {
+    const e = entries.find(x => x.id === b.dataset.bedit); openBibleEditor({ entry: e, base: cur(e.id), urls });
+  });
+  main.querySelectorAll('[data-bfix]').forEach(b => b.onclick = () => {
+    const p = versions.find(v => v.id === b.dataset.bfix);
+    openBibleEditor({ entry: entries.find(x => x.id === p.entry_id), base: p, urls, fromId: p.id });
+  });
+  main.querySelectorAll('[data-bact]').forEach(b => b.onclick = activate(b.dataset.bact));
+  main.querySelectorAll('[data-brej]').forEach(b => b.onclick = guard(async () => {
+    await q(S.sb.from('bible_versions').update({ status: 'rejected' }).eq('id', b.dataset.brej)); toast('반려했습니다'); go('bible');
+  }));
+  main.querySelectorAll('[data-bhist]').forEach(b => b.onclick = () => {
+    const box = document.getElementById('bh-' + b.dataset.bhist);
+    if (box.innerHTML) { box.innerHTML = ''; return; }
+    const hist = versions.filter(v => v.entry_id === b.dataset.bhist && v.status !== 'proposed');
+    box.innerHTML = `<table style="margin-top:8px">${hist.map(v => `<tr><td>v${v.version_no}</td>
+      <td>${pill(G_STATUS[v.status] || v.status, v.status === 'active' ? 'good' : '')}</td>
+      <td>${esc(v.change_reason || '')}<br><span class="quiet">${esc(v.proposed_by || '')} · ${esc(v.devices?.name || '')}</span></td>
+      <td class="quiet">${fmt(v.decided_at || v.created_at)}</td>
+      <td>${v.status === 'retired' ? `<button class="btn small" data-bact2="${esc(v.id)}">되돌리기</button>` : ''}</td></tr>`).join('')}</table>`;
+    box.querySelectorAll('[data-bact2]').forEach(x => x.onclick = activate(x.dataset.bact2));
+  });
+  await renderContinuity(entries, episodes);
+}
+
+function openBibleEditor({ entry, base, urls, fromId }) {
+  const isNew = !entry;
+  const imgs = base?.image_paths || [];
+  $('#bEditor').innerHTML = `<div class="card" style="border-color:var(--accent)">
+    <b>${isNew ? '새 바이블 항목' : esc(entry.name) + ' 새 버전 작성'}</b>
+    ${isNew ? `<div class="row"><div style="flex:2;min-width:160px"><label>이름</label><input id="bname" placeholder="예: 린 (LIN)"></div>
+      <div style="flex:1;min-width:120px"><label>분류</label><select id="bcat">${Object.entries(BIBLE_CAT).map(([k, l]) =>
+        `<option value="${k}" ${S.bibleCat === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>` : ''}
+    <label>한 줄 설명 (화면 표시용)</label><input id="bsum" value="${esc(entry?.summary || '')}" placeholder="예: 주인공. 태국에서 온 연습생">
+    <label>고정 묘사 문장: 감독이 프롬프트에 그대로 넣는 문장입니다</label>
+    <textarea id="bdesc" style="min-height:120px" placeholder="예: LIN, early-20s Thai woman, shoulder-length straight black hair, ...">${esc(base?.description || '')}</textarea>
+    <label>세부 사항 (화별 의상, 바뀌면 안 되는 특징, 금지 사항)</label>
+    <textarea id="bdet" style="min-height:100px">${esc(base?.details || '')}</textarea>
+    <label>목소리 ID (음성 도구에서 고정한 목소리 번호, 선택)</label><input id="bvid" value="${esc(base?.voice_id || '')}">
+    <label>기준 사진${imgs.length ? ': 체크를 풀면 이번 버전에서 뺍니다' : ' (정면·측면·전신 권장)'}</label>
+    ${imgs.length ? `<div class="thumbs">${imgs.map((p, i) => `<label class="keep"><input type="checkbox" data-keep="${i}" checked>${urls[p]
+      ? `<img src="${esc(urls[p])}" alt="">` : '<span class="quiet">사진</span>'}</label>`).join('')}</div>` : ''}
+    <input type="file" id="bimg" accept="image/*" multiple>
+    <label>목소리 샘플 (선택)</label>
+    ${base?.voice_path ? `<label class="quiet" style="margin:0 0 6px"><input type="checkbox" id="bkeepv" style="width:auto" checked> 기존 샘플 유지</label>` : ''}
+    <input type="file" id="bvoice" accept="audio/*">
+    <label>바꾸는 이유</label><input id="breason" value="${esc(fromId ? base?.change_reason || '' : '')}" placeholder="예: 1화 키프레임에서 눈매가 달라져 묘사 보강">
+    <div class="row" style="margin-top:10px"><button class="btn primary" id="bsave">저장하고 바로 적용</button><button class="btn" id="bcancel">취소</button></div></div>`;
+  $('#bcancel').onclick = () => { $('#bEditor').innerHTML = ''; };
+  $('#bsave').onclick = guard(async () => {
+    const description = $('#bdesc').value.trim();
+    if (!description) return toast('고정 묘사 문장을 적어 주세요');
+    if (isNew && !$('#bname').value.trim()) return toast('이름을 적어 주세요');
+    const files = [...$('#bimg').files], voice = $('#bvoice').files[0];
+    if (files.some(f => f.size > 15e6) || (voice && voice.size > 30e6)) return toast('파일이 너무 큽니다 (사진 15MB, 음성 30MB까지)');
+    const btn = $('#bsave'); btn.disabled = true; btn.textContent = '저장 중…';
+    try {
+      const summary = $('#bsum').value.trim() || null;
+      let entryId = entry?.id;
+      if (isNew) {
+        entryId = (await q(S.sb.from('bible_entries').insert({ series_id: S.seriesId, category: $('#bcat').value, name: $('#bname').value.trim(), summary })
+          .select('id').single())).id;
+      } else if (summary !== (entry.summary || null)) {
+        await q(S.sb.from('bible_entries').update({ summary }).eq('id', entryId));
+      }
+      const kept = imgs.filter((_, i) => document.querySelector(`[data-keep="${i}"]`)?.checked);
+      const added = [];
+      for (const f of files) added.push(await uploadBibleFile(entryId, f));
+      const voicePath = voice ? await uploadBibleFile(entryId, voice) : ($('#bkeepv')?.checked ? base.voice_path : null);
+      const v = await q(S.sb.from('bible_versions').insert({
+        entry_id: entryId, description, details: $('#bdet').value.trim() || null, voice_id: $('#bvid').value.trim() || null,
+        image_paths: [...kept, ...added], voice_path: voicePath, change_reason: $('#breason').value.trim() || null, status: 'proposed',
+      }).select('id,version_no').single());
+      await q(S.sb.rpc('activate_bible_version', { p_id: v.id }));
+      if (fromId) await q(S.sb.from('bible_versions').update({ status: 'rejected' }).eq('id', fromId).eq('status', 'proposed'));
+      toast(`v${v.version_no} 적용했습니다`); go('bible');
+    } finally {
+      const b = $('#bsave'); if (b) { b.disabled = false; b.textContent = '저장하고 바로 적용'; }
+    }
+  });
+  $('#bEditor').scrollIntoView({ behavior: 'smooth' });
+}
+
+async function renderContinuity(entries, episodes) {
+  const box = $('#contBox'); if (!box) return;
+  if (!episodes.length) { box.innerHTML = '<p class="quiet">아직 화가 없습니다. 대본 탭에서 화를 추가하세요.</p>'; return; }
+  if (!entries.length) { box.innerHTML = '<p class="quiet">바이블 항목을 먼저 등록하세요.</p>'; return; }
+  if (!S.contEp || !episodes.some(e => e.id === S.contEp)) S.contEp = episodes.at(-1).id;
+  const idx = episodes.findIndex(e => e.id === S.contEp), ep = episodes[idx], prev = episodes[idx - 1];
+  const logs = await q(S.sb.from('continuity_logs').select('id,episode_id,entry_id,scene_no,state,source,created_at,devices(name)')
+    .in('episode_id', [ep.id, prev?.id].filter(Boolean)).order('created_at'));
+  const name = id => esc(entries.find(e => e.id === id)?.name || '(삭제된 항목)');
+  const lastPrev = {};
+  logs.filter(l => prev && l.episode_id === prev.id).forEach(l => { lastPrev[l.entry_id] = l; });
+  const mine = logs.filter(l => l.episode_id === ep.id);
+  const order = ['character', 'prop', 'location', 'style', 'voice'];
+  const sorted = [...entries].sort((a, b) => order.indexOf(a.category) - order.indexOf(b.category));
+  box.innerHTML = `
+    <div class="row"><select id="cep" style="width:auto">${episodes.map(e =>
+      `<option value="${esc(e.id)}" ${e.id === ep.id ? 'selected' : ''}>${e.number}화 ${esc(e.title || '')}</option>`).join('')}</select></div>
+    ${prev ? `<h3>${prev.number}화가 끝났을 때 상태 <span class="quiet">(${ep.number}화 시작 기준)</span></h3>
+      ${Object.keys(lastPrev).length ? `<table>${Object.values(lastPrev).map(l => `<tr><td style="white-space:nowrap"><b>${name(l.entry_id)}</b></td>
+        <td>${esc(l.state)}</td><td class="quiet">${l.scene_no ? 'S#' + l.scene_no : ''}</td></tr>`).join('')}</table>`
+        : '<p class="quiet">기록이 없습니다.</p>'}` : '<p class="quiet" style="margin-top:10px">첫 화라 이전 기록이 없습니다.</p>'}
+    <h3>${ep.number}화 기록</h3>
+    ${mine.length ? `<table><tr><th>항목</th><th>상태</th><th>씬</th><th class="hide-m">남긴 곳</th><th></th></tr>${mine.map(l => `<tr>
+      <td style="white-space:nowrap"><b>${name(l.entry_id)}</b></td><td>${esc(l.state)}</td><td class="quiet">${l.scene_no ? 'S#' + l.scene_no : ''}</td>
+      <td class="quiet hide-m">${esc(l.source || '')} · ${esc(l.devices?.name || '')}<br>${fmt(l.created_at)}</td>
+      <td><button class="btn small danger" data-cdel="${esc(l.id)}">삭제</button></td></tr>`).join('')}</table>`
+      : '<p class="quiet">아직 기록이 없습니다.</p>'}
+    <div class="row" style="margin-top:10px;align-items:flex-end">
+      <div style="flex:1;min-width:140px"><label>항목</label><select id="cent">${sorted.map(e =>
+        `<option value="${esc(e.id)}">${esc(BIBLE_CAT[e.category])} · ${esc(e.name)}</option>`).join('')}</select></div>
+      <div style="width:90px"><label>씬 (선택)</label><input id="csc" inputmode="numeric"></div>
+      <div style="flex:2;min-width:200px"><label>상태</label><input id="cst" placeholder="예: 연습복, 머리 묶음, 왼손에 붕대"></div>
+      <button class="btn primary" id="cadd">기록</button></div>`;
+  const redraw = () => renderContinuity(entries, episodes).catch(e => toast('오류: ' + errText(e)));
+  $('#cep').onchange = e => { S.contEp = e.target.value; redraw(); };
+  const add = guard(async () => {
+    const state = $('#cst').value.trim(); if (!state) return toast('상태를 적어 주세요');
+    const sc = parseInt($('#csc').value, 10);
+    await q(S.sb.from('continuity_logs').insert({ episode_id: ep.id, entry_id: $('#cent').value, scene_no: Number.isFinite(sc) ? sc : null, state }));
+    toast('기록했습니다'); redraw();
+  });
+  $('#cadd').onclick = add;
+  $('#cst').onkeydown = e => { if (e.key === 'Enter') add(); };
+  box.querySelectorAll('[data-cdel]').forEach(b => b.onclick = guard(async () => {
+    if (!confirm('이 기록을 지울까요?')) return;
+    await q(S.sb.from('continuity_logs').delete().eq('id', b.dataset.cdel)); redraw();
+  }));
+}
+
+// ------------------------------------------------------------------
+// 대표 지시
+// ------------------------------------------------------------------
+async function viewDirectives(main) {
+  const [list, eps, agents] = await Promise.all([
+    q(S.sb.from('directives').select('id,content,summary,status,result_note,progress_note,assigned_to_label,assigned_reason,assigned_at,started_at,completed_at,scene_no,created_at,created_by,devices(name),staff(name),episodes(number,series(title))')
+      .order('created_at', { ascending: false }).limit(200)),
+    q(S.sb.from('episodes').select('id,number,title,series(title)').order('number')),
+    q(S.sb.from('v_agents').select('name,alive,kind')),
+  ]);
+  const winAlive = agents.some(a => a.kind === 'windows_agent' && a.alive);
+  const open = list.filter(d => ['received', 'assigned', 'in_progress'].includes(d.status));
+  S.dirFilter = S.dirFilter || 'open';
+  const shown = S.dirFilter === 'open' ? open : S.dirFilter === 'closed' ? list.filter(d => !open.includes(d)) : list;
+
+  main.innerHTML = `
+  <h2>대표 지시</h2>
+  <div class="card">
+    <label style="margin-top:0">지시 내용</label>
+    <textarea id="dtxt" style="min-height:90px" placeholder="예: 1화 3씬에서 린의 의상을 연습복으로 통일해줘"></textarea>
+    <div class="row">
+      <div style="flex:2;min-width:180px"><label>관련 화 (선택)</label><select id="dep"><option value="">없음</option>
+        ${eps.map(e => `<option value="${esc(e.id)}">${esc(e.series?.title)} ${e.number}화</option>`).join('')}</select></div>
+      <div style="flex:1;min-width:100px"><label>씬 번호 (선택)</label><input id="dsc" inputmode="numeric"></div>
+    </div>
+    <div class="row" style="margin-top:10px"><button class="btn primary" id="dgo">지시 보내기</button>
+      <span class="quiet">단계가 바뀔 때마다 알림(위의 종 모양)으로 알려 드립니다.</span></div>
+  </div>
+  ${!winAlive && open.length ? `<div class="msg err" style="background:rgba(183,121,31,.12);color:var(--warn)">
+    Windows 에이전트가 꺼져 있어 지시 ${open.length}건이 <b>접수</b> 상태로 기다리고 있습니다. 에이전트가 켜지면 자동으로 이어서 처리됩니다.</div>` : ''}
+  <div class="row" style="margin:6px 0 10px">
+    ${[['open', `진행 중 ${open.length}`], ['closed', '끝난 지시'], ['all', `전체 ${list.length}`]].map(([k, l]) =>
+      `<button class="btn small ${S.dirFilter === k ? 'primary' : ''}" data-f="${k}">${l}</button>`).join('')}
+  </div>
+  ${shown.length ? shown.map(d => directiveCard(d)).join('') : '<div class="card quiet">해당하는 지시가 없습니다.</div>'}`;
+
+  main.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { S.dirFilter = b.dataset.f; go('directives'); });
+  $('#dgo').onclick = guard(async () => {
+    const content = $('#dtxt').value.trim(); if (!content) return;
+    const sc = parseInt($('#dsc').value, 10);
+    await q(S.sb.from('directives').insert({ content, episode_id: $('#dep').value || null, scene_no: Number.isFinite(sc) ? sc : null }));
+    S.dirFilter = 'open'; toast('지시를 보냈습니다'); go('directives');
+  });
+  main.querySelectorAll('[data-cancel]').forEach(b => b.onclick = guard(async () => {
+    if (!confirm('이 지시를 취소할까요?')) return;
+    await q(S.sb.from('directives').update({ status: 'cancelled', result_note: '대표가 취소' }).eq('id', b.dataset.cancel)); go('directives');
+  }));
+  main.querySelectorAll('[data-more]').forEach(b => b.onclick = guard(() => directiveDetail(b.dataset.more)));
+  if (S.focusDirective) {
+    const el = main.querySelector(`[data-dir="${S.focusDirective}"]`);
+    if (el) { el.classList.add('focus'); el.scrollIntoView({ behavior: 'smooth', block: 'center' }); await directiveDetail(S.focusDirective); }
+    else if (S.dirFilter !== 'all') { S.dirFilter = 'all'; return go('directives'); }
+    S.focusDirective = null;
+  }
+}
+
+function directiveCard(d) {
+  const who = d.assigned_to_label || d.staff?.name;
+  const order = ['received', 'assigned', 'in_progress', 'done'];
+  const endBad = d.status === 'rejected' || d.status === 'cancelled';
+  const at = endBad ? 3 : order.indexOf(d.status);
+  const st = (i, title, desc) => {
+    const cls = i < at || (i === 3 && d.status === 'done') ? 'done' : i === at ? (endBad ? 'fail' : 'now') : '';
+    return `<div class="step ${cls}"><div class="dot">${cls === 'done' ? '✓' : cls === 'fail' ? '!' : i + 1}</div>
+      <div class="t">${title}</div><div class="d">${desc}</div></div>`;
+  };
+  const statusLine = {
+    received: '에이전트가 지시를 읽고 담당 직원을 정하는 중입니다.',
+    assigned: `${esc(who)}에게 배정되었고 곧 처리를 시작합니다.`,
+    in_progress: `${esc(who)}이(가) 처리하고 있습니다${d.progress_note ? ': ' + esc(d.progress_note) : '.'}`,
+    done: `완료되었습니다${d.result_note ? ': ' + esc(d.result_note) : '.'}`,
+    rejected: `처리하지 못했습니다${d.result_note ? ': ' + esc(d.result_note) : '.'}`,
+    cancelled: '대표가 취소한 지시입니다.',
+  }[d.status];
+  return `<div class="card dcard" data-dir="${esc(d.id)}">
+    <div class="row"><b style="font-size:15.5px;flex:1;min-width:200px">${esc(d.content)}</b>
+      ${pill(DIR_STATUS[d.status] || d.status, d.status === 'done' ? 'good' : endBad ? 'bad' : 'accent')}</div>
+    ${d.summary ? `<div class="quiet" style="margin-top:2px">요약: ${esc(d.summary)}</div>` : ''}
+    <div class="route" style="margin-top:10px">
+      <span class="node"><b>보낸 사람</b> 대표 · ${esc(d.devices?.name || '기기 미상')}</span><span class="arrow">→</span>
+      <span class="node"><b>받는 사람</b> ${who ? esc(who) : '<span class="quiet">배정 전</span>'}</span>
+      ${d.episodes ? `<span class="node">${esc(d.episodes.series?.title)} ${d.episodes.number}화${d.scene_no ? ' S#' + d.scene_no : ''}</span>` : ''}
+    </div>
+    <div class="steps">
+      ${st(0, '접수', fmt(d.created_at))}
+      ${st(1, '배정', d.assigned_at ? esc(who || '') + '<br>' + fmt(d.assigned_at) + (d.assigned_reason ? '<br>' + esc(d.assigned_reason) : '') : '담당 직원 정하기')}
+      ${st(2, '처리 중', d.started_at ? (d.progress_note ? esc(d.progress_note) + '<br>' : '') + fmt(d.started_at) : '작업 진행')}
+      ${st(3, endBad ? (d.status === 'cancelled' ? '취소' : '반려') : '완료', d.completed_at ? fmt(d.completed_at) : '결과 보고')}
+    </div>
+    <p style="margin:10px 0 6px"><b>지금 상태:</b> ${statusLine}</p>
+    <div class="row"><button class="btn small" data-more="${esc(d.id)}">진행 기록 자세히</button>
+      ${['received', 'assigned', 'in_progress'].includes(d.status) ? `<button class="btn small danger" data-cancel="${esc(d.id)}">지시 취소</button>` : ''}</div>
+    <div id="more-${esc(d.id)}"></div>
+  </div>`;
+}
+
+async function directiveDetail(id) {
+  const box = document.getElementById('more-' + id); if (!box) return;
+  if (box.innerHTML) { box.innerHTML = ''; return; }
+  const jobs = await q(S.sb.from('jobs').select('id,type,status,attempts,error,created_at,finished_at').eq('directive_id', id).order('created_at'));
+  const ids = [id, ...jobs.map(j => j.id)];
+  const events = await q(S.sb.from('activity_log').select('occurred_at,actor,summary,devices(name)').in('entity_id', ids).order('occurred_at'));
+  const JOB = { queued: ['대기', ''], running: ['실행 중', 'accent'], done: ['완료', 'good'], failed: ['실패', 'bad'], cancelled: ['취소', ''], on_hold: ['보류', 'warn'] };
+  box.innerHTML = `
+    <h3>이 지시로 생긴 작업</h3>
+    ${jobs.length ? `<table><tr><th>작업</th><th>상태</th><th>시각</th></tr>${jobs.map(j => `<tr><td>${esc(JOB_NAME[j.type] || j.type)}
+      ${j.error ? `<br><span class="quiet">${esc(j.error)}</span>` : ''}</td><td>${pill(JOB[j.status]?.[0] || j.status, JOB[j.status]?.[1])}</td>
+      <td class="quiet">${fmt(j.finished_at || j.created_at)}</td></tr>`).join('')}</table>` : '<p class="quiet">아직 없습니다.</p>'}
+    <h3>진행 기록</h3>
+    ${events.length ? `<table>${events.map(e => `<tr><td class="quiet" style="white-space:nowrap">${fmt(e.occurred_at)}</td>
+      <td>${esc(e.actor)}<br><span class="quiet">${esc(e.devices?.name || '')}</span></td><td>${esc(human(e.summary))}</td></tr>`).join('')}</table>` : '<p class="quiet">기록이 없습니다.</p>'}`;
+}
+const JOB_NAME = {
+  ping: '연결 시험', summarize_script_diff: '대본 변경 요약', split_scenes: '씬 나누기', summarize_directive: '지시 읽고 담당 정하기',
+  write_prompts: '프롬프트 작성 (감독)', review_prompts: '프롬프트 감수 (대본감수자)', generate_keyframe: '키프레임 생성',
+  review_keyframe: '키프레임 검사 (영상감수자)', generate_video: '영상 생성', review_video: '영상 검사 (영상감수자)',
+  final_review: '최종 감수 (최종감수자)', evaluate: '채점 (평가자)', edit_episode: '편집 (맥북)',
+  prepare_edit_kit: '편집 준비 폴더 (맥북)', make_subtitles: '자막 생성 (맥북)', normalize_audio: '음량 맞춤 (맥북)',
+  upscale_video: '업스케일 (맥북)', local_check: '무료 1차 검사 (맥북)', update_continuity: '연속성 기록 정리',
+};
+
+// ------------------------------------------------------------------
+// 에이전트: 배포, 추가·설치, 원격 통제
+// ------------------------------------------------------------------
+const AGENT_FILES = ['agent.py', 'install.sh', 'install.ps1'];
+const agentFile = name => document.getElementById('f-' + name)?.textContent.replace(/^\n/, '') || '';
+const AGENT_VERSION = (agentFile('agent.py').match(/^VERSION = "([^"]+)"/m) || [])[1] || '?';
+const agentBase = () => loadJSON(LS.cfg).url + '/storage/v1/object/public/agent';
+const ONLINE_SEC = 60;
+const verNum = v => String(v || '0').split('.').map(n => n.padStart(4, '0')).join('.');
+
+function installCommand(platform, token) {
+  const { url, key } = loadJSON(LS.cfg), base = agentBase(), t = Date.now();
+  return platform === 'mac'
+    ? `curl -fsSL "${base}/install.sh?t=${t}" | bash -s -- "${url}" "${key}" "${token}"`
+    : `$env:NYX_URL='${url}'; $env:NYX_KEY='${key}'; $env:NYX_TOKEN='${token}'; iex ([Text.Encoding]::UTF8.GetString((Invoke-WebRequest '${base}/install.ps1?t=${t}' -UseBasicParsing).RawContentStream.ToArray()))`;
+}
+function installBox(platform, name, token) {
+  const cmd = installCommand(platform, token);
+  const how = platform === 'mac'
+    ? '<b>맥</b>: ⌘+스페이스 → "터미널" 입력 → Enter로 터미널을 엽니다. 아래 명령을 붙여 넣고(⌘V) Enter를 누르세요.'
+    : '<b>Windows</b>: 시작 메뉴에서 "PowerShell"을 검색해 엽니다. 아래 명령을 붙여 넣고(마우스 오른쪽 클릭) Enter를 누르세요.';
+  return `<div class="card" style="border-color:var(--accent)">
+    <b>${esc(name)} 설치 명령</b>
+    <p>${how}</p>
+    <pre class="doc" id="icmd" style="max-height:160px">${esc(cmd)}</pre>
+    <div class="row" style="margin-top:8px"><button class="btn primary" id="icopy">명령 복사</button>
+      <span class="quiet">설치하는 컴퓨터에서 이 대시보드를 열고 복사하면 편합니다.</span></div>
+    <p class="quiet" style="margin-top:10px">⚠️ 이 명령에는 이 기기 전용 열쇠(토큰)가 들어 있어 <b>지금 한 번만</b> 보입니다. 다른 사람에게 보내지 마세요.
+    다시 필요하면 "설치 명령 다시 받기"를 누르면 됩니다(새 열쇠가 나오고 이전 설치는 끊깁니다). 1~3분 걸리며 관리자 비밀번호는 필요 없습니다.</p>
+  </div>`;
+}
+function bindCopy() {
+  const b = $('#icopy'); if (!b) return;
+  b.onclick = async () => {
+    try { await navigator.clipboard.writeText($('#icmd').textContent); toast('복사했습니다'); }
+    catch { const r = document.createRange(); r.selectNodeContents($('#icmd')); getSelection().removeAllRanges(); getSelection().addRange(r); toast('선택해 두었습니다. 복사하기(⌘C / Ctrl+C)를 누르세요'); }
+  };
+}
+
+async function viewAgents(main) {
+  const stored = await fetch(agentBase() + '/version.txt?t=' + Date.now()).then(r => r.ok ? r.text() : null, () => null);
+  const storedVer = stored ? stored.trim() : null;
+  main.innerHTML = `
+  <h2>에이전트</h2>
+  <p class="quiet">각 컴퓨터에서 일하는 프로그램입니다. 설치는 컴퓨터마다 처음 한 번만 하고, 그 뒤로는 여기 버튼으로 통제합니다.</p>
+  <div class="card">
+    <div class="row"><b>에이전트 프로그램</b>
+      ${storedVer === AGENT_VERSION ? pill('배포됨 v' + AGENT_VERSION, 'good') : pill(storedVer ? `저장소 v${storedVer} · 새 버전 v${AGENT_VERSION}` : '아직 배포 안 됨', 'warn')}
+      <button class="btn small ${storedVer === AGENT_VERSION ? '' : 'primary'}" id="deploy" style="margin-left:auto">저장소에 배포</button></div>
+    <p class="quiet" style="margin:6px 0 0">컴퓨터가 설치·업데이트할 때 여기서 받아 갑니다. 새 버전이 나오면 "저장소에 배포" 후 각 에이전트의 "업데이트"를 누르세요.</p>
+  </div>
+  <div id="agList"><p class="quiet">불러오는 중…</p></div>
+  <div class="card">
+    <b>에이전트 추가</b>
+    <div class="row" style="align-items:flex-end">
+      <div style="flex:2;min-width:160px"><label>이름</label><input id="aname" placeholder="예: Windows 본부 PC, 회사 맥북"></div>
+      <div style="flex:1;min-width:130px"><label>종류</label><select id="aplat"><option value="windows">Windows</option>
+        <option value="mac" ${guessKind() === 'mac_browser' ? 'selected' : ''}>맥</option></select></div>
+      <button class="btn primary" id="aadd">추가하고 설치 명령 받기</button></div>
+  </div>
+  <div id="ainstall"></div>`;
+
+  $('#deploy').onclick = guard(async () => {
+    const btn = $('#deploy'); btn.disabled = true; btn.textContent = '배포 중…';
+    try {
+      for (const name of AGENT_FILES) {
+        const text = agentFile(name); if (!text) throw new Error(name + ' 내용이 비어 있습니다');
+        const { error } = await S.sb.storage.from('agent').upload(name, new Blob([text], { type: 'text/plain;charset=utf-8' }),
+          { upsert: true, contentType: 'text/plain; charset=utf-8', cacheControl: '0' });
+        if (error) throw error;
+      }
+      const { error } = await S.sb.storage.from('agent').upload('version.txt', new Blob([AGENT_VERSION], { type: 'text/plain' }),
+        { upsert: true, contentType: 'text/plain', cacheControl: '0' });
+      if (error) throw error;
+      toast(`에이전트 v${AGENT_VERSION}를 배포했습니다`); go('agents');
+    } finally { const b = $('#deploy'); if (b) { b.disabled = false; b.textContent = '저장소에 배포'; } }
+  });
+  $('#aadd').onclick = guard(async () => {
+    const name = $('#aname').value.trim(); if (!name) return toast('이름을 적어 주세요');
+    if (storedVer == null) return toast('먼저 위의 "저장소에 배포"를 누르세요');
+    const plat = $('#aplat').value;
+    const r = await q(S.sb.rpc('create_agent', { p_name: name, p_platform: plat }));
+    $('#aname').value = '';
+    $('#ainstall').innerHTML = installBox(plat, name, r.token); bindCopy();
+    $('#ainstall').scrollIntoView({ behavior: 'smooth' });
+    await renderAgentList(storedVer);
+  });
+  await renderAgentList(storedVer);
+  if (S.agentTimer) clearInterval(S.agentTimer);
+  S.agentTimer = setInterval(() => {
+    if (S.tab !== 'agents' || !$('#agList')) { clearInterval(S.agentTimer); S.agentTimer = null; return; }
+    renderAgentList(storedVer).catch(() => {});
+  }, 10000);
+}
+
+async function renderAgentList(storedVer) {
+  const box = $('#agList'); if (!box) return;
+  const [st, cmds] = await Promise.all([
+    q(S.sb.from('agent_status').select('*,devices(name,kind)')),
+    q(S.sb.from('agent_commands').select('id,device_id,command,status,result,created_at,done_at').order('created_at', { ascending: false }).limit(60)),
+  ]);
+  const list = st.filter(a => a.state !== 'removed').sort((a, b) => (a.devices?.name || '').localeCompare(b.devices?.name || ''));
+  if (!list.length) { box.innerHTML = '<div class="card quiet">아직 에이전트가 없습니다. 아래에서 추가하세요.</div>'; return; }
+  const CMD = { ping: '연결 시험', restart: '재시작', update: '업데이트' };
+  const CST = { queued: ['전달 대기', ''], sent: ['처리 중', 'accent'], done: ['완료', 'good'], failed: ['실패', 'bad'] };
+  box.innerHTML = list.map(a => {
+    const age = a.last_seen_at ? (Date.now() - new Date(a.last_seen_at)) / 1000 : null;
+    const online = age != null && age < ONLINE_SEC;
+    const conn = a.last_seen_at == null ? pill('설치 전', 'warn') : online ? pill('온라인', 'good') : pill('오프라인', 'bad');
+    const state = !online ? '' : a.paused ? pill('일시정지', 'warn') : a.current_job ? pill('작업 중', 'accent')
+      : a.state === 'error' ? pill('오류', 'bad') : pill('대기 중', '');
+    const old = storedVer && a.version && verNum(a.version) < verNum(storedVer);
+    const recent = cmds.filter(c => c.device_id === a.device_id).slice(0, 3);
+    return `<div class="card">
+      <div class="row"><b style="font-size:16px">${esc(a.devices?.name || '이름 없음')}</b>
+        ${pill(a.platform === 'mac' ? '맥' : a.platform === 'windows' ? 'Windows' : (a.platform || '-'))}${conn}${state}
+        ${a.version ? pill('v' + a.version, old ? 'warn' : '') : ''}${old ? '<span class="quiet">새 버전 있음</span>' : ''}</div>
+      <div class="quiet" style="margin-top:6px">마지막 통신 ${fmt(a.last_seen_at)}${a.info?.hostname ? ` · ${esc(a.info.hostname)} · ${esc(a.info.os || '')}` : ''}
+        ${a.current_job ? `<br>지금 하는 일: <b>${esc(JOB_NAME[a.current_job] || a.current_job)}</b>` : ''}</div>
+      ${a.last_error ? `<div class="msg err" style="margin:8px 0 0">${esc(a.last_error)}</div>` : ''}
+      <div class="row" style="margin-top:10px">
+        <button class="btn small" data-cmd="ping" data-dev="${esc(a.device_id)}">연결 시험</button>
+        <button class="btn small" data-pause="${esc(a.device_id)}" data-v="${a.paused ? '0' : '1'}">${a.paused ? '다시 시작' : '일시정지'}</button>
+        <button class="btn small" data-cmd="restart" data-dev="${esc(a.device_id)}">재시작</button>
+        <button class="btn small ${old ? 'primary' : ''}" data-cmd="update" data-dev="${esc(a.device_id)}">업데이트</button>
+        <button class="btn small" data-reissue="${esc(a.device_id)}" data-plat="${esc(a.platform || 'windows')}" data-name="${esc(a.devices?.name || '')}">설치 명령 다시 받기</button>
+        <button class="btn small danger" data-remove="${esc(a.device_id)}">연결 해제</button></div>
+      ${recent.length ? `<table style="margin-top:8px">${recent.map(c => `<tr><td class="quiet hide-m" style="white-space:nowrap">${fmt(c.created_at)}</td>
+        <td style="white-space:nowrap">${esc(CMD[c.command] || c.command)}</td><td>${pill(CST[c.status][0], CST[c.status][1])}</td>
+        <td class="quiet">${esc(c.result || '')}</td></tr>`).join('')}</table>` : ''}
+      ${!online && a.last_seen_at == null ? '<p class="quiet" style="margin:8px 0 0">설치 명령을 실행하면 1분 안에 온라인으로 바뀝니다.</p>' : ''}
+      ${!online && a.last_seen_at != null ? '<p class="quiet" style="margin:8px 0 0">컴퓨터가 꺼졌거나 잠들었거나 인터넷이 끊겼습니다. 명령은 다시 연결되면 처리됩니다.</p>' : ''}
+    </div>`;
+  }).join('');
+  box.querySelectorAll('[data-cmd]').forEach(b => b.onclick = guard(async () => {
+    await q(S.sb.from('agent_commands').insert({ device_id: b.dataset.dev, command: b.dataset.cmd }));
+    toast(`${CMD[b.dataset.cmd]} 명령을 보냈습니다. 15초 안에 처리됩니다`); renderAgentList(storedVer);
+  }));
+  box.querySelectorAll('[data-pause]').forEach(b => b.onclick = guard(async () => {
+    const paused = b.dataset.v === '1';
+    await q(S.sb.from('agent_status').update({ paused }).eq('device_id', b.dataset.pause));
+    toast(paused ? '일시정지했습니다. 하던 작업은 끝내고 멈춥니다' : '다시 시작했습니다'); renderAgentList(storedVer);
+  }));
+  box.querySelectorAll('[data-reissue]').forEach(b => b.onclick = guard(async () => {
+    if (!confirm('새 설치 명령을 만들까요? 이 기기에 이미 설치된 에이전트는 연결이 끊기고, 새 명령으로 다시 설치해야 합니다.')) return;
+    const token = await q(S.sb.rpc('reissue_agent_token', { p_device: b.dataset.reissue }));
+    $('#ainstall').innerHTML = installBox(b.dataset.plat, b.dataset.name, token); bindCopy();
+    $('#ainstall').scrollIntoView({ behavior: 'smooth' });
+  }));
+  box.querySelectorAll('[data-remove]').forEach(b => b.onclick = guard(async () => {
+    if (!confirm('이 에이전트의 연결을 끊을까요? 그 컴퓨터의 프로그램은 더 이상 일을 받지 못합니다.')) return;
+    await q(S.sb.rpc('remove_agent', { p_device: b.dataset.remove })); toast('연결을 끊었습니다'); renderAgentList(storedVer);
+  }));
+}
+
+// ------------------------------------------------------------------
+// 활동 기록
+// ------------------------------------------------------------------
+async function viewLog(main) {
+  const devices = await q(S.sb.from('devices').select('name').order('name'));
+  main.innerHTML = `
+  <h2>활동 기록</h2>
+  <div class="card row">
+    <select id="fdev" style="width:auto"><option value="">모든 기기</option>${devices.map(d => `<option>${esc(d.name)}</option>`).join('')}</select>
+    <select id="fwho" style="width:auto"><option value="">모든 주체</option><option value="대표">대표</option><option value="!대표">AI·에이전트</option></select>
+    <input id="ftxt" placeholder="내용 검색" style="flex:1;min-width:140px">
+    <button class="btn" id="fgo">검색</button>
+  </div>
+  <div class="card" id="logBox"><p class="quiet">불러오는 중…</p></div>
+  <div class="row"><button class="btn" id="fmore">더 보기</button></div>`;
+  let limit = 100;
+  const load = guard(async () => {
+    let qy = S.sb.from('v_activity').select('*').limit(limit);
+    if ($('#fdev').value) qy = qy.eq('device', $('#fdev').value);
+    if ($('#fwho').value === '대표') qy = qy.eq('actor', '대표');
+    if ($('#fwho').value === '!대표') qy = qy.neq('actor', '대표');
+    const t = $('#ftxt').value.trim().replace(/[%,()]/g, ' ');
+    if (t) qy = qy.ilike('summary', `%${t}%`);
+    const rows = await q(qy);
+    $('#logBox').innerHTML = activityTable(rows);
+    $('#fmore').style.display = rows.length < limit ? 'none' : '';
+  });
+  $('#fgo').onclick = () => { limit = 100; load(); };
+  $('#ftxt').onkeydown = e => { if (e.key === 'Enter') { limit = 100; load(); } };
+  $('#fdev').onchange = $('#fwho').onchange = () => { limit = 100; load(); };
+  $('#fmore').onclick = () => { limit += 100; load(); };
+  await load();
+}
+
+// ------------------------------------------------------------------
+// 설정: 기기, 2단계 인증, 로그아웃
+// ------------------------------------------------------------------
+async function viewSettings(main) {
+  const factors = await S.sb.auth.mfa.listFactors();
+  const verified = factors.data?.totp?.filter(f => f.status === 'verified') || [];
+  main.innerHTML = `
+  <h2>설정</h2>
+  <div class="card"><b>이 기기</b><p>${esc(S.device.name)} <span class="quiet">(${esc(S.device.kind)})</span></p>
+    <button class="btn small" id="chdev">다른 기기 이름으로 바꾸기</button></div>
+  <div class="card"><b>2단계 인증</b>
+    ${verified.length ? `<p>${pill('켜짐', 'good')} 로그인할 때 인증 앱 숫자를 함께 입력합니다.</p>`
+      : `<p>${pill('꺼짐', 'bad')} 휴대폰 인증 앱(Google Authenticator 등)으로 켜 두세요. 대본과 모든 기록을 보호합니다.</p>
+         <button class="btn primary" id="mfa">2단계 인증 켜기</button>`}
+    <div id="mfaBox"></div></div>
+  <div class="card"><b>브라우저 알림</b>
+    <p class="quiet">이 화면이 열려 있지만 다른 창을 보고 있을 때도 알림 창을 띄웁니다. 화면을 완전히 닫았을 때의 휴대폰 알림은 다음 단계(푸시 알림)에서 추가됩니다.</p>
+    <div class="row">${'Notification' in window ? (Notification.permission === 'granted' ? pill('허용됨', 'good')
+      : `<button class="btn" id="perm">알림 허용하기</button>`) : '<span class="quiet">이 브라우저는 알림을 지원하지 않습니다.</span>'}</div></div>
+  <div class="card"><b>계정</b><p class="quiet">${esc(S.user.email)}</p>
+    <div class="row"><button class="btn" id="out">로그아웃</button><button class="btn small" id="cfg" style="margin-left:auto">서버 설정 초기화</button></div></div>`;
+  if ($('#perm')) $('#perm').onclick = async () => {
+    const r = await Notification.requestPermission();
+    toast(r === 'granted' ? '알림을 허용했습니다' : '알림이 허용되지 않았습니다. 브라우저 설정에서 바꿀 수 있습니다'); go('settings');
+  };
+  $('#chdev').onclick = () => { localStorage.removeItem(LS.device); location.reload(); };
+  $('#out').onclick = async () => { await signOutAll(); location.hash = ''; boot(); };
+  $('#cfg').onclick = async () => { if (!confirm('서버 설정을 지우고 처음 화면으로 갈까요?')) return; await signOutAll(); localStorage.removeItem(LS.cfg); resetClient(); boot(); };
+  if ($('#mfa')) $('#mfa').onclick = guard(async () => {
+    for (const f of factors.data?.all || []) if (f.status !== 'verified') await S.sb.auth.mfa.unenroll({ factorId: f.id });
+    const { data, error } = await S.sb.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'NYX ' + Date.now() });
+    if (error) throw error;
+    $('#mfaBox').innerHTML = `
+      <p>1. 인증 앱으로 아래 QR을 찍으세요.</p><img src="${esc(data.totp.qr_code)}" alt="QR" style="width:200px;height:200px;background:#fff;padding:6px;border-radius:8px">
+      <p class="quiet">QR을 못 찍으면 이 키를 직접 입력: <code>${esc(data.totp.secret)}</code></p>
+      <p>2. 앱에 나온 6자리 숫자를 입력하세요.</p>
+      <div class="row"><input id="mcode" inputmode="numeric" maxlength="6" style="width:140px"><button class="btn primary" id="mok">확인</button></div>`;
+    $('#mok').onclick = guard(async () => {
+      const r = await S.sb.auth.mfa.challengeAndVerify({ factorId: data.id, code: $('#mcode').value.trim() });
+      if (r.error) return toast('숫자가 맞지 않습니다');
+      toast('2단계 인증을 켰습니다'); go('settings');
+    });
+  });
+}
+
+boot().catch(e => { console.error(e); $('#app').innerHTML = `<div class="center card"><div class="msg err">${esc(errText(e))}</div>
+  <button class="btn" onclick="localStorage.clear();location.reload()">처음부터 다시</button></div>`; });
+</script>
+</body>
+</html>
