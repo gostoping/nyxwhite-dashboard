@@ -137,6 +137,23 @@
   .seg button { border: 0; background: var(--panel); color: var(--quiet); padding: 5px 10px; font: inherit; font-size: 13px; cursor: pointer; }
   .seg button + button { border-left: 1px solid var(--line); }
   .seg button.on { background: var(--accent); color: #fff; font-weight: 600; }
+  /* 광고 */
+  .ad-sum { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); margin-bottom: 12px; } .ad-sum .card { margin-bottom: 0; } .ad-sum .n { font-size: 22px; }
+  .ad-split { grid-template-columns: 320px 1fr; }
+  .ad-list { padding: 8px; max-height: 78vh; overflow: auto; }
+  .ad-grp { font-size: 12.5px; font-weight: 700; color: var(--quiet); padding: 10px 8px 4px; border-bottom: 1px solid var(--line); }
+  .ad-item { padding: 9px 8px; border-radius: 8px; cursor: pointer; border-bottom: 1px solid var(--line); }
+  .ad-item:hover { background: var(--bg); } .ad-item.on { background: var(--accent-soft); }
+  .ad-h { margin: 18px 0 6px; font-size: 15px; color: var(--accent); }
+  .ad-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .ad-kpis div { background: var(--bg); border-radius: 8px; padding: 8px 10px; } .ad-kpis b { display: block; font-size: 17px; } .ad-kpis span { font-size: 12px; color: var(--quiet); }
+  .ad-run { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
+  .ad-mline { font-size: 13.5px; margin-top: 4px; line-height: 1.7; }
+  .up { color: var(--good); font-weight: 600; font-size: 12px; } .down { color: var(--bad); font-weight: 600; font-size: 12px; }
+  .ad-cmp td, .ad-cmp th { font-size: 13px; } .ad-cmp tr.me td { background: var(--accent-soft); font-weight: 600; }
+  .ad-mform { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .ad-emptyc { text-align: center; padding: 28px 16px; }
+  @media (max-width: 760px) { .ad-split { grid-template-columns: 1fr; } .ad-kpis, .ad-mform { grid-template-columns: repeat(2, 1fr); } }
   /* 편집실 */
   .ed-empty { text-align: center; padding: 30px 16px; } .ed-empty .row { justify-content: center; }
   .ed-top { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; }
@@ -2265,7 +2282,7 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 const DEFAULT_URL = 'https://fqjorcstghuiyjsirysv.supabase.co';
 const LS = { cfg: 'nix.cfg', device: 'nix.device' };
 const TABS = [
-  ['home', '홈'], ['guide', '안내'], ['scripts', '대본'], ['production', '제작'], ['edit', '편집'], ['bible', '바이블'], ['staff', '직원'], ['directives', '지시'], ['agents', '에이전트'], ['costs', '비용'], ['log', '기록'], ['settings', '설정'],
+  ['home', '홈'], ['guide', '안내'], ['scripts', '대본'], ['production', '제작'], ['edit', '편집'], ['ads', '광고'], ['bible', '바이블'], ['staff', '직원'], ['directives', '지시'], ['agents', '에이전트'], ['costs', '비용'], ['log', '기록'], ['settings', '설정'],
 ];
 const EP_STATUS = { writing: '집필', ready: '준비', in_production: '제작 중', review: '검토', approved: '승인', editing: '편집', done: '완료', on_hold: '보류' };
 const V_STATUS = { draft: '초안', confirmed: '확정(현재)', superseded: '이전 확정본' };
@@ -2573,7 +2590,7 @@ function go(tab) {
   S.tab = tab; history.replaceState(null, '', '#' + tab);
   document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('on', b.dataset.t === tab));
   const main = $('#main'); main.innerHTML = '<p class="quiet">불러오는 중…</p>';
-  ({ home: viewHome, guide: viewGuide, scripts: viewScripts, production: viewProduction, edit: viewEdit, bible: viewBible, staff: viewStaff, directives: viewDirectives, agents: viewAgents, costs: viewCosts, log: viewLog, settings: viewSettings }[tab])(main)
+  ({ home: viewHome, guide: viewGuide, scripts: viewScripts, production: viewProduction, edit: viewEdit, ads: viewAds, bible: viewBible, staff: viewStaff, directives: viewDirectives, agents: viewAgents, costs: viewCosts, log: viewLog, settings: viewSettings }[tab])(main)
     .catch(e => { console.error(e); main.innerHTML = `<div class="msg err">${esc(errText(e))}</div>`; });
 }
 const pill = (text, kind = '') => `<span class="pill ${kind}">${esc(text)}</span>`;
@@ -5354,6 +5371,240 @@ function edPollRenders() {
 }
 
 // ------------------------------------------------------------------
+// 광고: 시리즈별 광고용 콘텐츠 · 집행 이력 · 누적 성과 · 앞뒤 비교 · 승률
+// ------------------------------------------------------------------
+const AD_KIND = { shorts: '쇼츠', hook: '갈고리 장면', trailer: '예고편', compilation: '몰아보기(합본)', episode: '본편', thumbnail: '썸네일·제목', other: '기타' };
+const AD_STATUS = { idea: ['아이디어', ''], making: ['제작 중', 'warn'], ready: ['준비됨', 'accent'], running: ['집행 중', 'good'], paused: ['멈춤', 'warn'], ended: ['종료', ''] };
+const AD_PLATFORM = { youtube_ads: '유튜브 광고(유료)', youtube_organic: '유튜브 일반 공개', youtube_monetization: '유튜브 수익 광고', meta: '메타(인스타·페북)', tiktok: '틱톡', other: '기타' };
+const AD_OBJ = { subscribers: '구독', views: '조회', traffic: '본편 유입', revenue: '수익', awareness: '인지도' };
+const AD_PLACE = { pre: '앞 광고', mid: '중간 광고', post: '뒤 광고' };
+const AD_FORM = { ...AD_PLACE, instream: '인스트림', shorts: '쇼츠 피드', discovery: '검색·추천' };
+const AD_M = [['impressions', '노출'], ['views', '조회'], ['clicks', '클릭'], ['subs', '구독'], ['watch_hours', '시청 시간(시간)'], ['avg_view_pct', '평균 시청 비율(%)'], ['next_ep_rate', '다음 화 이동(%)'], ['revenue_krw', '광고 수익(원)']];
+const n0 = v => +v || 0;
+const pct = v => v == null || !isFinite(v) ? '-' : (v * 100).toFixed(1) + '%';
+const num = v => v == null || !isFinite(v) ? '-' : Math.round(v).toLocaleString('ko-KR');
+
+function adAgg(runs) {
+  const a = { runs: runs.length, spend: 0, impressions: 0, views: 0, clicks: 0, subs: 0, watch_hours: 0, revenue: 0, vpct_w: 0, next_w: 0, first: null, last: null, pviews: 0, psubs: 0, pimp: 0, pclicks: 0, rviews: 0, vv: 0, nv: 0 };
+  for (const r of runs) {
+    const m = r.metrics || {};
+    a.spend += n0(r.spend_krw); a.impressions += n0(m.impressions); a.views += n0(m.views); a.clicks += n0(m.clicks); a.subs += n0(m.subs);
+    a.watch_hours += n0(m.watch_hours); a.revenue += n0(m.revenue_krw);
+    if (m.avg_view_pct != null) { a.vpct_w += n0(m.avg_view_pct) * n0(m.views); a.vv += n0(m.views); }
+    if (m.next_ep_rate != null) { a.next_w += n0(m.next_ep_rate) * n0(m.views); a.nv += n0(m.views); }
+    if (n0(r.spend_krw) > 0) { a.pviews += n0(m.views); a.psubs += n0(m.subs); a.pimp += n0(m.impressions); a.pclicks += n0(m.clicks); }
+    if (n0(m.revenue_krw) > 0) a.rviews += n0(m.views);
+    if (r.started_at && (!a.first || r.started_at < a.first)) a.first = r.started_at;
+    const e = r.ended_at || r.started_at; if (e && (!a.last || e > a.last)) a.last = e;
+  }
+  // 비용 지표는 돈을 쓴 집행만, 수익 지표는 수익이 난 집행만으로 계산
+  a.cpv = a.pviews ? a.spend / a.pviews : null; a.cps = a.psubs ? a.spend / a.psubs : null;
+  a.ctr = a.pimp ? a.pclicks / a.pimp : null; a.rpm = a.rviews && a.revenue ? a.revenue / a.rviews * 1000 : null;
+  a.avg_view = a.vv ? a.vpct_w / a.vv / 100 : null; a.next_ep = a.nv ? a.next_w / a.nv / 100 : null;
+  a.roas = a.spend && a.revenue ? a.revenue / a.spend : null;
+  return a;
+}
+// 비교 기준: 수익 집행만 있으면 1,000회당 수익(높을수록), 구독이 있으면 구독당 비용(낮을수록), 아니면 조회당 비용(낮을수록)
+function adKey(a) {
+  if (a.rpm != null && !a.spend) return { k: 'rpm', v: a.rpm, better: 'high', label: '1,000회당 수익' };
+  if (a.cps != null) return { k: 'cps', v: a.cps, better: 'low', label: '구독당 비용' };
+  if (a.cpv != null) return { k: 'cpv', v: a.cpv, better: 'low', label: '조회당 비용' };
+  return null;
+}
+function adWinRates(contents, runsBy) {
+  const keys = Object.fromEntries(contents.map(c => [c.id, adKey(adAgg(runsBy[c.id] || []))]));
+  const out = {};
+  for (const c of contents) {
+    const me = keys[c.id]; if (!me) { out[c.id] = null; continue; }
+    let w = 0, l = 0;
+    for (const o of contents) {
+      const ot = keys[o.id]; if (o.id === c.id || !ot || ot.k !== me.k) continue;
+      if (me.v === ot.v) continue;
+      ((me.better === 'low' ? me.v < ot.v : me.v > ot.v) ? w++ : l++);
+    }
+    out[c.id] = w + l ? { w, l, rate: w / (w + l), key: me } : { w: 0, l: 0, rate: null, key: me };
+  }
+  return out;
+}
+const adKeyText = k => !k ? '-' : k.k === 'rpm' ? won(k.v) : won(k.v);
+
+async function viewAds(main) {
+  const series = await q(S.sb.from('series').select('id,title').order('created_at'));
+  if (!S.seriesId || !series.some(s => s.id === S.seriesId)) S.seriesId = series[0]?.id || null;
+  if (!S.seriesId) { main.innerHTML = '<h2>광고</h2><div class="card quiet">먼저 대본 탭에서 시리즈를 만드세요.</div>'; return; }
+  const [episodes, contents, settings] = await Promise.all([
+    q(S.sb.from('episodes').select('id,number,title').eq('series_id', S.seriesId).order('number')),
+    q(S.sb.from('ad_contents').select('*').eq('series_id', S.seriesId).order('created_at')),
+    q(S.sb.from('app_settings').select('value').eq('key', 'ads').maybeSingle()),
+  ]);
+  const runs = contents.length ? await q(S.sb.from('ad_runs').select('*').in('content_id', contents.map(c => c.id)).order('started_at', { ascending: true, nullsFirst: true })) : [];
+  const runsBy = {}; runs.forEach(r => (runsBy[r.content_id] = runsBy[r.content_id] || []).push(r));
+  const all = adAgg(runs), wins = adWinRates(contents, runsBy);
+  const epOf = id => episodes.find(e => e.id === id);
+  // 스토리(화) 순서대로
+  const order = c => (epOf(c.episode_id)?.number ?? 9999) * 1e13 + new Date(c.created_at).getTime() / 1000;
+  const sorted = [...contents].sort((a, b) => order(a) - order(b));
+  const groups = []; for (const c of sorted) { const k = c.episode_id || 'all'; let g = groups.find(x => x.k === k); if (!g) groups.push(g = { k, ep: epOf(c.episode_id), items: [] }); g.items.push(c); }
+  const best = sorted.filter(c => wins[c.id]?.rate != null).sort((a, b) => wins[b.id].rate - wins[a.id].rate)[0];
+  if (!S.adSel || !contents.some(c => c.id === S.adSel)) S.adSel = sorted[0]?.id || null;
+  const budget = settings?.value?.monthly_budget_krw || 0;
+
+  main.innerHTML = `
+  <div class="row" style="margin-bottom:10px"><h2 style="margin:0 12px 0 0">광고</h2>
+    <select id="aSer" style="width:auto">${series.map(s => `<option value="${esc(s.id)}" ${s.id === S.seriesId ? 'selected' : ''}>${esc(s.title)}</option>`).join('')}</select>
+    <span class="quiet" style="margin-left:auto">월 광고 한도 ${budget ? won(budget) : '0원(광고비 제안 안 함)'} · <a href="#settings" id="aSet">바꾸기</a></span>
+    <button class="btn primary small" id="aNew">+ 광고 콘텐츠</button></div>
+  <div class="grid ad-sum">
+    <div class="card stat"><div class="n">${won(all.spend)}</div><div class="l">누적 광고비 · ${all.runs}회 집행</div></div>
+    <div class="card stat"><div class="n">${num(all.subs)}</div><div class="l">광고로 얻은 구독 · 구독당 ${all.cps != null ? won(all.cps) : '-'}</div></div>
+    <div class="card stat"><div class="n">${num(all.views)}</div><div class="l">조회 · 조회당 ${all.cpv != null ? won(all.cpv) : '-'} · 평균 시청 ${pct(all.avg_view)}</div></div>
+    <div class="card stat"><div class="n">${won(all.revenue)}</div><div class="l">광고 수익 ${all.roas != null ? `· 광고비 대비 ${all.roas.toFixed(2)}배` : ''}</div></div>
+    <div class="card stat"><div class="n" style="font-size:18px">${best ? esc(best.title) : '-'}</div><div class="l">${best ? `승률 1위 · ${Math.round(wins[best.id].rate * 100)}% (${wins[best.id].w}승 ${wins[best.id].l}패)` : '승률은 집행 기록이 2개 이상 쌓이면 나옵니다'}</div></div>
+  </div>
+  ${contents.length ? `<div class="split ad-split">
+    <div class="card ad-list">${groups.map(g => `<div class="ad-grp">${g.ep ? `${g.ep.number}화 「${esc(g.ep.title || '')}」` : '시리즈 전체'}</div>
+      ${g.items.map(c => { const a = adAgg(runsBy[c.id] || []), wr = wins[c.id], k = adKey(a);
+        return `<div class="ad-item ${c.id === S.adSel ? 'on' : ''}" data-ad="${c.id}">
+          <div class="row" style="gap:6px"><b>${esc(c.title)}</b></div>
+          <div class="row" style="gap:6px;margin-top:3px">${pill(AD_KIND[c.kind] || c.kind)}${pill(...(AD_STATUS[c.status] || [c.status, '']))}
+            ${wr?.rate != null ? pill(`승률 ${Math.round(wr.rate * 100)}%`, wr.rate >= 0.5 ? 'good' : 'bad') : ''}</div>
+          <div class="quiet" style="margin-top:3px">${a.runs ? `${a.runs}회 · ${won(a.spend)}${k ? ` · ${k.label} ${adKeyText(k)}` : ''}` : '아직 집행 안 함'}</div></div>`; }).join('')}`).join('')}</div>
+    <div id="adDetail"></div></div>`
+  : `<div class="card ad-emptyc"><h3 style="margin-top:0">아직 광고 콘텐츠가 없습니다</h3>
+      <p>쇼츠, 갈고리 장면, 예고편, 몰아보기(합본)처럼 <b>광고나 홍보에 쓰는 영상</b>을 여기서 시리즈·화별로 관리합니다.
+      유튜브·Google Ads를 연결하면 광고 담당이 만들고 결과를 자동으로 기록하고, 지금은 <b>+ 광고 콘텐츠</b>로 직접 넣을 수 있습니다.</p></div>`}
+  <div id="adForm"></div>`;
+  $('#aSer').onchange = e => { S.seriesId = e.target.value; S.adSel = null; go('ads'); };
+  $('#aSet').onclick = e => { e.preventDefault(); go('settings'); };
+  $('#aNew').onclick = () => adContentForm(episodes);
+  main.querySelectorAll('[data-ad]').forEach(el => el.onclick = () => { S.adSel = el.dataset.ad; main.querySelectorAll('.ad-item').forEach(x => x.classList.toggle('on', x === el)); adDetail(); });
+  const ctx = { sorted, runsBy, wins, episodes, epOf };
+  S.adCtx = ctx;
+  adDetail();
+}
+
+function adDetail() {
+  const box = $('#adDetail'); if (!box) return;
+  const { sorted, runsBy, wins, episodes, epOf } = S.adCtx;
+  const c = sorted.find(x => x.id === S.adSel); if (!c) { box.innerHTML = ''; return; }
+  const runs = runsBy[c.id] || [], a = adAgg(runs), k = adKey(a), wr = wins[c.id];
+  const i = sorted.indexOf(c), prev = sorted[i - 1], next = sorted[i + 1];
+  const cmpRow = (label, f, fmtv, better) => {
+    const me = f(a), cell = o => { if (!o) return '<td class="quiet">-</td>'; const v = f(adAgg(runsBy[o.id] || []));
+      if (v == null || me == null) return `<td>${fmtv(v)}</td>`;
+      const good = better === 'low' ? me < v : me > v; return `<td>${fmtv(v)} <span class="${me === v ? 'quiet' : good ? 'up' : 'down'}">${me === v ? '=' : good ? '▲ 이쪽이 나음' : '▼'}</span></td>`; };
+    return `<tr><td>${label}</td><td><b>${fmtv(me)}</b></td>${cell(prev)}${cell(next)}</tr>`;
+  };
+  const place = {}; runs.filter(r => r.placement && AD_PLACE[r.placement]).forEach(r => (place[r.placement] = place[r.placement] || []).push(r));
+  const rank = sorted.filter(o => wins[o.id]?.rate != null && wins[o.id].key.k === k?.k).sort((x, y) => wins[y.id].rate - wins[x.id].rate);
+  const delta = (cur, prv, key, better) => { if (cur == null || prv == null || !prv) return ''; const d = (cur - prv) / prv; const good = better === 'low' ? d < 0 : d > 0;
+    return ` <span class="${good ? 'up' : 'down'}">${d > 0 ? '+' : ''}${(d * 100).toFixed(0)}%</span>`; };
+  box.innerHTML = `<div class="card">
+    <div class="row"><h3 style="margin:0">${esc(c.title)}</h3>${pill(AD_KIND[c.kind] || c.kind)}
+      <select id="adStat" style="width:auto;margin-left:auto">${Object.entries(AD_STATUS).map(([s, [l]]) => `<option value="${s}" ${s === c.status ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+    <div class="quiet" style="margin-top:4px">${epOf(c.episode_id) ? `${epOf(c.episode_id).number}화에서` : '시리즈 전체'} · ${esc(c.created_by || '대표')} · ${fmt(c.created_at)}${c.media?.youtube_id ? ` · <a href="https://youtu.be/${esc(c.media.youtube_id)}" target="_blank">유튜브에서 보기</a>` : ''}</div>
+    ${c.description ? `<div class="bdesc">${esc(c.description)}</div>` : ''}
+
+    <h4 class="ad-h">누적 성과 ${a.first ? `<span class="quiet">${a.first} ~ ${a.last || ''}</span>` : ''}</h4>
+    ${a.runs ? `<div class="ad-kpis">
+      <div><b>${won(a.spend)}</b><span>광고비 (${a.runs}회)</span></div>
+      <div><b>${num(a.views)}</b><span>조회 · ${a.cpv != null ? won(a.cpv) : '-'}/회</span></div>
+      <div><b>${num(a.subs)}</b><span>구독 · ${a.cps != null ? won(a.cps) : '-'}/명</span></div>
+      <div><b>${pct(a.ctr)}</b><span>클릭률</span></div>
+      <div><b>${pct(a.avg_view)}</b><span>평균 시청 비율</span></div>
+      <div><b>${pct(a.next_ep)}</b><span>다음 화 이동</span></div>
+      <div><b>${won(a.revenue)}</b><span>수익 ${a.rpm != null ? `· 1,000회당 ${won(a.rpm)}` : ''}</span></div>
+      <div><b>${wr?.rate != null ? Math.round(wr.rate * 100) + '%' : '-'}</b><span>승률 ${wr?.rate != null ? `(${wr.w}승 ${wr.l}패)` : ''}</span></div>
+    </div>` : '<p class="quiet">아직 집행 기록이 없습니다. 아래 "+ 집행 기록"으로 넣거나, 광고 연결 후 자동으로 쌓입니다.</p>'}
+
+    <h4 class="ad-h">언제, 어떻게 돌렸고 결과는</h4>
+    ${runs.length ? `<div class="ad-runs">${runs.map((r, j) => { const m = r.metrics || {}, ra = adAgg([r]), pa = j ? adAgg([runs[j - 1]]) : null;
+      return `<div class="ad-run"><div class="row"><b>${esc(r.started_at || '날짜 미정')}${r.ended_at ? ` ~ ${esc(r.ended_at)}` : ''}</b>
+        ${pill(AD_PLATFORM[r.platform] || r.platform, r.platform === 'youtube_monetization' ? 'good' : 'accent')}${pill('목표: ' + (AD_OBJ[r.objective] || r.objective))}
+        ${r.placement ? pill(AD_FORM[r.placement] || r.placement) : ''}${r.position_sec != null ? pill(fmtT(+r.position_sec) + ' 위치') : ''}
+        ${r.source === 'agent' ? '<span class="quiet">광고 담당 기록</span>' : ''}
+        <button class="btn small" data-rdel="${r.id}" style="margin-left:auto">삭제</button></div>
+        ${r.targeting ? `<div class="quiet">대상: ${esc(r.targeting)}</div>` : ''}
+        <div class="ad-mline">광고비 <b>${won(r.spend_krw)}</b>${r.budget_krw ? ` / 예산 ${won(r.budget_krw)}` : ''} · 노출 ${num(m.impressions)} · 조회 ${num(m.views)}
+          · 구독 ${num(m.subs)} · 조회당 <b>${ra.cpv != null ? won(ra.cpv) : '-'}</b>${delta(ra.cpv, pa?.cpv, 'cpv', 'low')}
+          · 구독당 <b>${ra.cps != null ? won(ra.cps) : '-'}</b>${delta(ra.cps, pa?.cps, 'cps', 'low')}
+          ${m.avg_view_pct != null ? ` · 평균 시청 ${m.avg_view_pct}%` : ''}${m.next_ep_rate != null ? ` · 다음 화 ${m.next_ep_rate}%` : ''}${m.revenue_krw ? ` · 수익 ${won(m.revenue_krw)}` : ''}</div>
+        ${r.note ? `<div class="quiet">메모: ${esc(r.note)}</div>` : ''}${j ? '<div class="quiet" style="font-size:12px">% 표시는 바로 앞 집행 대비</div>' : ''}</div>`; }).join('')}</div>` : ''}
+    <button class="btn small" id="adRunAdd" style="margin-top:8px">+ 집행 기록</button>
+
+    <h4 class="ad-h">앞뒤 콘텐츠와 비교 <span class="quiet">스토리 순서 기준</span></h4>
+    <table class="ad-cmp"><tr><th></th><th>이 콘텐츠</th><th>앞: ${prev ? esc(prev.title) : '-'}</th><th>뒤: ${next ? esc(next.title) : '-'}</th></tr>
+      ${cmpRow('조회당 비용', x => x.cpv, v => v == null ? '-' : won(v), 'low')}
+      ${cmpRow('구독당 비용', x => x.cps, v => v == null ? '-' : won(v), 'low')}
+      ${cmpRow('평균 시청 비율', x => x.avg_view, pct, 'high')}
+      ${cmpRow('다음 화 이동', x => x.next_ep, pct, 'high')}
+      ${cmpRow('1,000회당 수익', x => x.rpm, v => v == null ? '-' : won(v), 'high')}</table>
+    ${Object.keys(place).length ? `<h4 class="ad-h">수익 광고 위치별 비교 (앞·중간·뒤)</h4><table class="ad-cmp"><tr><th>위치</th><th>집행</th><th>1,000회당 수익</th><th>평균 시청 비율</th></tr>
+      ${['pre', 'mid', 'post'].filter(p => place[p]).map(p => { const pa = adAgg(place[p]); return `<tr><td>${AD_PLACE[p]}</td><td>${place[p].length}회</td><td>${pa.rpm != null ? won(pa.rpm) : '-'}</td><td>${pct(pa.avg_view)}</td></tr>`; }).join('')}</table>` : ''}
+
+    <h4 class="ad-h">다른 콘텐츠와 비교한 승률</h4>
+    ${wr?.rate != null ? `<p style="margin:4px 0">기준: <b>${esc(wr.key.label)}</b>(${wr.key.better === 'low' ? '낮을수록' : '높을수록'} 이김). 같은 기준을 가진 다른 콘텐츠 ${wr.w + wr.l}개와 1:1로 비교해 <b>${wr.w}승 ${wr.l}패, 승률 ${Math.round(wr.rate * 100)}%</b>.</p>
+      <table class="ad-cmp"><tr><th>순위</th><th>콘텐츠</th><th>${esc(wr.key.label)}</th><th>승률</th></tr>${rank.map((o, r) => `<tr ${o.id === c.id ? 'class="me"' : ''}><td>${r + 1}</td><td>${esc(o.title)}</td><td>${adKeyText(wins[o.id].key)}</td><td>${Math.round(wins[o.id].rate * 100)}%</td></tr>`).join('')}</table>`
+      : '<p class="quiet">비교할 집행 기록이 부족합니다. 같은 목표로 집행한 콘텐츠가 2개 이상 생기면 계산됩니다.</p>'}
+    <div class="row" style="margin-top:14px"><button class="btn small" id="adEdit">내용 고치기</button><button class="btn small danger" id="adDel" style="margin-left:auto">콘텐츠 삭제</button></div>
+  </div>`;
+  $('#adStat').onchange = guard(async e => { await q(S.sb.from('ad_contents').update({ status: e.target.value }).eq('id', c.id)); toast('상태를 바꿨습니다'); go('ads'); });
+  $('#adRunAdd').onclick = () => adRunForm(c);
+  $('#adEdit').onclick = () => adContentForm(episodes, c);
+  $('#adDel').onclick = guard(async () => { if (!confirm(`"${c.title}"과 집행 기록을 모두 삭제할까요?`)) return; await q(S.sb.from('ad_contents').delete().eq('id', c.id)); S.adSel = null; go('ads'); });
+  box.querySelectorAll('[data-rdel]').forEach(b => b.onclick = guard(async () => { if (!confirm('이 집행 기록을 삭제할까요?')) return; await q(S.sb.from('ad_runs').delete().eq('id', b.dataset.rdel)); go('ads'); }));
+}
+
+function adContentForm(episodes, c) {
+  const box = $('#adForm'); if (!box) return;
+  box.innerHTML = `<div class="card" style="border-color:var(--accent)"><b>${c ? '광고 콘텐츠 고치기' : '새 광고 콘텐츠'}</b>
+    <div class="ed-grid2"><div><label>제목</label><input id="fT" value="${esc(c?.title || '')}" placeholder="예: 1화 공항 갈고리 쇼츠"></div>
+      <div><label>종류</label><select id="fK">${Object.entries(AD_KIND).map(([k, l]) => `<option value="${k}" ${k === (c?.kind || 'shorts') ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
+    <div class="ed-grid2"><div><label>어느 화(스토리)</label><select id="fE"><option value="">시리즈 전체</option>${episodes.map(e => `<option value="${e.id}" ${e.id === c?.episode_id ? 'selected' : ''}>${e.number}화 ${esc(e.title || '')}</option>`).join('')}</select></div>
+      <div><label>유튜브 영상 ID (선택)</label><input id="fY" value="${esc(c?.media?.youtube_id || '')}" placeholder="youtu.be/ 뒤의 11자리"></div></div>
+    <label>설명 (어떤 장면·어떤 의도인지)</label><textarea id="fD" style="min-height:70px;font-family:inherit">${esc(c?.description || '')}</textarea>
+    <div class="row" style="margin-top:10px"><button class="btn primary" id="fGo">저장</button><button class="btn" id="fX">취소</button></div></div>`;
+  box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  $('#fX').onclick = () => { box.innerHTML = ''; };
+  $('#fGo').onclick = guard(async () => {
+    const title = $('#fT').value.trim(); if (!title) return toast('제목을 적어 주세요');
+    const row = { title, kind: $('#fK').value, episode_id: $('#fE').value || null, description: $('#fD').value.trim() || null,
+      media: { ...(c?.media || {}), youtube_id: $('#fY').value.trim().replace(/.*(?:youtu\.be\/|v=|shorts\/)/, '').slice(0, 11) || undefined } };
+    if (c) await q(S.sb.from('ad_contents').update(row).eq('id', c.id));
+    else { const r = await q(S.sb.from('ad_contents').insert({ ...row, series_id: S.seriesId, created_by: '대표' }).select('id').single()); S.adSel = r.id; }
+    toast('저장했습니다'); go('ads');
+  });
+}
+
+function adRunForm(c) {
+  const box = $('#adForm'); if (!box) return;
+  const today = new Date().toISOString().slice(0, 10);
+  box.innerHTML = `<div class="card" style="border-color:var(--accent)"><b>집행 기록 추가 · ${esc(c.title)}</b>
+    <p class="quiet" style="margin:4px 0">광고를 연결하면 광고 담당이 자동으로 기록합니다. 지금은 광고 관리자·유튜브 스튜디오 숫자를 옮겨 적으면 됩니다. 모르는 칸은 비워 두세요.</p>
+    <div class="ed-grid2"><div><label>어디에</label><select id="rP">${Object.entries(AD_PLATFORM).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
+      <div><label>목표</label><select id="rO">${Object.entries(AD_OBJ).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div></div>
+    <div class="ed-grid2"><div><label>시작일</label><input id="rS" type="date" value="${today}"></div><div><label>종료일</label><input id="rE" type="date"></div></div>
+    <div class="ed-grid2"><div><label>광고 형태·위치</label><select id="rPl"><option value="">-</option><option value="pre">앞 광고</option><option value="mid">중간 광고</option><option value="post">뒤 광고</option>
+        <option value="instream">인스트림</option><option value="shorts">쇼츠 피드</option><option value="discovery">검색·추천</option></select></div>
+      <div><label>중간 광고 위치(초, 수익 광고일 때)</label><input id="rPos" type="number" step="1"></div></div>
+    <label>대상 (나라·나이·관심사)</label><input id="rT" placeholder="예: 한국·일본 18-34 · K팝·드라마 관심">
+    <div class="ed-grid2"><div><label>예산(원)</label><input id="rB" type="number"></div><div><label>실제 쓴 돈(원)</label><input id="rSp" type="number"></div></div>
+    <div class="ad-mform">${AD_M.map(([k, l]) => `<div><label>${l}</label><input data-m="${k}" type="number" step="any"></div>`).join('')}</div>
+    <label>메모</label><input id="rN" placeholder="예: 썸네일 B안, 첫 3초 공항 장면">
+    <div class="row" style="margin-top:10px"><button class="btn primary" id="rGo">기록</button><button class="btn" id="rX">취소</button></div></div>`;
+  box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  $('#rX').onclick = () => { box.innerHTML = ''; };
+  $('#rGo').onclick = guard(async () => {
+    const metrics = {}; box.querySelectorAll('[data-m]').forEach(i => { if (i.value !== '') metrics[i.dataset.m] = +i.value; });
+    const v = id => $('#' + id).value.trim();
+    await q(S.sb.from('ad_runs').insert({ content_id: c.id, platform: v('rP'), objective: v('rO'), placement: v('rPl') || null, position_sec: v('rPos') ? +v('rPos') : null,
+      targeting: v('rT') || null, started_at: v('rS') || null, ended_at: v('rE') || null, budget_krw: v('rB') ? +v('rB') : null, spend_krw: v('rSp') ? +v('rSp') : null,
+      metrics, note: v('rN') || null }));
+    toast('기록했습니다'); go('ads');
+  });
+}
+
+// ------------------------------------------------------------------
 // 사용법: 오른쪽 위 "사용법" 버튼 → 지금 보고 있는 탭의 설명서
 // ------------------------------------------------------------------
 const HELP = {
@@ -5420,6 +5671,28 @@ const HELP = {
 집 PC 폴더 구조: <code>NYX\\시리즈\\EP01_제목\\S01_장소\\</code> 안에 <code>01_영상(무음)</code> <code>02_대사·현장음</code> <code>03_배경음악</code> <code>04_원본(소리포함)</code> <code>씬정보.json</code>.</p>
 <h4>비용 감각</h4>
 <p>480p 기준 10초 컷 약 2,800원, 15초 약 4,100원(참고 사진 사용). 720p는 약 2.2배. 처음에는 480p로 확인하고 통과한 컷만 고화질로 올리세요. 실제로 쓴 돈은 <b>비용</b> 탭에 자동 기록됩니다.</p>`],
+
+  ads: ['광고 사용법', `
+<p>시리즈마다 <b>광고·홍보에 쓰는 영상</b>(쇼츠, 갈고리 장면, 예고편, 몰아보기 합본, 본편, 썸네일·제목 시험)을 모아 두고, 언제 어떻게 돌렸는지와 결과를 쌓아 비교하는 곳입니다.
+유튜브·Google Ads를 연결하면 <b>광고 담당·배포 담당</b>이 자동으로 기록하고, 그 전에는 직접 적어 둘 수 있습니다.</p>
+<h4>화면</h4>
+<ul><li><b>맨 위 숫자</b>: 시리즈 전체 누적. 광고비, 광고로 얻은 구독과 구독당 비용, 조회와 조회당 비용, 광고 수익, 승률 1위 콘텐츠.</li>
+<li><b>왼쪽 목록</b>: 화(스토리) 순서대로 묶여 있습니다. 상태(아이디어·제작 중·준비됨·집행 중·멈춤·종료), 승률, 핵심 숫자가 함께 보입니다.</li>
+<li><b>오른쪽</b>: 고른 콘텐츠의 자세한 내용.</li></ul>
+<h4>콘텐츠를 누르면 나오는 것</h4>
+<ol><li><b>누적 성과</b>: 모든 집행을 합친 광고비, 조회, 구독, 클릭률, 평균 시청 비율, 다음 화 이동, 수익, 승률.</li>
+<li><b>언제, 어떻게 돌렸고 결과는</b>: 집행 하나하나의 기간, 어디에(유튜브 광고·메타·틱톡·수익 광고), 목표, 위치, 대상, 쓴 돈, 결과. 바로 앞 집행보다 좋아졌는지 나빠졌는지 <span class="up">초록</span>·<span class="down">빨강</span> %로 보여 줍니다.</li>
+<li><b>앞뒤 콘텐츠와 비교</b>: 스토리 순서에서 바로 앞·뒤 콘텐츠와 핵심 숫자를 나란히 비교합니다(▲ 이쪽이 나음).</li>
+<li><b>수익 광고 위치별 비교</b>: 앞·중간·뒤 광고 기록이 있으면 위치별 1,000회당 수익과 시청 비율.</li>
+<li><b>다른 콘텐츠와 비교한 승률</b>: 같은 기준을 가진 다른 콘텐츠와 1:1로 비교한 승패와 순위.</li></ol>
+<h4>승률은 이렇게 계산합니다</h4>
+<p>콘텐츠마다 기준 하나를 정합니다. 수익 광고만 있으면 <b>1,000회당 수익</b>(높을수록), 구독이 있으면 <b>구독당 비용</b>(낮을수록), 아니면 <b>조회당 비용</b>(낮을수록).
+같은 기준을 가진 다른 콘텐츠와 하나씩 비교해 이긴 비율이 승률입니다. 기록이 적을 때 승률은 참고만 하세요.</p>
+<h4>직접 기록하기</h4>
+<ul><li><b>+ 광고 콘텐츠</b>: 제목, 종류, 어느 화에서 나왔는지, 유튜브 영상 ID(있으면).</li>
+<li>콘텐츠를 고른 뒤 <b>+ 집행 기록</b>: 광고 관리자·유튜브 스튜디오의 숫자를 옮겨 적습니다. 모르는 칸은 비워 두세요.</li></ul>
+<h4>안전장치</h4>
+<p>광고 담당은 <b>설정 → 광고</b>의 월 한도 안에서만 광고비를 제안하고, 모든 지출은 대표님이 승인해야 실행됩니다. 한도가 0원이면 무료 개선만 제안합니다.</p>`],
 
   edit: ['편집실 사용법', `
 <p>통과한 컷을 한 화짜리 영상으로 잇고 다듬는 곳입니다. 브라우저에서는 <b>"어디를 몇 초 자르고 어떻게 잇는지"</b>만 정하고, 실제 영상은 <b>미리보기·완성본 버튼</b>을 누르면 맥이나 집 PC가 원본 화질로 만듭니다. 모든 변경은 <b>자동 저장</b>되고 ↶로 되돌릴 수 있습니다.</p>
@@ -5630,11 +5903,19 @@ async function viewSettings(main) {
       : `<button class="btn" id="perm">알림 허용하기</button>`) : '<span class="quiet">이 브라우저는 알림을 지원하지 않습니다.</span>'}</div></div>
   <div class="card" id="keyBox"><b>API 키</b><p class="quiet">불러오는 중…</p></div>
   <div class="card" id="prodSetBox"><b>제작</b><p class="quiet">불러오는 중…</p></div>
+  <div class="card" id="adSetBox"><b>광고</b><p class="quiet">불러오는 중…</p></div>
   <div class="card" id="wrBox"><b>작가실</b><p class="quiet">불러오는 중…</p></div>
   <div class="card" id="langBox"><b>다국어</b><p class="quiet">불러오는 중…</p></div>
   <div class="card"><b>계정</b><p class="quiet">${esc(S.user.email)}</p>
     <div class="row"><button class="btn" id="out">로그아웃</button><button class="btn small" id="cfg" style="margin-left:auto">서버 설정 초기화</button></div></div>`;
   renderKeys().catch(e => { const b = $('#keyBox'); if (b) b.innerHTML = `<b>API 키</b><div class="msg err">${esc(errText(e))}</div>`; });
+  (async () => { const box = $('#adSetBox'); if (!box) return;
+    try { const row = await q(S.sb.from('app_settings').select('value').eq('key', 'ads').maybeSingle()); const v = row?.value || {};
+      box.innerHTML = `<b>광고</b><p class="quiet" style="margin:4px 0 8px">광고 담당은 이 한도 안에서만 광고비를 제안합니다. 0이면 돈이 드는 제안은 하지 않고, 제목·썸네일·쇼츠처럼 무료 개선만 제안합니다. 모든 지출은 승인 버튼을 눌러야 실행됩니다.</p>
+        <div class="row" style="align-items:flex-end"><div style="width:220px"><label>월 광고 한도 (원)</label><input id="adBud" type="number" step="10000" value="${v.monthly_budget_krw || 0}"></div>
+        <button class="btn" id="adBudSave">저장</button></div>`;
+      $('#adBudSave').onclick = guard(async () => { await q(S.sb.from('app_settings').upsert({ key: 'ads', value: { ...v, monthly_budget_krw: Math.max(0, +$('#adBud').value || 0) }, updated_at: new Date().toISOString() })); toast('월 광고 한도를 저장했습니다'); });
+    } catch (e) { box.innerHTML = `<b>광고</b><div class="msg err">${esc(errText(e))}</div>`; } })();
   renderProdSettings().catch(e => { const b = $('#prodSetBox'); if (b) b.innerHTML = `<b>제작</b><div class="msg err">${esc(errText(e))}</div>`; });
   (async () => {
     const box = $('#wrBox'); if (!box) return;
