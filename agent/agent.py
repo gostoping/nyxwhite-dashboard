@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.6.2"
+VERSION = "1.7.0"
 
 import base64
 import glob
@@ -440,7 +440,7 @@ def run_job(j):
 
 
 # ------------------------------------------------------------------ 제작 파이프라인
-# 작가실 → 감독(컷 설계) → 대본감수자 → [대표 생성 승인] → Seedance 생성 → 영상감수자·평가 → 윈도우 보관
+# 작가실 → 감독(컷 설계) → 감정감수자 → [대표 생성 승인] → Seedance 생성 → 영상감수자·평가 → 윈도우 보관
 # 돈이 드는 영상 생성은 대표가 대시보드에서 승인한 컷만 한다(서버에서도 막혀 있음).
 
 TASKS = {}
@@ -630,7 +630,7 @@ def t_writers_room(t):
     return f"정리본 저장" + (f", v{confirmed}로 확정 → 감독 컷 설계 시작" if confirmed else ", 확정 대기") + f" · 변경 {len(changes)}곳 · 제안 {len(props)}건"
 
 
-# ---------------- 감독 + 대본감수자
+# ---------------- 감독 + 감정감수자
 CUT_SCHEMA = """{"scene_no": 1, "cut_no": 1, "code": "E01-S01-C01", "scene_heading": "S#1 | 00:00–00:12 | 장소 | 낮",
  "seconds": 10, "summary": "이 컷에서 일어나는 일", "dialogue": "린: (떨리며, 점점 높아지며) 대사 그대로",
  "emotion": "감정선", "expression_beats": [{"t": "0-3", "who": "린", "face": "놀람 → 입술을 깨묾"}, {"t": "3-5", "who": "린", "face": "…"}],
@@ -661,7 +661,7 @@ def director_system(ctx):
 
 
 def review_cuts(ctx, ep, cuts, model):
-    system = (guide(ctx, "대본감수자") or "너는 대본감수자다.") + f"""
+    system = (guide(ctx, "감정감수자") or guide(ctx, "감정감수자") or "너는 감정감수자다.") + f"""
 
 [시리즈 바이블]
 {bible_text(ctx)}
@@ -669,8 +669,14 @@ def review_cuts(ctx, ep, cuts, model):
 [감독 교훈(위반 여부도 확인)]
 {lessons_text(ctx)}
 
-[확인할 것] 대사가 대본과 같은가 / 감정선·발화 톤(피치)이 흐름에 맞는가 / 표정이 2~3초마다 바뀌게 설계됐는가 /
-바이블 고정 묘사와 이름이 맞는가 / 4~15초인가 / 배경음악 금지 문구가 있는가 / 프롬프트가 한 장면만 묘사하는가
+[확인할 것 — 감정감수자는 '소리와 감정'의 책임자다]
+1) 대사가 대본과 한 글자도 다르지 않은가.
+2) 모든 소리가 대사의 감정선을 따라가는가: 화자별 목소리 톤·크기(속삭임~외침)·높낮이(피치)·말 속도·숨·떨림이 프롬프트에 감정 순서대로 적혔는가
+   (예: "작게 떨리며 시작 → 마지막 단어에서 목소리가 갈라지며 높아짐"). 앞뒤 컷과 감정 온도가 끊기지 않는가.
+3) 현장음·배경 소리(공항 안내 방송, 연습실 음악 소리 등)가 감정을 돕는가, 대사를 덮지 않는가. 배경음악 금지 문구가 있는가.
+4) 같은 인물의 목소리 묘사가 바이블 목소리 항목·지난 컷과 같은가(나이·음색·억양이 바뀌면 안 됨).
+5) 최초 기획 일관성: 인물 얼굴·의상·장소 묘사가 바이블 고정 문장 그대로인가, 이름 표기가 맞는가.
+6) 표정이 2~3초마다 바뀌게 설계됐는가(세부 판단은 영상감수자), 4~15초인가, 프롬프트가 한 장면만 묘사하는가.
 
 [답 형식]
 <json>{{"cuts": [{{"scene_no": 1, "cut_no": 1, "verdict": "pass|fix", "issues": ["…"], "fix": "감독이 고칠 것"}}],
@@ -678,7 +684,7 @@ def review_cuts(ctx, ep, cuts, model):
                "problem": "", "rule": "앞으로 이렇게", "bad_example": "", "severity": "보통|치명"}}]}}</json>"""
     text, _ = claude(model, system, "[대본]\n" + (ctx.get("script") or {}).get("content", "")[:60000]
                      + "\n\n[감독 컷 설계]\n" + json.dumps(cuts, ensure_ascii=False),
-                     max_tokens=8000, stage="prompt_review", episode_id=ep, note="대본감수자 컷 감수")
+                     max_tokens=8000, stage="prompt_review", episode_id=ep, note="감정감수자 컷 감수")
     return pick_json(text)
 
 
@@ -724,19 +730,19 @@ def t_director(t):
         cuts = [c for c in cuts if int(c.get("scene_no") or 0) in set(int(s) for s in scenes)]
     if not cuts:
         raise RuntimeError("감독이 컷을 만들지 못했습니다")
-    progress(f"대본감수자가 컷 {len(cuts)}개를 감수하는 중")
+    progress(f"감정감수자가 컷 {len(cuts)}개를 감수하는 중")
     rv = review_cuts(ctx, ep, cuts, rmodel)
     verdicts = {(int(r.get("scene_no") or 0), int(r.get("cut_no") or 0)): r for r in rv.get("cuts") or []}
     fixes = [c for c in cuts if (verdicts.get((int(c["scene_no"]), int(c["cut_no"]))) or {}).get("verdict") == "fix"]
     for l in rv.get("lessons") or []:
         try:
-            rpc("agent_add_lesson", p_token=TOKEN, p_lesson={**l, "series_id": (ctx.get("series") or {}).get("id"), "sources": ["대본감수자"]})
+            rpc("agent_add_lesson", p_token=TOKEN, p_lesson={**l, "series_id": (ctx.get("series") or {}).get("id"), "sources": ["감정감수자"]})
         except Exception as ex:
             log(f"교훈 기록 실패: {ex}")
     if fixes:
         progress(f"감독이 감수 의견 {len(fixes)}건을 반영해 고치는 중")
         fix_text = json.dumps([{"cut": c, "review": verdicts[(int(c['scene_no']), int(c['cut_no']))]} for c in fixes], ensure_ascii=False)
-        text, _ = claude(dmodel, director_system(ctx), f"대본감수자 의견을 반영해 아래 컷들만 고쳐서 같은 형식으로 다시 주세요.\n{fix_text}\n\n[대본]\n{script['content']}",
+        text, _ = claude(dmodel, director_system(ctx), f"감정감수자 의견을 반영해 아래 컷들만 고쳐서 같은 형식으로 다시 주세요.\n{fix_text}\n\n[대본]\n{script['content']}",
                          max_tokens=12000, stage="cut_card", episode_id=ep, note="감독 감수 반영")
         fixed = {(int(c.get("scene_no") or 0), int(c.get("cut_no") or 0)): c for c in pick_json(text).get("cuts") or []}
         cuts = [fixed.get((int(c["scene_no"]), int(c["cut_no"])), c) for c in cuts]
@@ -1129,7 +1135,7 @@ def queue_store(take_id, ep, cut):
 
 
 # ---------------- 영상감수자(최종감수 겸) + 평가(점수는 코드로)
-WEIGHTS = {"face_consistency": 0.25, "expression_changes": 0.2, "emotion": 0.2, "motion_quality": 0.15, "continuity": 0.1, "prompt_match": 0.1}
+WEIGHTS = {"face_consistency": 0.2, "costume_background": 0.1, "expression_changes": 0.15, "gesture_action": 0.15, "pace": 0.1, "emotion": 0.1, "motion_quality": 0.1, "prompt_match": 0.1}
 
 
 def review_take(take_id, local_mp4=None):
@@ -1171,12 +1177,15 @@ def review_take(take_id, local_mp4=None):
 {lessons_text(ctx)}
 
 [보는 법] 1초 간격 장면 사진과 컷 설계를 비교한다. 소리는 들을 수 없으니 판단하지 않는다(대표 확인).
-각 항목 0~100점: face_consistency(바이블 얼굴·의상 일치), expression_changes(2~3초마다 표정 변화), emotion(감정선),
-motion_quality(손·몸 왜곡, 깜빡임, AI 티), continuity(앞뒤 컷과 이어짐), prompt_match(설계대로인가).
-치명 문제(얼굴이 다른 사람, 심한 왜곡, 화면 글자)가 있으면 verdict는 fail.
+영상감수자는 '화면 속 연기와 일관성'의 책임자다. 각 항목 0~100점:
+face_consistency(바이블 얼굴과 같은 사람인가), costume_background(의상·소품·배경이 바이블·앞뒤 컷과 같은가),
+expression_changes(2~3초마다 감정에 맞게 표정이 바뀌는가), gesture_action(손짓·몸짓·동작이 대사와 감정에 맞고 자연스러운가),
+pace(움직임·카메라 속도가 감정 템포에 맞는가: 너무 빠르거나 느리지 않은가), emotion(화면 전체가 이 컷의 감정선을 전달하는가),
+motion_quality(손·몸 왜곡, 깜빡임, AI 티), prompt_match(설계대로인가).
+치명 문제(얼굴이 다른 사람, 의상이 바뀜, 심한 왜곡, 화면 글자)가 있으면 verdict는 fail.
 
 [답 형식]
-<json>{{"verdict": "pass|fail", "scores": {{"face_consistency": 0, "expression_changes": 0, "emotion": 0, "motion_quality": 0, "continuity": 0, "prompt_match": 0}},
+<json>{{"verdict": "pass|fail", "scores": {{"face_consistency": 0, "costume_background": 0, "expression_changes": 0, "gesture_action": 0, "pace": 0, "emotion": 0, "motion_quality": 0, "prompt_match": 0}},
  "issues": [{{"t": "3초", "problem": "", "fix": ""}}], "fix_for_director": "다음 생성에서 고칠 프롬프트 방향",
  "summary": "대표용 한두 줄",
  "lessons": [{{"fingerprint": "", "category": "face|costume|location|prop|continuity|expression|emotion_tone|dialogue|camera|motion|prompt|other", "problem": "", "rule": "", "bad_example": "", "severity": "보통|치명"}}]}}</json>"""
@@ -1184,7 +1193,8 @@ motion_quality(손·몸 왜곡, 깜빡임, AI 티), continuity(앞뒤 컷과 이
                          scene_no=cut.get("scene_no"), cut_code=cut.get("code"), note="영상 감수(장면 사진)")
     rv = pick_json(text)
     sc = rv.get("scores") or {}
-    score = round(sum(float(sc.get(k) or 0) * w for k, w in WEIGHTS.items()), 1)
+    got = {k: w for k, w in WEIGHTS.items() if sc.get(k) is not None}
+    score = round(sum(float(sc[k]) * w for k, w in got.items()) / (sum(got.values()) or 1), 1)
     passed = rv.get("verdict") == "pass" and score >= 70
     verdict = "pass" if passed else "fail"
     rv["score"] = score
