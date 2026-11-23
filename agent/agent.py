@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.8.2"
+VERSION = "1.9.0"
 
 import base64
 import glob
@@ -1143,18 +1143,138 @@ def stt_words(path, model="scribe_v1"):
     raise RuntimeError(f"받아쓰기 실패 {last}")
 
 
+GROK_IMAGE = "xai/grok-imagine-image-2.0"
+SOUL2 = "higgsfield-ai/soul/v2/standard"
+# Nano Banana Pro의 Higgsfield API 경로는 공개 문서에 없어서, 내 키로 후보 경로를 직접 두드려 찾는다.
+# 프롬프트 없이 보내면 실제 생성은 되지 않고(필수값 누락) 경로가 있으면 400/422, 없으면 404가 온다.
+NANO_PRO_CANDIDATES = ["google/nano-banana-pro/edit", "google/nano-banana-pro", "nano-banana-pro/edit", "nano-banana-pro",
+                       "google/nano-banana-pro/image-to-image", "google/gemini-3-pro-image/edit", "google/gemini-3-pro-image"]
+
+
+def hf_probe(path):
+    code, data = http_json(f"https://api.higgsfield.ai/{path}", {**hf_auth_headers(), "Content-Type": "application/json",
+                           "Accept": "application/json"}, "POST", {}, timeout=30)
+    return code, data
+
+
+def resolve_image_model(gen):
+    """장면 사진 모델: 설정에 경로가 있으면 그대로, 'auto'/비어 있으면 Nano Banana Pro를 찾아 쓰고 없으면 Grok Imagine."""
+    want = (gen.get("image_model") or "auto").strip().strip("/")
+    if want and want != "auto":
+        return want
+    cache = os.path.join(HOME, "hf_models.json")
+    try:
+        c = json.load(open(cache))
+        if c.get("nano_pro") or time.time() - c.get("at", 0) < 86400:
+            return c.get("nano_pro") or GROK_IMAGE
+    except Exception:
+        pass
+    found = ""
+    for p in NANO_PRO_CANDIDATES:
+        try:
+            code, data = hf_probe(p)
+        except Exception:
+            continue
+        log(f"Nano Banana Pro 경로 확인: {p} → {code}")
+        if code in (400, 422):
+            found = p
+            break
+    with open(cache, "w") as f:
+        json.dump({"nano_pro": found, "at": time.time()}, f)
+    if not found:
+        log("Nano Banana Pro 경로를 찾지 못해 Grok Imagine 2.0으로 장면 사진을 만듭니다(설정 → 제작에 경로를 넣으면 그걸 씁니다)")
+    return found or GROK_IMAGE
+
+
+def find_image_urls(d, out=None):
+    out = [] if out is None else out
+    if isinstance(d, dict):
+        if isinstance(d.get("url"), str) and d["url"].startswith("http"):
+            out.append(d["url"])
+        for v in d.values():
+            find_image_urls(v, out)
+    elif isinstance(d, list):
+        for x in d:
+            find_image_urls(x, out)
+    elif isinstance(d, str) and d.startswith("http") and re.search(r"\.(png|jpe?g|webp)(\?|$)", d, re.I):
+        out.append(d)
+    return list(dict.fromkeys(out))
+
+
+def hf_submit_wait(path, body, what="사진", timeout=900):
+    """Higgsfield에 요청을 넣고 끝날 때까지 기다려 완료 응답을 돌려준다."""
+    hdr = {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json"}
+    code, data = http_json(f"https://api.higgsfield.ai/{path.strip('/')}", hdr, "POST", body, timeout=120)
+    if code not in (200, 201, 202) or not isinstance(data, dict):
+        raise RuntimeError(f"{what} 요청 실패 {code}: {str(data)[:300]}")
+    if find_image_urls(data.get("images") or []) or data.get("status") == "completed":
+        return data
+    rid = data.get("request_id") or data.get("id")
+    status_url = data.get("status_url") or f"https://api.higgsfield.ai/requests/{rid}/status"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(4)
+        try:
+            _, st = http_json(status_url, {**hf_auth_headers(), "Accept": "application/json"}, timeout=60)
+        except Exception:
+            continue
+        s = (st or {}).get("status") if isinstance(st, dict) else None
+        if s in ("failed", "nsfw", "canceled"):
+            raise RuntimeError(f"{what} 생성 {s}")
+        if s == "completed":
+            return st
+    raise RuntimeError(f"{what} 생성 시간 초과")
+
+
+def soul_images(prompt, n=4, aspect="3:4", soul_id=None, strength=0.9):
+    """Soul 2: 실사 인물 사진. soul_id가 있으면 그 얼굴로."""
+    body = {"prompt": prompt[:2000], "batch_size": 4 if n > 1 else 1, "resolution": "1080p", "aspect_ratio": aspect, "enhance_prompt": False}
+    if soul_id:
+        body.update({"custom_reference_id": soul_id, "custom_reference_strength": strength})
+    st = hf_submit_wait(SOUL2, body, "인물 사진")
+    urls = find_image_urls(st.get("images") or st)
+    if not urls:
+        raise RuntimeError(f"인물 사진 주소를 찾지 못함: {str(st)[:200]}")
+    return urls[:n]
+
+
+def soul_train(name, image_urls, timeout=3600):
+    """Soul ID(이 인물 전용 얼굴 모델)를 학습시키고 id를 돌려준다."""
+    hdr = {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json"}
+    code, data = http_json("https://api.higgsfield.ai/v1/custom-references", hdr, "POST", {
+        "name": name[:80], "model_version": "v2",
+        "input_images": [{"type": "image_url", "image_url": u} for u in image_urls[:100]]}, timeout=120)
+    if code not in (200, 201, 202) or not isinstance(data, dict) or not data.get("id"):
+        raise RuntimeError(f"얼굴 학습 요청 실패 {code}: {str(data)[:300]}")
+    sid = data["id"]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(15)
+        try:
+            _, st = http_json(f"https://api.higgsfield.ai/v1/custom-references/{sid}", {**hf_auth_headers(), "Accept": "application/json"}, timeout=60)
+        except Exception:
+            continue
+        s = (st or {}).get("status")
+        if s == "completed":
+            return sid
+        if s in ("failed", "canceled"):
+            raise RuntimeError(f"얼굴 학습 실패: {str(st)[:200]}")
+        progress(f"얼굴 학습 중… ({s or '대기'})")
+    raise RuntimeError("얼굴 학습 시간 초과")
+
+
 def hf_image(prompt, refs, aspect, model_path):
-    """Higgsfield 사진 생성(참고 사진으로 얼굴·의상·장소 고정). 경로는 설정에서 바꿀 수 있다."""
-    model_path = model_path or "xai/grok-imagine-image-2.0"
+    """Higgsfield 장면 사진(참고 사진으로 얼굴·의상·장소 고정)."""
+    model_path = model_path or GROK_IMAGE
     body = {"prompt": prompt, "aspect_ratio": aspect}
     if refs:
-        body["image_urls"] = refs[:6]
+        body["image_urls"] = refs[:8]
     code, data = http_json(f"https://api.higgsfield.ai/{model_path.strip('/')}",
                            {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json"}, "POST", body, timeout=120)
     if code in (400, 422) and refs:
         log(f"사진 모델이 image_urls를 받지 않음, input_images로 다시: {str(data)[:160]}")
         body.pop("image_urls")
-        body["input_images"] = [{"type": "image_url", "image_url": u} for u in refs[:6]]
+        body["input_images"] = [{"type": "image_url", "image_url": u} for u in refs[:8]]
         code, data = http_json(f"https://api.higgsfield.ai/{model_path.strip('/')}",
                                {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json"}, "POST", body, timeout=120)
     if code not in (200, 201, 202) or not isinstance(data, dict):
@@ -1204,11 +1324,11 @@ def find_image_url(d):
     return None
 
 
-def bible_ref_urls(ctx, names, limit=4):
+def bible_ref_urls(ctx, names, limit=4, per=1):
     imgs = {b["name"]: b.get("images") or [] for b in (ctx.get("bible") or [])}
     out = []
     for n in names or []:
-        for p in imgs.get(n, [])[:1]:
+        for p in imgs.get(n, [])[:per]:
             try:
                 out.append(storage_signed_url("bible", p, 7200))
             except Exception as ex:
@@ -1292,7 +1412,8 @@ def t_prep_cut(t):
         # ③ 장면 사진 (첫 장면, 필요하면 끝 장면)
         frames = {}
         aspect = gen.get("aspect_ratio", "9:16")
-        refs = bible_ref_urls(ctx, c.get("reference_names"))
+        refs = bible_ref_urls(ctx, c.get("reference_names"), limit=8, per=3)
+        imodel = resolve_image_model(gen)
         for key, want in (("frame_first", True), ("frame_last", bool(c.get("use_end_frame")))):
             fr = dict(c.get(key) or {})
             if not want:
@@ -1300,7 +1421,16 @@ def t_prep_cut(t):
             fprompt = fr.get("prompt") or (c.get("prompt") or "")[:900] + (" — opening frame, still image." if key == "frame_first" else " — closing frame, still image.")
             progress(f"{code} {'첫' if key == 'frame_first' else '끝'} 장면 사진 만드는 중")
             try:
-                url = hf_image(fprompt + " Photorealistic film still, no text, no subtitles.", refs, aspect, gen.get("image_model"))
+                fp = (fprompt + " Photorealistic live-action film still shot on a cinema camera, natural skin texture, realistic lighting."
+                      " Keep each person's face, hair and outfit exactly as in the reference photos. No text, no subtitles.")
+                try:
+                    url = hf_image(fp, refs, aspect, imodel)
+                except Exception as ex1:
+                    if imodel == GROK_IMAGE:
+                        raise
+                    log(f"{imodel} 실패, Grok Imagine으로 다시: {ex1}")
+                    imodel = GROK_IMAGE
+                    url = hf_image(fp, refs, aspect, imodel)
                 local = os.path.join(HOME, "work", f"kf_{c['id']}_{key}.img")
                 fetch_to(url, local)
                 jpg = local + ".jpg"
@@ -1308,7 +1438,7 @@ def t_prep_cut(t):
                 fr.update({"prompt": fprompt, "path": storage_upload(f"{base}_{key}.jpg", jpg, "image/jpeg"), "status": "ready", "error": None})
                 frames[key] = jpg
                 os.remove(local)
-                log_cost("keyframe", "higgsfield", gen.get("image_model") or "xai/grok-imagine-image-2.0", {"images": 1}, episode_id=ep, scene_no=c["scene_no"],
+                log_cost("keyframe", "higgsfield", "nano-banana-pro" if "nano-banana-pro" in imodel else imodel, {"images": 1}, episode_id=ep, scene_no=c["scene_no"],
                          cut_id=code, outcome="success", note=f"{'첫' if key == 'frame_first' else '끝'} 장면 사진")
             except Exception as ex:
                 fr.update({"prompt": fprompt, "status": "failed", "error": str(ex)[:300]})
@@ -1703,6 +1833,98 @@ def el_json(path, body=None, method="POST", timeout=180):
     return data
 
 
+# ---------------- 바이블 사진 디자인: Soul 2(실사 인물) + Soul ID(얼굴 고정)
+PHOTO_LOOK = ("Photorealistic photograph of a real person, shot on a full-frame camera with an 85mm lens, natural skin texture with pores, "
+              "soft natural light, realistic hair strands, no makeup filter, no illustration, no 3D render, no text.")
+SET_SHOTS = [("정면 얼굴", "Head-and-shoulders portrait facing the camera, neutral expression, plain light grey studio background."),
+             ("3/4 얼굴", "Three-quarter view portrait turned slightly to the left, gentle smile, plain light grey studio background."),
+             ("전신·의상", "Full-body shot standing naturally, wearing the signature outfit, plain light grey studio background."),
+             ("감정 표정", "Close-up portrait with a strong emotional expression matching the character, plain light grey studio background.")]
+
+
+def upload_from_url(url, path):
+    local = os.path.join(HOME, "work", f"ph_{uuid.uuid4().hex[:8]}.img")
+    fetch_to(url, local)
+    jpg = local + ".jpg"
+    ff("-i", local, "-q:v", "2", jpg)
+    p = storage_upload(path, jpg, "image/jpeg")
+    for x in (local, jpg):
+        try:
+            os.remove(x)
+        except OSError:
+            pass
+    return p
+
+
+@task("photo_design")
+def t_photo_design(t):
+    did = (t.get("payload") or {}).get("design_id")
+    d = rpc("agent_get_photo_design", p_token=TOKEN, p_id=did)
+    if not d:
+        raise RuntimeError("사진 디자인 요청을 찾지 못했습니다")
+    name = d["entry_name"]
+    try:
+        if d["category"] == "character":
+            progress(f"{name} 실사 인물 사진 후보를 만드는 중 (Soul 2)")
+            urls = soul_images(d["prompt"] + " " + PHOTO_LOOK, n=4, aspect="3:4")
+            model = SOUL2
+        else:
+            model = resolve_image_model(d.get("generation") or {})
+            progress(f"{name} 사진 후보를 만드는 중")
+            urls = []
+            for _ in range(2):
+                st = hf_submit_wait(model, {"prompt": d["prompt"] + " Photorealistic location photograph, natural light, no people, no text.",
+                                            "aspect_ratio": "9:16"}, "장소 사진")
+                urls += find_image_urls(st.get("images") or st)[:1]
+        previews = [{"path": upload_from_url(u, f"photos/{did}/{i}_{uuid.uuid4().hex[:6]}.jpg")} for i, u in enumerate(urls, 1)]
+    except Exception as e:
+        rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
+        raise
+    if not previews:
+        rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": "후보가 만들어지지 않았습니다"})
+        raise RuntimeError("후보가 만들어지지 않았습니다")
+    rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "ready", "previews": previews})
+    log_cost("keyframe", "higgsfield", model, {"images": len(previews)}, note=f"사진 디자인: {name}", outcome="success")
+    notify(f"{name} 사진 후보 {len(previews)}장 도착", "바이블 탭에서 마음에 드는 사진을 골라 주세요")
+    return f"{name} 사진 후보 {len(previews)}장"
+
+
+@task("photo_set")
+def t_photo_set(t):
+    """고른 사진으로 Soul ID 학습 → 같은 얼굴로 기준 사진 세트."""
+    did = (t.get("payload") or {}).get("design_id")
+    d = rpc("agent_get_photo_design", p_token=TOKEN, p_id=did)
+    if not d:
+        raise RuntimeError("사진 디자인 요청을 찾지 못했습니다")
+    name = d["entry_name"]
+    try:
+        chosen = d.get("chosen") or []
+        src = [storage_signed_url(x.get("bucket") or "takes", x["path"], 7200) for x in chosen if x.get("path")]
+        if not src:
+            raise RuntimeError("고른 사진이 없습니다")
+        progress(f"{name} 얼굴 학습 중 (Soul ID, 수 분 걸림)")
+        soul_id = soul_train(f"{d.get('series_title') or 'NYX'} · {name}", src)
+        log_cost("keyframe", "higgsfield", "soul-id-training", {"calls": 1}, note=f"얼굴 학습: {name}", outcome="success")
+        rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "training", "soul_id": soul_id})
+        look = (d.get("description") or d.get("prompt") or "")[:900]
+        outfit = (d.get("details") or "")[:500]
+        ref_set = []
+        for label, shot in SET_SHOTS:
+            progress(f"{name} 기준 사진 만드는 중: {label}")
+            try:
+                u = soul_images(f"{look} {outfit if label == '전신·의상' else ''} {shot} {PHOTO_LOOK}", n=1, aspect="3:4", soul_id=soul_id)[0]
+                ref_set.append({"label": label, "path": upload_from_url(u, f"photos/{did}/set_{len(ref_set) + 1}_{uuid.uuid4().hex[:6]}.jpg")})
+            except Exception as ex:
+                log(f"기준 사진 실패({label}): {ex}")
+        log_cost("keyframe", "higgsfield", SOUL2, {"images": len(ref_set)}, note=f"기준 사진 세트: {name}", outcome="success")
+    except Exception as e:
+        rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
+        raise
+    rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "set_ready", "soul_id": soul_id, "ref_set": ref_set})
+    notify(f"{name} 얼굴 고정 완료", f"같은 얼굴 기준 사진 {len(ref_set)}장을 바이블 탭에서 확인하고 적용해 주세요")
+    return f"{name} Soul ID + 기준 사진 {len(ref_set)}장"
+
+
 @task("voice_design")
 def t_voice_design(t):
     did = (t.get("payload") or {}).get("design_id")
@@ -1738,6 +1960,46 @@ def t_voice_design(t):
     log_cost("audio", "elevenlabs", "voice-design", {"calls": 1}, note=f"목소리 디자인: {d['entry_name']}", outcome="success")
     notify(f"{d['entry_name']} 목소리 후보 {len(previews)}개 도착", "바이블 탭에서 들어 보고 골라 주세요")
     return f"{d['entry_name']} 후보 {len(previews)}개"
+
+
+@task("bible_extract")
+def t_bible_extract(t):
+    """작가실: 대본을 화별로 읽어 씬마다 필요한 인물·장소·소품을 뽑아 바이블에 올린다(새 항목은 대표 적용 대기 수정안)."""
+    p = t.get("payload") or {}
+    sid = t.get("series_id") or p.get("series_id")
+    ov = rpc("agent_bible_overview", p_token=TOKEN, p_series=sid, p_episode=t.get("episode_id") or p.get("episode_id")) or {}
+    title = (ov.get("series") or {}).get("title", "")
+    known = [{k: e.get(k) for k in ("category", "name", "summary")} for e in ov.get("entries") or []]
+    eps = [e for e in ov.get("episodes") or [] if (e.get("text") or "").strip()]
+    if not eps:
+        return "읽을 대본이 없습니다"
+    system = """너는 드라마 작가실의 미술·캐스팅 담당이다. 대본을 읽고 씬마다 화면에 나와야 하는 것을 빠짐없이 뽑아 시리즈 바이블 항목으로 만든다.
+- category: character(대사가 있거나 얼굴이 보이는 인물. 단역도 얼굴이 나오면 포함, '군중'처럼 얼굴이 중요하지 않으면 제외),
+  location(씬이 벌어지는 장소. 같은 장소는 하나로), prop(줄거리·연속성에 중요한 물건: 반복 등장, 클로즈업, 인물의 상징).
+- 이미 바이블에 있는 항목은 이름을 그대로 쓰고 appears만 채운다(description은 비워도 됨).
+- 새 항목의 description: 영상·사진 모델에 그대로 넣을 영어 고정 묘사 1~3문장. 인물은 나이·국적·성별·얼굴형·머리 모양과 색·체형·분위기,
+  장소는 공간 구조·재질·색·시간대·빛, 소품은 모양·재질·색·크기. 실존 인물·배우 이름 금지.
+- details: 한국어. 화별 의상·바뀌면 안 되는 특징·금지 사항.
+- summary: 한국어 한 줄(대본 속 역할).
+- appears: 이 항목이 나오는 씬 [{"ep": 화 번호, "scene": 씬 번호}]. 씬 번호는 대본의 씬 순서(1부터).
+답 형식: <json>{"items": [{"category": "", "name": "", "summary": "", "description": "", "details": "", "appears": [{"ep": 1, "scene": 1}]}]}</json>"""
+    total = {"new_entries": 0, "proposals": 0}
+    for e in eps:
+        progress(f"작가실이 {e['number']}화에서 필요한 인물·장소·소품을 찾는 중")
+        user = f"시리즈: {title}\n\n[이미 바이블에 있는 항목]\n{json.dumps(known, ensure_ascii=False)}\n\n[{e['number']}화 {e.get('title') or ''} 대본]\n{(e.get('text') or '')[:60000]}"
+        text, _ = claude("claude-opus-5-5", system, user, max_tokens=8000, stage="other", note=f"바이블 필요 항목 추출: {title} {e['number']}화")
+        items = pick_json(text).get("items") or []
+        for it in items:
+            it["appears"] = [{"ep": int(x.get("ep") or e["number"]), "scene": int(x.get("scene") or 0)} for x in (it.get("appears") or []) if isinstance(x, dict)]
+        r = rpc("agent_bible_upsert", p_token=TOKEN, p_series=sid, p_items=items) or {}
+        for k in total:
+            total[k] += int(r.get(k) or 0)
+        for it in items:
+            if not any(k["name"].lower() == (it.get("name") or "").lower() and k["category"] == it.get("category") for k in known):
+                known.append({k: it.get(k) for k in ("category", "name", "summary")})
+    if total["proposals"]:
+        notify(f"바이블 필요 항목 {total['proposals']}개 제안", "바이블 탭에서 확인하고 '모두 적용 + 사진 만들기'를 눌러 주세요")
+    return f"새 항목 {total['new_entries']}개 · 적용 대기 {total['proposals']}개"
 
 
 @task("voice_cast")
@@ -2226,7 +2488,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"bible_extract": "대본에서 필요 항목 찾기", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:

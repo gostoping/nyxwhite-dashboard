@@ -162,6 +162,12 @@
   .vline .sp { font-weight: 700; color: var(--accent); } .vline .dir, .vline audio, .vline .curve { grid-column: 1 / -1; }
   .vline audio { height: 30px; width: 100%; margin: 0; } .vline code { font-size: 11.5px; }
   .curve { display: flex; align-items: flex-end; gap: 2px; height: 22px; } .curve i { flex: 1; background: var(--accent); opacity: .55; border-radius: 2px 2px 0 0; min-width: 3px; max-width: 10px; }
+  .pdgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 6px; }
+  .pdimg { position: relative; display: block; aspect-ratio: 3 / 4; border-radius: 8px; overflow: hidden; background: #111; margin: 0; cursor: default; }
+  .pdimg.pick { cursor: pointer; } .pdimg img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .pdimg input { position: absolute; top: 6px; left: 6px; width: 20px; height: 20px; }
+  .pdimg:has(input:checked) { outline: 3px solid var(--accent); }
+  .pdimg span { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.6); color: #fff; font-size: 11px; text-align: center; padding: 2px; }
   /* 편집실 */
   .ed-empty { text-align: center; padding: 30px 16px; } .ed-empty .row { justify-content: center; }
   .ed-top { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; }
@@ -276,7 +282,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.8.2"
+VERSION = "1.9.0"
 
 import base64
 import glob
@@ -1409,18 +1415,138 @@ def stt_words(path, model="scribe_v1"):
     raise RuntimeError(f"받아쓰기 실패 {last}")
 
 
+GROK_IMAGE = "xai/grok-imagine-image-2.0"
+SOUL2 = "higgsfield-ai/soul/v2/standard"
+# Nano Banana Pro의 Higgsfield API 경로는 공개 문서에 없어서, 내 키로 후보 경로를 직접 두드려 찾는다.
+# 프롬프트 없이 보내면 실제 생성은 되지 않고(필수값 누락) 경로가 있으면 400/422, 없으면 404가 온다.
+NANO_PRO_CANDIDATES = ["google/nano-banana-pro/edit", "google/nano-banana-pro", "nano-banana-pro/edit", "nano-banana-pro",
+                       "google/nano-banana-pro/image-to-image", "google/gemini-3-pro-image/edit", "google/gemini-3-pro-image"]
+
+
+def hf_probe(path):
+    code, data = http_json(f"https://api.higgsfield.ai/{path}", {**hf_auth_headers(), "Content-Type": "application/json",
+                           "Accept": "application/json"}, "POST", {}, timeout=30)
+    return code, data
+
+
+def resolve_image_model(gen):
+    """장면 사진 모델: 설정에 경로가 있으면 그대로, 'auto'/비어 있으면 Nano Banana Pro를 찾아 쓰고 없으면 Grok Imagine."""
+    want = (gen.get("image_model") or "auto").strip().strip("/")
+    if want and want != "auto":
+        return want
+    cache = os.path.join(HOME, "hf_models.json")
+    try:
+        c = json.load(open(cache))
+        if c.get("nano_pro") or time.time() - c.get("at", 0) < 86400:
+            return c.get("nano_pro") or GROK_IMAGE
+    except Exception:
+        pass
+    found = ""
+    for p in NANO_PRO_CANDIDATES:
+        try:
+            code, data = hf_probe(p)
+        except Exception:
+            continue
+        log(f"Nano Banana Pro 경로 확인: {p} → {code}")
+        if code in (400, 422):
+            found = p
+            break
+    with open(cache, "w") as f:
+        json.dump({"nano_pro": found, "at": time.time()}, f)
+    if not found:
+        log("Nano Banana Pro 경로를 찾지 못해 Grok Imagine 2.0으로 장면 사진을 만듭니다(설정 → 제작에 경로를 넣으면 그걸 씁니다)")
+    return found or GROK_IMAGE
+
+
+def find_image_urls(d, out=None):
+    out = [] if out is None else out
+    if isinstance(d, dict):
+        if isinstance(d.get("url"), str) and d["url"].startswith("http"):
+            out.append(d["url"])
+        for v in d.values():
+            find_image_urls(v, out)
+    elif isinstance(d, list):
+        for x in d:
+            find_image_urls(x, out)
+    elif isinstance(d, str) and d.startswith("http") and re.search(r"\.(png|jpe?g|webp)(\?|$)", d, re.I):
+        out.append(d)
+    return list(dict.fromkeys(out))
+
+
+def hf_submit_wait(path, body, what="사진", timeout=900):
+    """Higgsfield에 요청을 넣고 끝날 때까지 기다려 완료 응답을 돌려준다."""
+    hdr = {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json"}
+    code, data = http_json(f"https://api.higgsfield.ai/{path.strip('/')}", hdr, "POST", body, timeout=120)
+    if code not in (200, 201, 202) or not isinstance(data, dict):
+        raise RuntimeError(f"{what} 요청 실패 {code}: {str(data)[:300]}")
+    if find_image_urls(data.get("images") or []) or data.get("status") == "completed":
+        return data
+    rid = data.get("request_id") or data.get("id")
+    status_url = data.get("status_url") or f"https://api.higgsfield.ai/requests/{rid}/status"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(4)
+        try:
+            _, st = http_json(status_url, {**hf_auth_headers(), "Accept": "application/json"}, timeout=60)
+        except Exception:
+            continue
+        s = (st or {}).get("status") if isinstance(st, dict) else None
+        if s in ("failed", "nsfw", "canceled"):
+            raise RuntimeError(f"{what} 생성 {s}")
+        if s == "completed":
+            return st
+    raise RuntimeError(f"{what} 생성 시간 초과")
+
+
+def soul_images(prompt, n=4, aspect="3:4", soul_id=None, strength=0.9):
+    """Soul 2: 실사 인물 사진. soul_id가 있으면 그 얼굴로."""
+    body = {"prompt": prompt[:2000], "batch_size": 4 if n > 1 else 1, "resolution": "1080p", "aspect_ratio": aspect, "enhance_prompt": False}
+    if soul_id:
+        body.update({"custom_reference_id": soul_id, "custom_reference_strength": strength})
+    st = hf_submit_wait(SOUL2, body, "인물 사진")
+    urls = find_image_urls(st.get("images") or st)
+    if not urls:
+        raise RuntimeError(f"인물 사진 주소를 찾지 못함: {str(st)[:200]}")
+    return urls[:n]
+
+
+def soul_train(name, image_urls, timeout=3600):
+    """Soul ID(이 인물 전용 얼굴 모델)를 학습시키고 id를 돌려준다."""
+    hdr = {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json"}
+    code, data = http_json("https://api.higgsfield.ai/v1/custom-references", hdr, "POST", {
+        "name": name[:80], "model_version": "v2",
+        "input_images": [{"type": "image_url", "image_url": u} for u in image_urls[:100]]}, timeout=120)
+    if code not in (200, 201, 202) or not isinstance(data, dict) or not data.get("id"):
+        raise RuntimeError(f"얼굴 학습 요청 실패 {code}: {str(data)[:300]}")
+    sid = data["id"]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(15)
+        try:
+            _, st = http_json(f"https://api.higgsfield.ai/v1/custom-references/{sid}", {**hf_auth_headers(), "Accept": "application/json"}, timeout=60)
+        except Exception:
+            continue
+        s = (st or {}).get("status")
+        if s == "completed":
+            return sid
+        if s in ("failed", "canceled"):
+            raise RuntimeError(f"얼굴 학습 실패: {str(st)[:200]}")
+        progress(f"얼굴 학습 중… ({s or '대기'})")
+    raise RuntimeError("얼굴 학습 시간 초과")
+
+
 def hf_image(prompt, refs, aspect, model_path):
-    """Higgsfield 사진 생성(참고 사진으로 얼굴·의상·장소 고정). 경로는 설정에서 바꿀 수 있다."""
-    model_path = model_path or "xai/grok-imagine-image-2.0"
+    """Higgsfield 장면 사진(참고 사진으로 얼굴·의상·장소 고정)."""
+    model_path = model_path or GROK_IMAGE
     body = {"prompt": prompt, "aspect_ratio": aspect}
     if refs:
-        body["image_urls"] = refs[:6]
+        body["image_urls"] = refs[:8]
     code, data = http_json(f"https://api.higgsfield.ai/{model_path.strip('/')}",
                            {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json"}, "POST", body, timeout=120)
     if code in (400, 422) and refs:
         log(f"사진 모델이 image_urls를 받지 않음, input_images로 다시: {str(data)[:160]}")
         body.pop("image_urls")
-        body["input_images"] = [{"type": "image_url", "image_url": u} for u in refs[:6]]
+        body["input_images"] = [{"type": "image_url", "image_url": u} for u in refs[:8]]
         code, data = http_json(f"https://api.higgsfield.ai/{model_path.strip('/')}",
                                {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json"}, "POST", body, timeout=120)
     if code not in (200, 201, 202) or not isinstance(data, dict):
@@ -1470,11 +1596,11 @@ def find_image_url(d):
     return None
 
 
-def bible_ref_urls(ctx, names, limit=4):
+def bible_ref_urls(ctx, names, limit=4, per=1):
     imgs = {b["name"]: b.get("images") or [] for b in (ctx.get("bible") or [])}
     out = []
     for n in names or []:
-        for p in imgs.get(n, [])[:1]:
+        for p in imgs.get(n, [])[:per]:
             try:
                 out.append(storage_signed_url("bible", p, 7200))
             except Exception as ex:
@@ -1558,7 +1684,8 @@ def t_prep_cut(t):
         # ③ 장면 사진 (첫 장면, 필요하면 끝 장면)
         frames = {}
         aspect = gen.get("aspect_ratio", "9:16")
-        refs = bible_ref_urls(ctx, c.get("reference_names"))
+        refs = bible_ref_urls(ctx, c.get("reference_names"), limit=8, per=3)
+        imodel = resolve_image_model(gen)
         for key, want in (("frame_first", True), ("frame_last", bool(c.get("use_end_frame")))):
             fr = dict(c.get(key) or {})
             if not want:
@@ -1566,7 +1693,16 @@ def t_prep_cut(t):
             fprompt = fr.get("prompt") or (c.get("prompt") or "")[:900] + (" — opening frame, still image." if key == "frame_first" else " — closing frame, still image.")
             progress(f"{code} {'첫' if key == 'frame_first' else '끝'} 장면 사진 만드는 중")
             try:
-                url = hf_image(fprompt + " Photorealistic film still, no text, no subtitles.", refs, aspect, gen.get("image_model"))
+                fp = (fprompt + " Photorealistic live-action film still shot on a cinema camera, natural skin texture, realistic lighting."
+                      " Keep each person's face, hair and outfit exactly as in the reference photos. No text, no subtitles.")
+                try:
+                    url = hf_image(fp, refs, aspect, imodel)
+                except Exception as ex1:
+                    if imodel == GROK_IMAGE:
+                        raise
+                    log(f"{imodel} 실패, Grok Imagine으로 다시: {ex1}")
+                    imodel = GROK_IMAGE
+                    url = hf_image(fp, refs, aspect, imodel)
                 local = os.path.join(HOME, "work", f"kf_{c['id']}_{key}.img")
                 fetch_to(url, local)
                 jpg = local + ".jpg"
@@ -1574,7 +1710,7 @@ def t_prep_cut(t):
                 fr.update({"prompt": fprompt, "path": storage_upload(f"{base}_{key}.jpg", jpg, "image/jpeg"), "status": "ready", "error": None})
                 frames[key] = jpg
                 os.remove(local)
-                log_cost("keyframe", "higgsfield", gen.get("image_model") or "xai/grok-imagine-image-2.0", {"images": 1}, episode_id=ep, scene_no=c["scene_no"],
+                log_cost("keyframe", "higgsfield", "nano-banana-pro" if "nano-banana-pro" in imodel else imodel, {"images": 1}, episode_id=ep, scene_no=c["scene_no"],
                          cut_id=code, outcome="success", note=f"{'첫' if key == 'frame_first' else '끝'} 장면 사진")
             except Exception as ex:
                 fr.update({"prompt": fprompt, "status": "failed", "error": str(ex)[:300]})
@@ -1969,6 +2105,98 @@ def el_json(path, body=None, method="POST", timeout=180):
     return data
 
 
+# ---------------- 바이블 사진 디자인: Soul 2(실사 인물) + Soul ID(얼굴 고정)
+PHOTO_LOOK = ("Photorealistic photograph of a real person, shot on a full-frame camera with an 85mm lens, natural skin texture with pores, "
+              "soft natural light, realistic hair strands, no makeup filter, no illustration, no 3D render, no text.")
+SET_SHOTS = [("정면 얼굴", "Head-and-shoulders portrait facing the camera, neutral expression, plain light grey studio background."),
+             ("3/4 얼굴", "Three-quarter view portrait turned slightly to the left, gentle smile, plain light grey studio background."),
+             ("전신·의상", "Full-body shot standing naturally, wearing the signature outfit, plain light grey studio background."),
+             ("감정 표정", "Close-up portrait with a strong emotional expression matching the character, plain light grey studio background.")]
+
+
+def upload_from_url(url, path):
+    local = os.path.join(HOME, "work", f"ph_{uuid.uuid4().hex[:8]}.img")
+    fetch_to(url, local)
+    jpg = local + ".jpg"
+    ff("-i", local, "-q:v", "2", jpg)
+    p = storage_upload(path, jpg, "image/jpeg")
+    for x in (local, jpg):
+        try:
+            os.remove(x)
+        except OSError:
+            pass
+    return p
+
+
+@task("photo_design")
+def t_photo_design(t):
+    did = (t.get("payload") or {}).get("design_id")
+    d = rpc("agent_get_photo_design", p_token=TOKEN, p_id=did)
+    if not d:
+        raise RuntimeError("사진 디자인 요청을 찾지 못했습니다")
+    name = d["entry_name"]
+    try:
+        if d["category"] == "character":
+            progress(f"{name} 실사 인물 사진 후보를 만드는 중 (Soul 2)")
+            urls = soul_images(d["prompt"] + " " + PHOTO_LOOK, n=4, aspect="3:4")
+            model = SOUL2
+        else:
+            model = resolve_image_model(d.get("generation") or {})
+            progress(f"{name} 사진 후보를 만드는 중")
+            urls = []
+            for _ in range(2):
+                st = hf_submit_wait(model, {"prompt": d["prompt"] + " Photorealistic location photograph, natural light, no people, no text.",
+                                            "aspect_ratio": "9:16"}, "장소 사진")
+                urls += find_image_urls(st.get("images") or st)[:1]
+        previews = [{"path": upload_from_url(u, f"photos/{did}/{i}_{uuid.uuid4().hex[:6]}.jpg")} for i, u in enumerate(urls, 1)]
+    except Exception as e:
+        rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
+        raise
+    if not previews:
+        rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": "후보가 만들어지지 않았습니다"})
+        raise RuntimeError("후보가 만들어지지 않았습니다")
+    rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "ready", "previews": previews})
+    log_cost("keyframe", "higgsfield", model, {"images": len(previews)}, note=f"사진 디자인: {name}", outcome="success")
+    notify(f"{name} 사진 후보 {len(previews)}장 도착", "바이블 탭에서 마음에 드는 사진을 골라 주세요")
+    return f"{name} 사진 후보 {len(previews)}장"
+
+
+@task("photo_set")
+def t_photo_set(t):
+    """고른 사진으로 Soul ID 학습 → 같은 얼굴로 기준 사진 세트."""
+    did = (t.get("payload") or {}).get("design_id")
+    d = rpc("agent_get_photo_design", p_token=TOKEN, p_id=did)
+    if not d:
+        raise RuntimeError("사진 디자인 요청을 찾지 못했습니다")
+    name = d["entry_name"]
+    try:
+        chosen = d.get("chosen") or []
+        src = [storage_signed_url(x.get("bucket") or "takes", x["path"], 7200) for x in chosen if x.get("path")]
+        if not src:
+            raise RuntimeError("고른 사진이 없습니다")
+        progress(f"{name} 얼굴 학습 중 (Soul ID, 수 분 걸림)")
+        soul_id = soul_train(f"{d.get('series_title') or 'NYX'} · {name}", src)
+        log_cost("keyframe", "higgsfield", "soul-id-training", {"calls": 1}, note=f"얼굴 학습: {name}", outcome="success")
+        rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "training", "soul_id": soul_id})
+        look = (d.get("description") or d.get("prompt") or "")[:900]
+        outfit = (d.get("details") or "")[:500]
+        ref_set = []
+        for label, shot in SET_SHOTS:
+            progress(f"{name} 기준 사진 만드는 중: {label}")
+            try:
+                u = soul_images(f"{look} {outfit if label == '전신·의상' else ''} {shot} {PHOTO_LOOK}", n=1, aspect="3:4", soul_id=soul_id)[0]
+                ref_set.append({"label": label, "path": upload_from_url(u, f"photos/{did}/set_{len(ref_set) + 1}_{uuid.uuid4().hex[:6]}.jpg")})
+            except Exception as ex:
+                log(f"기준 사진 실패({label}): {ex}")
+        log_cost("keyframe", "higgsfield", SOUL2, {"images": len(ref_set)}, note=f"기준 사진 세트: {name}", outcome="success")
+    except Exception as e:
+        rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
+        raise
+    rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "set_ready", "soul_id": soul_id, "ref_set": ref_set})
+    notify(f"{name} 얼굴 고정 완료", f"같은 얼굴 기준 사진 {len(ref_set)}장을 바이블 탭에서 확인하고 적용해 주세요")
+    return f"{name} Soul ID + 기준 사진 {len(ref_set)}장"
+
+
 @task("voice_design")
 def t_voice_design(t):
     did = (t.get("payload") or {}).get("design_id")
@@ -2004,6 +2232,46 @@ def t_voice_design(t):
     log_cost("audio", "elevenlabs", "voice-design", {"calls": 1}, note=f"목소리 디자인: {d['entry_name']}", outcome="success")
     notify(f"{d['entry_name']} 목소리 후보 {len(previews)}개 도착", "바이블 탭에서 들어 보고 골라 주세요")
     return f"{d['entry_name']} 후보 {len(previews)}개"
+
+
+@task("bible_extract")
+def t_bible_extract(t):
+    """작가실: 대본을 화별로 읽어 씬마다 필요한 인물·장소·소품을 뽑아 바이블에 올린다(새 항목은 대표 적용 대기 수정안)."""
+    p = t.get("payload") or {}
+    sid = t.get("series_id") or p.get("series_id")
+    ov = rpc("agent_bible_overview", p_token=TOKEN, p_series=sid, p_episode=t.get("episode_id") or p.get("episode_id")) or {}
+    title = (ov.get("series") or {}).get("title", "")
+    known = [{k: e.get(k) for k in ("category", "name", "summary")} for e in ov.get("entries") or []]
+    eps = [e for e in ov.get("episodes") or [] if (e.get("text") or "").strip()]
+    if not eps:
+        return "읽을 대본이 없습니다"
+    system = """너는 드라마 작가실의 미술·캐스팅 담당이다. 대본을 읽고 씬마다 화면에 나와야 하는 것을 빠짐없이 뽑아 시리즈 바이블 항목으로 만든다.
+- category: character(대사가 있거나 얼굴이 보이는 인물. 단역도 얼굴이 나오면 포함, '군중'처럼 얼굴이 중요하지 않으면 제외),
+  location(씬이 벌어지는 장소. 같은 장소는 하나로), prop(줄거리·연속성에 중요한 물건: 반복 등장, 클로즈업, 인물의 상징).
+- 이미 바이블에 있는 항목은 이름을 그대로 쓰고 appears만 채운다(description은 비워도 됨).
+- 새 항목의 description: 영상·사진 모델에 그대로 넣을 영어 고정 묘사 1~3문장. 인물은 나이·국적·성별·얼굴형·머리 모양과 색·체형·분위기,
+  장소는 공간 구조·재질·색·시간대·빛, 소품은 모양·재질·색·크기. 실존 인물·배우 이름 금지.
+- details: 한국어. 화별 의상·바뀌면 안 되는 특징·금지 사항.
+- summary: 한국어 한 줄(대본 속 역할).
+- appears: 이 항목이 나오는 씬 [{"ep": 화 번호, "scene": 씬 번호}]. 씬 번호는 대본의 씬 순서(1부터).
+답 형식: <json>{"items": [{"category": "", "name": "", "summary": "", "description": "", "details": "", "appears": [{"ep": 1, "scene": 1}]}]}</json>"""
+    total = {"new_entries": 0, "proposals": 0}
+    for e in eps:
+        progress(f"작가실이 {e['number']}화에서 필요한 인물·장소·소품을 찾는 중")
+        user = f"시리즈: {title}\n\n[이미 바이블에 있는 항목]\n{json.dumps(known, ensure_ascii=False)}\n\n[{e['number']}화 {e.get('title') or ''} 대본]\n{(e.get('text') or '')[:60000]}"
+        text, _ = claude("claude-opus-5-5", system, user, max_tokens=8000, stage="other", note=f"바이블 필요 항목 추출: {title} {e['number']}화")
+        items = pick_json(text).get("items") or []
+        for it in items:
+            it["appears"] = [{"ep": int(x.get("ep") or e["number"]), "scene": int(x.get("scene") or 0)} for x in (it.get("appears") or []) if isinstance(x, dict)]
+        r = rpc("agent_bible_upsert", p_token=TOKEN, p_series=sid, p_items=items) or {}
+        for k in total:
+            total[k] += int(r.get(k) or 0)
+        for it in items:
+            if not any(k["name"].lower() == (it.get("name") or "").lower() and k["category"] == it.get("category") for k in known):
+                known.append({k: it.get(k) for k in ("category", "name", "summary")})
+    if total["proposals"]:
+        notify(f"바이블 필요 항목 {total['proposals']}개 제안", "바이블 탭에서 확인하고 '모두 적용 + 사진 만들기'를 눌러 주세요")
+    return f"새 항목 {total['new_entries']}개 · 적용 대기 {total['proposals']}개"
 
 
 @task("voice_cast")
@@ -2492,7 +2760,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"bible_extract": "대본에서 필요 항목 찾기", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
@@ -3847,16 +4115,39 @@ async function uploadBibleFile(entryId, file) {
 const thumbs = (paths, urls) => paths?.length ? `<div class="thumbs">${paths.map(p => urls[p]
   ? `<a href="${esc(urls[p])}" target="_blank" rel="noopener"><img src="${esc(urls[p])}" alt="기준 사진" loading="lazy"></a>` : '').join('')}</div>` : '';
 
+// 등장 씬: [{ep, scene}] → "1화 S1·S3 · 2화 S2"
+function appearsLine(e, c) {
+  const ap = Array.isArray(e.appears) ? e.appears : [];
+  const need = ['character', 'location', 'prop'].includes(e.category) && !(c?.image_paths || []).length;
+  if (!ap.length && !need) return '';
+  const byEp = {}; ap.forEach(x => { (byEp[x.ep] = byEp[x.ep] || []).push(x.scene); });
+  const txt = Object.keys(byEp).sort((a, b) => a - b).map(ep => `${ep}화 ${[...new Set(byEp[ep])].sort((a, b) => a - b).map(s => 'S' + s).join('·')}`).join(' · ');
+  return `<div class="row" style="gap:6px;margin-top:6px">${need ? pill('사진 필요', 'warn') : ''}${e.origin === 'script' ? pill('대본에서 찾음') : ''}${txt ? `<span class="quiet">등장: ${esc(txt)}</span>` : ''}</div>`;
+}
+// 사진 없는 인물·장소·소품에 사진 디자인을 한꺼번에 맡긴다
+async function queuePhotos(entries, curOf, only) {
+  const open = new Set((entries.length ? await q(S.sb.from('photo_designs').select('entry_id').in('entry_id', entries.map(e => e.id))
+    .in('status', ['queued', 'ready', 'training', 'set_ready'])) : []).map(d => d.entry_id));
+  const todo = entries.filter(e => ['character', 'location', 'prop'].includes(e.category) && (!only || only.has(e.id)) && !open.has(e.id)
+    && curOf(e.id) && !(curOf(e.id).image_paths || []).length);
+  for (const e of todo) {
+    const c = curOf(e.id);
+    const r = await q(S.sb.from('photo_designs').insert({ entry_id: e.id, prompt: [c.description, e.summary].filter(Boolean).join('. ').slice(0, 1800) }).select('id').single());
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'photo_design', payload: { design_id: r.id } }));
+  }
+  return todo.length;
+}
+
 async function viewBible(main) {
   const series = await q(S.sb.from('series').select('id,title').order('created_at'));
   if (!S.seriesId || !series.some(s => s.id === S.seriesId)) S.seriesId = series[0]?.id || null;
   if (!S.seriesId) { main.innerHTML = '<h2>시리즈 바이블</h2><div class="card quiet">먼저 대본 탭에서 시리즈를 만드세요.</div>'; return; }
   const [entries, episodes] = await Promise.all([
-    q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at').eq('series_id', S.seriesId).order('sort_order').order('created_at')),
+    q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin').eq('series_id', S.seriesId).order('sort_order').order('created_at')),
     q(S.sb.from('episodes').select('id,number,title').eq('series_id', S.seriesId).order('number')),
   ]);
   const versions = entries.length ? await q(S.sb.from('bible_versions')
-    .select('id,entry_id,version_no,description,details,voice_id,image_paths,voice_path,change_reason,status,proposed_by,decided_at,created_at,devices(name)')
+    .select('id,entry_id,version_no,description,details,voice_id,soul_id,image_paths,voice_path,change_reason,status,proposed_by,decided_at,created_at,devices(name)')
     .in('entry_id', entries.map(e => e.id)).order('version_no', { ascending: false })) : [];
   const cur = id => versions.find(v => v.entry_id === id && v.status === 'active');
   const proposals = versions.filter(v => v.status === 'proposed');
@@ -3871,12 +4162,15 @@ async function viewBible(main) {
   <p class="quiet">모든 화가 따르는 기준 원본입니다. 감독은 여기 적힌 문장만 프롬프트에 쓰고, 영상감수자는 여기 사진과 비교해 채점합니다. 적용은 대표만 할 수 있습니다.</p>
   <div class="card">
     <div class="row"><select id="bser" style="flex:1;min-width:160px">${series.map(s => `<option value="${esc(s.id)}" ${s.id === S.seriesId ? 'selected' : ''}>${esc(s.title)}</option>`).join('')}</select>
+      <button class="btn small" id="bextract" title="작가실이 대본을 화별로 읽고 씬마다 필요한 인물·장소·소품을 찾아 바이블 항목으로 올립니다">대본에서 필요한 것 찾기</button>
+      <button class="btn small" id="bphotos" title="사진이 없는 인물·장소·소품의 사진 후보를 한꺼번에 만듭니다(인물은 Soul 2 실사)">사진 없는 항목 사진 만들기</button>
       <button class="btn small" id="bcast" title="작가실이 대본을 읽고 인물마다 목소리 설명·시험 대사를 쓰고, ElevenLabs 후보 3개씩 만듭니다">인물 목소리 한꺼번에 만들기</button>
       <button class="btn primary small" id="bnew">+ 항목 추가</button></div>
     <div class="row" style="margin-top:10px">${[['all', `전체 ${entries.length}`], ...Object.entries(BIBLE_CAT).map(([k, l]) => [k, `${l} ${cnt(k)}`])].map(([k, l]) =>
       `<button class="btn small ${S.bibleCat === k ? 'primary' : ''}" data-bc="${k}">${esc(l)}</button>`).join('')}</div>
   </div>
-  ${proposals.length ? `<h3>검토할 바이블 수정안 ${proposals.length}건</h3>${proposals.map(p => {
+  ${proposals.length ? `<div class="row" style="margin-top:14px"><h3 style="margin:0">검토할 바이블 수정안 ${proposals.length}건</h3>
+    ${proposals.some(p => p.change_reason === '대본에서 필요 항목으로 추출') ? `<button class="btn primary small" id="ballgo">대본 추출 ${proposals.filter(p => p.change_reason === '대본에서 필요 항목으로 추출').length}건 모두 적용 + 사진 만들기</button>` : ''}</div>${proposals.map(p => {
     const e = entries.find(x => x.id === p.entry_id); const c = cur(p.entry_id);
     return `<div class="card" style="border-color:var(--warn)">
       <div class="row"><b>${esc(e?.name)} v${p.version_no} 수정안</b>${pill(BIBLE_CAT[e?.category] || '')}<span class="quiet">${esc(p.proposed_by)} · ${fmt(p.created_at)}</span></div>
@@ -3892,14 +4186,18 @@ async function viewBible(main) {
     return `<div class="card">
       <div class="row"><b style="font-size:16px">${esc(e.name)}</b>${pill(BIBLE_CAT[e.category])}${c ? pill('v' + c.version_no, 'accent') : pill('승인본 없음', 'bad')}</div>
       ${e.summary ? `<div class="quiet" style="margin-top:4px">${esc(e.summary)}</div>` : ''}
+      ${appearsLine(e, c)}
       ${c ? thumbs(c.image_paths, urls) : ''}
       ${c ? `<div class="bdesc">${esc(c.description)}</div>` : ''}
       ${c?.details ? `<details style="margin-top:8px"><summary class="quiet">세부 사항</summary><pre class="doc" style="margin-top:6px">${esc(c.details)}</pre></details>` : ''}
+      ${c?.soul_id ? `<div class="quiet" style="margin-top:6px">${pill('얼굴 고정됨', 'good')} Soul ID <code>${esc(c.soul_id.slice(0, 8))}</code></div>` : ''}
       ${c?.voice_id ? `<div class="quiet" style="margin-top:8px">목소리 ID: <code>${esc(c.voice_id)}</code></div>` : ''}
       ${c?.voice_path && urls[c.voice_path] ? `<audio controls preload="none" src="${esc(urls[c.voice_path])}"></audio>` : ''}
       <div class="row" style="margin-top:10px"><button class="btn small" data-bedit="${esc(e.id)}">${c ? '새 버전 작성' : '내용 채우기'}</button>
         ${n > 1 ? `<button class="btn small" data-bhist="${esc(e.id)}">이력 ${n}개</button>` : ''}
+        ${['character', 'location', 'prop'].includes(e.category) ? `<button class="btn small" data-pd="${esc(e.id)}">${e.category === 'character' ? (c?.soul_id ? '사진 다시 디자인' : '실사 사진·얼굴 고정') : '사진 디자인'}</button>` : ''}
         ${['character', 'voice'].includes(e.category) ? `<button class="btn small" data-vd="${esc(e.id)}">${c?.voice_id ? '목소리 다시 디자인' : '목소리 디자인'}</button>` : ''}</div>
+      <div id="pd-${esc(e.id)}"></div>
       <div id="vd-${esc(e.id)}"></div>
       <div id="bh-${esc(e.id)}"></div>
     </div>`; }).join('')}</div>`
@@ -3916,6 +4214,25 @@ async function viewBible(main) {
   $('#bser').onchange = e => { S.seriesId = e.target.value; S.episodeId = null; S.contEp = null; go('bible'); };
   main.querySelectorAll('[data-bc]').forEach(b => b.onclick = () => { S.bibleCat = b.dataset.bc; go('bible'); });
   $('#bnew').onclick = () => openBibleEditor({ urls });
+  $('#bextract').onclick = guard(async () => {
+    if (!confirm('작가실이 이 시리즈 대본을 화별로 읽고, 씬마다 필요한 인물·장소·소품을 바이블 수정안으로 올립니다.\n이미 있는 항목은 등장 씬만 보탭니다. (Claude 화당 수백 원)')) return;
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'bible_extract', series_id: S.seriesId, payload: { series_id: S.seriesId } }));
+    toast('작가실에 맡겼습니다. 끝나면 알림이 옵니다');
+  });
+  $('#bphotos').onclick = guard(async () => {
+    const n = await queuePhotos(entries, cur);
+    toast(n ? `${n}개 항목의 사진 후보를 만들고 있습니다. 카드에서 골라 주세요` : '사진이 필요한 항목이 없습니다(승인된 묘사가 있어야 만들 수 있습니다)');
+    if (n) go('bible');
+  });
+  const ballgo = $('#ballgo');
+  if (ballgo) ballgo.onclick = guard(async () => {
+    const list = proposals.filter(p => p.change_reason === '대본에서 필요 항목으로 추출');
+    if (!confirm(`대본에서 찾은 ${list.length}개 항목을 바이블에 적용하고, 사진이 없는 항목은 사진 후보를 만듭니다(인물은 Soul 2 실사 4장).\n직접 사진을 넣을 항목은 먼저 그 카드에서 "고쳐서 적용"으로 사진을 올려 주세요.`)) return;
+    for (const p of list) await q(S.sb.rpc('activate_bible_version', { p_id: p.id }));
+    const fresh = await q(S.sb.from('bible_versions').select('id,entry_id,description,image_paths,status').in('entry_id', list.map(p => p.entry_id)).eq('status', 'active'));
+    const n = await queuePhotos(entries, id => fresh.find(v => v.entry_id === id), new Set(list.map(p => p.entry_id)));
+    toast(`${list.length}개 적용 · 사진 후보 ${n}건 만드는 중`); go('bible');
+  });
   $('#bcast').onclick = guard(async () => {
     const chars = entries.filter(e => e.category === 'character');
     if (!chars.length) return toast('먼저 캐릭터를 바이블에 등록해 주세요 (+ 항목 추가)');
@@ -3937,6 +4254,12 @@ async function viewBible(main) {
   main.querySelectorAll('[data-brej]').forEach(b => b.onclick = guard(async () => {
     await q(S.sb.from('bible_versions').update({ status: 'rejected' }).eq('id', b.dataset.brej)); toast('반려했습니다'); go('bible');
   }));
+  main.querySelectorAll('[data-pd]').forEach(b => b.onclick = () => {
+    const e = entries.find(x => x.id === b.dataset.pd); openPhotoDesign(e, cur(e.id), true);
+  });
+  const pds = entries.length ? await q(S.sb.from('photo_designs').select('entry_id').in('entry_id', entries.map(e => e.id))
+    .in('status', ['queued', 'ready', 'training', 'set_ready', 'failed'])) : [];
+  [...new Set(pds.map(d => d.entry_id))].forEach(id => { const e = entries.find(x => x.id === id); if (e) openPhotoDesign(e, cur(e.id), false); });
   main.querySelectorAll('[data-vd]').forEach(b => b.onclick = () => {
     const e = entries.find(x => x.id === b.dataset.vd); openVoiceDesign(e, cur(e.id), true);
   });
@@ -3955,6 +4278,101 @@ async function viewBible(main) {
     box.querySelectorAll('[data-bact2]').forEach(x => x.onclick = activate(x.dataset.bact2));
   });
   await renderContinuity(entries, episodes);
+}
+
+// 사진 디자인: 인물은 Soul 2 실사 후보 → 고르기 → Soul ID 얼굴 학습 → 같은 얼굴 기준 사진 세트 → 바이블 적용
+const PD_STATUS = { queued: ['후보 만드는 중', 'warn'], ready: ['골라 주세요', 'accent'], training: ['얼굴 학습 중', 'warn'], set_ready: ['기준 사진 확인', 'accent'], failed: ['실패', 'bad'] };
+async function openPhotoDesign(entry, cur, fresh) {
+  const box = document.getElementById('pd-' + entry.id); if (!box) return;
+  const isChar = entry.category === 'character';
+  const [d] = await q(S.sb.from('photo_designs').select('*').eq('entry_id', entry.id).order('created_at', { ascending: false }).limit(1));
+  if (fresh || !d || d.status === 'linked') {
+    const prompt = d?.prompt || [entry.summary, cur?.description].filter(Boolean).join('. ');
+    const has = (cur?.image_paths || []).length;
+    box.innerHTML = `<div class="vdbox"><b>${isChar ? '실사 사진·얼굴 고정' : '사진 디자인'}</b>
+      <p class="quiet" style="margin:4px 0">${isChar ? '인물 묘사를 적으면 Higgsfield <b>Soul 2</b>(실사 인물 전용)가 후보 4장을 만듭니다. 마음에 드는 사진을 고르면 그 얼굴로 <b>Soul ID</b>를 학습하고, 같은 얼굴의 기준 사진(정면·3/4·전신·감정 표정)을 만들어 바이블에 넣습니다. 컷 설계의 장면 사진은 이 기준 사진들을 참고로 그립니다.'
+        : '장소·소품 묘사를 적으면 후보 2장을 만듭니다. 고르면 바이블 기준 사진이 됩니다.'}</p>
+      <label>묘사 (영어로 적으면 더 정확: 나이·국적·얼굴형·머리·체형·분위기${isChar ? '' : '·시간대·빛'})</label>
+      <textarea id="pdP-${entry.id}" style="min-height:90px;font-family:inherit">${esc(prompt)}</textarea>
+      <div class="row" style="margin-top:8px"><button class="btn primary small" id="pdGo-${entry.id}">${isChar ? '후보 4장 만들기' : '후보 2장 만들기'}</button>
+        ${isChar && has ? `<button class="btn small" id="pdOwn-${entry.id}">지금 바이블 사진 ${has}장으로 얼굴 학습</button>` : ''}
+        <button class="btn small" id="pdX-${entry.id}" style="margin-left:auto">닫기</button></div></div>`;
+    document.getElementById('pdX-' + entry.id).onclick = () => { box.innerHTML = ''; };
+    document.getElementById('pdGo-' + entry.id).onclick = guard(async () => {
+      const p = document.getElementById('pdP-' + entry.id).value.trim();
+      if (p.length < 20) return toast('묘사를 20자 이상 적어 주세요');
+      const r = await q(S.sb.from('photo_designs').insert({ entry_id: entry.id, prompt: p }).select('id').single());
+      await q(S.sb.from('pipeline_tasks').insert({ kind: 'photo_design', payload: { design_id: r.id } }));
+      toast('사진 후보를 만들고 있습니다'); openPhotoDesign(entry, cur, false);
+    });
+    const own = document.getElementById('pdOwn-' + entry.id);
+    if (own) own.onclick = guard(async () => {
+      const p = document.getElementById('pdP-' + entry.id).value.trim() || entry.name;
+      const chosen = cur.image_paths.map(path => ({ bucket: 'bible', path }));
+      const r = await q(S.sb.from('photo_designs').insert({ entry_id: entry.id, prompt: p, chosen, status: 'training', previews: chosen }).select('id').single());
+      await q(S.sb.from('pipeline_tasks').insert({ kind: 'photo_set', payload: { design_id: r.id } }));
+      toast('얼굴 학습을 시작했습니다(수 분)'); openPhotoDesign(entry, cur, false);
+    });
+    return;
+  }
+  const all = [...(d.previews || []), ...(d.ref_set || [])];
+  const byBucket = b => all.filter(x => (x.bucket || 'takes') === b).map(x => x.path);
+  const urls = {};
+  for (const b of ['takes', 'bible']) {
+    const ps = byBucket(b); if (!ps.length) continue;
+    const { data } = await S.sb.storage.from(b).createSignedUrls(ps, 3600);
+    (data || []).forEach(x => { if (x.signedUrl) urls[x.path] = x.signedUrl; });
+  }
+  const busy = ['queued', 'training'].includes(d.status);
+  const [pl, pk] = PD_STATUS[d.status] || [d.status, ''];
+  const img = (x, sel) => `<label class="pdimg ${sel ? 'pick' : ''}">${urls[x.path] ? `<img src="${esc(urls[x.path])}" loading="lazy">` : '<span class="ph">사진</span>'}
+    ${sel ? `<input type="checkbox" data-pdc="${esc(x.path)}" data-b="${esc(x.bucket || 'takes')}">` : ''}${x.label ? `<span>${esc(x.label)}</span>` : ''}</label>`;
+  box.innerHTML = `<div class="vdbox"><div class="row"><b>${isChar ? '실사 사진·얼굴 고정' : '사진 디자인'}</b>${pill(pl, pk)}
+      <button class="btn small" id="pdNew-${entry.id}" style="margin-left:auto">새로 만들기</button></div>
+    ${busy ? `<p><span class="spin"></span>${d.status === 'training' ? '고른 사진으로 얼굴을 학습하고 같은 얼굴의 기준 사진을 만드는 중입니다. 5~20분 걸릴 수 있습니다.' : 'Higgsfield에서 후보를 만드는 중입니다.'} 끝나면 알림이 옵니다.</p>` : ''}
+    ${d.status === 'failed' ? `<div class="msg err">${esc(d.error || '실패')}</div>` : ''}
+    ${d.status === 'ready' ? `<p class="quiet" style="margin:4px 0">${isChar ? '같은 사람으로 쓸 사진을 1~4장 고르세요(여러 장이면 얼굴이 더 안정적).' : '바이블에 넣을 사진을 고르세요.'}</p>
+      <div class="pdgrid">${(d.previews || []).map(x => img(x, true)).join('')}</div>
+      <div class="row" style="margin-top:8px"><button class="btn small primary" id="pdPick-${entry.id}">${isChar ? '이 얼굴로 학습 + 기준 사진 만들기' : '바이블에 적용'}</button>
+        ${isChar ? '<span class="quiet">얼굴 학습 1회 + 기준 사진 4장</span>' : ''}</div>` : ''}
+    ${d.status === 'set_ready' ? `<p class="quiet" style="margin:4px 0">같은 얼굴로 만든 기준 사진입니다. 적용하면 바이블 기준 사진이 이 세트로 바뀌고 Soul ID가 함께 저장됩니다.</p>
+      <div class="pdgrid">${[...(d.chosen || []), ...(d.ref_set || [])].map(x => img(x, false)).join('')}</div>
+      <div class="row" style="margin-top:8px"><button class="btn small primary" id="pdLink-${entry.id}">바이블에 적용</button>
+        <span class="quiet">얼굴이 다르면 "새로 만들기"</span></div>` : ''}</div>`;
+  document.getElementById('pdNew-' + entry.id).onclick = () => openPhotoDesign(entry, cur, true);
+  const toBible = async list => {
+    const out = [];
+    for (const x of list) {
+      if ((x.bucket || 'takes') === 'bible') { out.push(x.path); continue; }
+      const { data, error } = await S.sb.storage.from('takes').download(x.path);
+      if (error) throw error;
+      out.push(await uploadBibleFile(entry.id, new File([data], 'photo.jpg', { type: 'image/jpeg' })));
+    }
+    return out;
+  };
+  const apply = async (paths, soul_id, reason) => {
+    const v = await q(S.sb.from('bible_versions').insert({
+      entry_id: entry.id, description: cur?.description || d.prompt, details: cur?.details || null, voice_id: cur?.voice_id || null,
+      voice_path: cur?.voice_path || null, image_paths: paths, soul_id: soul_id || cur?.soul_id || null, change_reason: reason, status: 'proposed' }).select('id').single());
+    await q(S.sb.rpc('activate_bible_version', { p_id: v.id }));
+    await q(S.sb.from('photo_designs').update({ status: 'linked' }).eq('id', d.id));
+    toast(`${entry.name} 사진을 바이블에 적용했습니다`); go('bible');
+  };
+  const pick = document.getElementById('pdPick-' + entry.id);
+  if (pick) pick.onclick = guard(async () => {
+    const chosen = [...box.querySelectorAll('[data-pdc]:checked')].map(c => ({ bucket: c.dataset.b, path: c.dataset.pdc }));
+    if (!chosen.length) return toast('사진을 하나 이상 골라 주세요');
+    if (!isChar) return apply(await toBible(chosen), null, '사진 디자인으로 기준 사진');
+    await q(S.sb.from('photo_designs').update({ chosen, status: 'training' }).eq('id', d.id));
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'photo_set', payload: { design_id: d.id } }));
+    toast('얼굴 학습을 시작했습니다(5~20분)'); openPhotoDesign(entry, cur, false);
+  });
+  const link = document.getElementById('pdLink-' + entry.id);
+  if (link) link.onclick = guard(async () => {
+    link.disabled = true; link.textContent = '바이블로 옮기는 중…';
+    apply(await toBible([...(d.chosen || []), ...(d.ref_set || [])]), d.soul_id, 'Soul 2 실사 사진 + Soul ID 얼굴 고정');
+  });
+  if (busy) setTimeout(() => { if (S.tab === 'bible' && document.getElementById('pd-' + entry.id)) openPhotoDesign(entry, cur, false).catch(() => {}); }, 10000);
 }
 
 // 목소리 디자인: 설명 → ElevenLabs 후보 3개 → 듣고 고르기 → 바이블 새 버전으로 적용
@@ -4013,7 +4431,7 @@ async function openVoiceDesign(entry, cur, fresh) {
   if (link) link.onclick = guard(async () => {
     const v = await q(S.sb.from('bible_versions').insert({
       entry_id: entry.id, description: cur?.description || entry.summary || entry.name, details: cur?.details || null,
-      image_paths: cur?.image_paths || [], voice_path: cur?.voice_path || null, voice_id: d.voice_id,
+      image_paths: cur?.image_paths || [], voice_path: cur?.voice_path || null, voice_id: d.voice_id, soul_id: cur?.soul_id || null,
       change_reason: '목소리 디자인으로 목소리 고정', status: 'proposed' }).select('id').single());
     await q(S.sb.rpc('activate_bible_version', { p_id: v.id }));
     await q(S.sb.from('voice_designs').update({ status: 'linked' }).eq('id', d.id));
@@ -4067,7 +4485,7 @@ function openBibleEditor({ entry, base, urls, fromId }) {
       for (const f of files) added.push(await uploadBibleFile(entryId, f));
       const voicePath = voice ? await uploadBibleFile(entryId, voice) : ($('#bkeepv')?.checked ? base.voice_path : null);
       const v = await q(S.sb.from('bible_versions').insert({
-        entry_id: entryId, description, details: $('#bdet').value.trim() || null, voice_id: $('#bvid').value.trim() || null,
+        entry_id: entryId, description, details: $('#bdet').value.trim() || null, voice_id: $('#bvid').value.trim() || null, soul_id: base?.soul_id || null,
         image_paths: [...kept, ...added], voice_path: voicePath, change_reason: $('#breason').value.trim() || null, status: 'proposed',
       }).select('id,version_no').single());
       await q(S.sb.rpc('activate_bible_version', { p_id: v.id }));
@@ -4294,7 +4712,7 @@ async function directiveDetail(id) {
       <td>${esc(e.actor)}<br><span class="quiet">${esc(e.devices?.name || '')}</span></td><td>${esc(human(e.summary))}</td></tr>`).join('')}</table>` : '<p class="quiet">기록이 없습니다.</p>'}`;
 }
 const JOB_NAME = {
-  prep_cut: '컷 준비(사진·목소리)', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보 만들기', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성 (Seedance)', store: '집 PC 보관', video_review: '영상 감수',
+  bible_extract: '대본에서 필요 항목 찾기', photo_design: '사진 디자인', photo_set: '얼굴 학습·기준 사진', prep_cut: '컷 준비(사진·목소리)', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보 만들기', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성 (Seedance)', store: '집 PC 보관', video_review: '영상 감수',
   ping: '연결 시험', summarize_script_diff: '대본 변경 요약', split_scenes: '씬 나누기', summarize_directive: '지시 읽고 담당 정하기',
   write_prompts: '프롬프트 작성 (감독)', review_prompts: '프롬프트 감수 (감정감수자)', generate_keyframe: '키프레임 생성',
   review_keyframe: '키프레임 검사 (영상감수자)', generate_video: '영상 생성', review_video: '영상 검사 (영상감수자)',
@@ -4869,7 +5287,7 @@ const CUT_STATUS = {
   designed: ['설계됨 · 승인 대기', 'accent'], approved: ['승인 · 생성 대기', 'warn'], generating: ['생성 중', 'warn'],
   reviewing: ['감수 중', 'warn'], passed: ['통과', 'good'], failed: ['불합격·실패', 'bad'], hold: ['보류', ''], cancelled: ['취소', ''],
 };
-const TASK_LABEL = { prep_cut: '사진·목소리 준비', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
+const TASK_LABEL = { bible_extract: '대본에서 필요 항목 찾기', photo_design: '사진 디자인', photo_set: '얼굴 학습', prep_cut: '사진·목소리 준비', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
 const PROD_STEPS = [['원고', '대본 탭에서 넣기'], ['작가실', '감정선 정리본'], ['컷 설계', '컷 나누기·대사 미리 듣기·장면 사진'], ['생성 승인', '대표가 컷별로'], ['영상·감수', 'Seedance + 영상감수'], ['씬 보관', '집 PC · OneDrive']];
 const usdKrw = (usd, rate) => usd == null ? '-' : won(usd * (rate || 1340));
 
@@ -5148,8 +5566,8 @@ async function renderProdSettings() {
       <div style="width:150px"><label>화면 비율</label><select id="gAsp">${['9:16', '16:9', '3:4', '1:1', '4:3', '21:9'].map(a => opt(a, G.aspect_ratio || '9:16', a + (a === '9:16' ? ' (세로·숏폼)' : a === '16:9' ? ' (가로)' : ''))).join('')}</select></div>
     </div>
     <label class="ed-chk" style="margin-top:10px"><input type="checkbox" id="gPrep" ${G.auto_prep !== false ? 'checked' : ''}> 컷 설계가 끝나면 장면 사진·대사 미리 듣기를 자동으로 준비</label>
-    <label>장면 사진 모델 (Higgsfield 경로)</label><input id="gImg" value="${esc(G.image_model || '')}" placeholder="비워 두면 xai/grok-imagine-image-2.0 (기본)">
-    <p class="quiet" style="margin:2px 0 0">기본은 Grok Imagine 2.0(장당 약 $0.04, 바이블 사진을 참고로 같은 얼굴·의상 유지). 다른 모델로 바꾸려면 Higgsfield Explore의 모델 경로를 넣으세요.</p>
+    <label>장면 사진 모델 (Higgsfield 경로)</label><input id="gImg" value="${esc(G.image_model || '')}" placeholder="auto = Nano Banana Pro 자동 탐색 (없으면 Grok Imagine)">
+    <p class="quiet" style="margin:2px 0 0">기본(auto)은 Nano Banana Pro: 바이블 기준 사진(인물당 최대 3장, 모두 합쳐 8장)을 참고로 장면을 그립니다. 에이전트가 내 Higgsfield 키로 경로를 스스로 찾고, 못 찾으면 Grok Imagine 2.0을 씁니다. 바이블 인물 사진은 Soul 2로 만듭니다.</p>
     <label>집 윈도우 PC 보관 폴더 (OneDrive 안이면 자동 백업)</label><input id="gWin" value="${esc(ST.windows_folder || '%OneDrive%\\NYX')}">
     <label>맥 작업 폴더</label><input id="gMac" value="${esc(ST.mac_folder || '~/Movies/NYX')}">
     <p class="quiet">처음에는 480p로 뽑아 확인하고, 통과한 컷만 맥에서 고화질로 올리는 것을 권합니다. 같은 15초 컷이 720p는 480p의 약 2.2배, 1080p는 약 5.5배입니다.</p>
@@ -6297,6 +6715,20 @@ const HELP = {
 지금 문장과 바뀐 문장이 초록·빨강으로 비교되어 보입니다.</p>
 <ul><li><b>적용</b> — 그대로 받아들임 · <b>고쳐서 적용</b> — 문장을 손본 뒤 적용 · <b>반려</b> — 버림</li></ul>
 
+<h4>⑤-0 대본에서 필요한 것 찾기 — 바이블은 제작 자료실입니다</h4>
+<ol>
+<li>대본을 넣은 뒤 <b>대본에서 필요한 것 찾기</b>: 작가실이 화별로 읽고 씬마다 화면에 나와야 하는 <b>인물·장소·소품</b>을 찾아 바이블 수정안으로 올립니다. 카드에 "등장: 1화 S1·S3"처럼 나오는 씬이 표시됩니다.</li>
+<li>직접 가진 사진이 있는 항목은 그 수정안의 <b>고쳐서 적용</b>으로 사진을 올리세요. 없으면 <b>모두 적용 + 사진 만들기</b>: 인물은 Soul 2 실사 후보 4장, 장소·소품은 2장이 만들어집니다. 카드에서 고르면 바이블에 저장됩니다.</li>
+<li>나중에 사진이 빠진 항목은 <b>사진 없는 항목 사진 만들기</b>로 한꺼번에 채웁니다. "사진 필요" 표시가 붙은 카드가 대상입니다.</li>
+<li>감독·컷 설계·영상 생성은 바이블에 적용된 자료만 가져다 씁니다. 그래서 바이블이 채워져 있어야 화마다 얼굴·장소·소품이 같게 나옵니다.</li>
+</ol>
+<h4>⑤-1 실사 사진·얼굴 고정 (캐릭터 카드) — 영상이 실사처럼 보이는지는 여기서 정해집니다</h4>
+<ol>
+<li>카드의 <b>실사 사진·얼굴 고정</b> → 인물 묘사(영어 권장: 나이, 국적, 얼굴형, 머리, 체형, 분위기)를 적고 <b>후보 4장 만들기</b>. Higgsfield <b>Soul 2</b>(실사 인물 전용)가 만듭니다.</li>
+<li>같은 사람으로 쓸 사진을 1~4장 체크 → <b>이 얼굴로 학습 + 기준 사진 만들기</b>. 그 얼굴로 <b>Soul ID</b>(이 인물 전용 얼굴 모델)를 학습하고, 같은 얼굴로 정면·3/4·전신(의상)·감정 표정 4장을 만듭니다(5~20분).</li>
+<li>기준 사진이 같은 사람으로 보이면 <b>바이블에 적용</b>. 카드에 "얼굴 고정됨"이 붙습니다. 이미 사진을 올려 둔 인물은 <b>지금 바이블 사진으로 얼굴 학습</b>을 눌러도 됩니다.</li>
+<li>컷 설계의 장면 사진은 이 기준 사진들을 참고로 <b>Nano Banana Pro</b>가 그리고, 그 사진이 영상의 첫 장면이 됩니다. 장소·소품도 <b>사진 디자인</b>으로 기준 사진을 만들어 두면 배경이 덜 흔들립니다.</li>
+</ol>
 <h4>⑥ 목소리 디자인 (캐릭터·목소리 카드)</h4>
 <ul>
 <li><b>한꺼번에</b>: 맨 위 <b>인물 목소리 한꺼번에 만들기</b> → 작가실이 대본 1~3화를 읽고 인물마다 목소리 설명과 시험 대사를 쓴 뒤 후보 3개씩 만듭니다. 새 시리즈를 시작할 때 이것만 누르면 됩니다.</li>
