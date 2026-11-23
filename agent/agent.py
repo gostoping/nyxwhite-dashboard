@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.5.1"
+VERSION = "1.6.0"
 
 import base64
 import glob
@@ -1361,6 +1361,323 @@ def t_voice_save(t):
     return f"{d['entry_name']} 목소리 저장 ({data['voice_id']})"
 
 
+# ---------------- 편집실: 타임라인 조립(ffmpeg) · 말로 편집(Claude)
+def tl_layout(tl):
+    """타임라인 계산: 클립마다 시작 위치, 전체 길이, 자막의 절대 시간."""
+    t, out = 0.0, []
+    for c in tl.get("clips") or []:
+        gap = max(0.0, float(c.get("gap") or 0))
+        a, b = float(c.get("in") or 0), float(c.get("out") or 0)
+        if b - a < 0.2:
+            continue
+        t += gap
+        out.append({**c, "start": round(t, 3), "dur": round(b - a, 3)})
+        t += b - a
+    pos = {c["id"]: c for c in out}
+    subs = []
+    for s in tl.get("subs") or []:
+        if not (s.get("text") or "").strip():
+            continue
+        if s.get("clip_id"):
+            c = pos.get(s["clip_id"])
+            if not c:
+                continue
+            st, en = c["start"] + max(0.0, float(s.get("rs") or 0)), c["start"] + min(c["dur"], float(s.get("re") or c["dur"]))
+        else:
+            st, en = float(s.get("start") or 0), float(s.get("end") or 0)
+        if en - st >= 0.3:
+            subs.append({"start": round(st, 3), "end": round(min(en, t), 3), "text": s["text"].strip()})
+    return out, round(t, 3), sorted(subs, key=lambda x: x["start"])
+
+
+def ts(sec, vtt=False):
+    ms = int(round(sec * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d}{'.' if vtt else ','}{ms:03d}"
+
+
+def write_subs(subs, srt, vtt):
+    with open(srt, "w", encoding="utf-8") as f:
+        for i, s in enumerate(subs, 1):
+            f.write(f"{i}\n{ts(s['start'])} --> {ts(s['end'])}\n{s['text']}\n\n")
+    with open(vtt, "w", encoding="utf-8") as f:
+        f.write("WEBVTT\n\n")
+        for s in subs:
+            f.write(f"{ts(s['start'], True)} --> {ts(s['end'], True)}\n{s['text']}\n\n")
+
+
+def video_size(src):
+    r = subprocess.run([ffmpeg(), "-hide_banner", "-i", src], capture_output=True, text=True, timeout=60)
+    m = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", r.stderr or "")
+    return (int(m.group(1)), int(m.group(2))) if m else (720, 1280)
+
+
+def take_source(take_id, tk):
+    """이 컴퓨터에 있는 원본을 쓰고, 없으면 미리보기(저장소)나 원래 주소에서 받아 둔다."""
+    f = tk.get("files") or {}
+    for key in (PLATFORM, "mac", "windows"):
+        p = (f.get(key) or {}).get("original")
+        if p and os.path.exists(p):
+            return p
+    cache = os.path.join(HOME, "work", "src", f"{take_id}.mp4")
+    if os.path.exists(cache):
+        return cache
+    if f.get("preview"):
+        return fetch_to(storage_signed_url("takes", f["preview"], 900), cache)
+    if tk.get("remote_url"):
+        return fetch_to(tk["remote_url"], cache)
+    raise RuntimeError(f"{tk.get('code')} 영상 파일을 찾지 못했습니다")
+
+
+def episode_dir(ed):
+    settings = ed.get("settings") or {}
+    e = ed.get("episode") or {}
+    d = os.path.join(local_root(settings.get("storage")), safe(ed.get("series_title") or "시리즈"),
+                     f"EP{int(e.get('number') or 0):02d}_{safe(e.get('title'), 30)}", "00_편집본")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def even(n):
+    n = int(n)
+    return n - (n % 2)
+
+
+@task("assemble")
+def t_assemble(t):
+    rid = (t.get("payload") or {}).get("render_id")
+    r = rpc("agent_get_render", p_token=TOKEN, p_id=rid)
+    if not r:
+        raise RuntimeError("조립 요청을 찾지 못했습니다")
+    ed = rpc("agent_get_edit", p_token=TOKEN, p_project=r["project_id"])
+    tl, kind = r["timeline"], r["kind"]
+    takes = ed.get("takes") or {}
+    upd = lambda **p: rpc("agent_update_render", p_token=TOKEN, p_id=rid, p=p)
+    upd(status="running", progress="재료 모으는 중")
+    try:
+        clips, total, subs = tl_layout(tl)
+        clips = [c for c in clips if c.get("take_id") in takes]
+        if not clips:
+            raise RuntimeError("타임라인에 쓸 수 있는 컷이 없습니다")
+        work = os.path.join(HOME, "work", f"render_{rid}")
+        os.makedirs(work, exist_ok=True)
+        srcs = []
+        for i, c in enumerate(clips, 1):
+            progress(f"재료 {i}/{len(clips)}: {takes[c['take_id']].get('code')}")
+            srcs.append(take_source(c["take_id"], takes[c["take_id"]]))
+        W, H = video_size(srcs[0])
+        if kind == "preview":
+            s = 640 / max(W, H)
+            W, H = even(W * s), even(H * s)
+        W, H = even(W), even(H)
+        musics = []
+        for m in tl.get("music") or []:
+            if not m.get("path"):
+                continue
+            local = os.path.join(HOME, "work", "music", os.path.basename(m["path"]))
+            if not os.path.exists(local):
+                fetch_to(storage_signed_url("takes", m["path"], 900), local)
+            musics.append((m, local))
+        args, fc, alab = [], [], []
+        for i, (c, src) in enumerate(zip(clips, srcs)):
+            args += ["-i", src]
+            a, b, gap = float(c["in"]), float(c["out"]), float(c.get("gap") or 0)
+            pad = f",tpad=start_duration={gap:.3f}:start_mode=add:color=black" if gap > 0 else ""
+            fc.append(f"[{i}:v]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS,fps=30,"
+                      f"scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p{pad}[v{i}]")
+            if has_audio(src):
+                at = max(0.0, c["start"] + float(c.get("voice_offset") or 0))
+                g = max(0.0, min(3.0, float(c.get("voice_gain") if c.get("voice_gain") is not None else 1)))
+                ms = int(at * 1000)
+                fc.append(f"[{i}:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,"
+                          f"volume={g:.2f},adelay={ms}|{ms}[a{i}]")
+                alab.append(f"[a{i}]")
+        n = len(clips)
+        fc.append("".join(f"[v{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0[vcat]")
+        sub_ok = bool(subs) and bool((tl.get("settings") or {}).get("burn_subs"))
+        if sub_ok:
+            write_subs(subs, os.path.join(work, "subs.srt"), os.path.join(work, "subs.vtt"))
+            fc.append(f"[vcat]subtitles=subs.srt:force_style='FontSize={14 if kind == 'preview' else 18},Outline=2,MarginV=40'[vout]")
+        else:
+            fc.append("[vcat]null[vout]")
+        def mixdown(labels, name):
+            if not labels:
+                fc.append(f"anullsrc=r=48000:cl=stereo,atrim=end={total:.3f}[{name}]")
+            else:
+                fc.append("".join(labels) + f"amix=inputs={len(labels)}:normalize=0:dropout_transition=0,apad,atrim=end={total:.3f}[{name}]")
+        mixdown(alab, "dlg")
+        mlab = []
+        for j, (m, local) in enumerate(musics):
+            k = n + j
+            args += ["-i", local]
+            mi, mo = float(m.get("in") or 0), float(m.get("out") or 0)
+            dur = max(0.5, mo - mi) if mo > mi else None
+            trim = f"atrim=start={mi:.3f}" + (f":end={mo:.3f}" if dur else "")
+            fi, fo = float(m.get("fade_in") or 0), float(m.get("fade_out") or 0)
+            fades = (f",afade=t=in:d={fi:.2f}" if fi > 0 else "") + (f",afade=t=out:st={max(0, (dur or 0) - fo):.2f}:d={fo:.2f}" if fo > 0 and dur else "")
+            g = max(0.0, min(3.0, float(m.get("gain") if m.get("gain") is not None else 0.6)))
+            ms = int(max(0.0, float(m.get("start") or 0)) * 1000)
+            fc.append(f"[{k}:a]{trim},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo{fades},volume={g:.2f},adelay={ms}|{ms}[m{j}]")
+            mlab.append(f"[m{j}]")
+        mixdown(mlab, "mus")
+        if kind == "final":
+            fc.append("[dlg]asplit=2[dlg1][dlg2]")
+            fc.append("[mus]asplit=2[mus1][mus2]")
+            fc.append("[dlg1][mus1]amix=inputs=2:normalize=0,atrim=end=%.3f[mix]" % total)
+        else:
+            fc.append("[dlg][mus]amix=inputs=2:normalize=0,atrim=end=%.3f[mix]" % total)
+        e = ed.get("episode") or {}
+        tag = f"EP{int(e.get('number') or 0):02d}"
+        out_mp4 = os.path.join(work, f"{tag}.mp4")
+        cmd = [ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", *args, "-filter_complex", ";".join(fc),
+               "-map", "[vout]", "-map", "[mix]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28" if kind == "preview" else "17",
+               "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k" if kind == "preview" else "256k", "-movflags", "+faststart", out_mp4]
+        if kind == "final":
+            cmd += ["-map", "[dlg2]", "-c:a", "pcm_s16le", os.path.join(work, f"{tag}_대사·현장음.wav"),
+                    "-map", "[mus2]", "-c:a", "pcm_s16le", os.path.join(work, f"{tag}_배경음악.wav")]
+        upd(progress=f"{'미리보기' if kind == 'preview' else '완성본'} 조립 중 ({len(clips)}컷 · {total:.1f}초)")
+        progress(f"ffmpeg 조립 {len(clips)}컷 {total:.1f}초")
+        rr = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, cwd=work)
+        if rr.returncode != 0 and sub_ok:
+            log(f"자막 굽기 실패, 자막 없이 다시: {(rr.stderr or '')[-200:]}")
+            cmd[cmd.index("-filter_complex") + 1] = cmd[cmd.index("-filter_complex") + 1].replace(
+                [x for x in fc if x.startswith("[vcat]subtitles")][0], "[vcat]null[vout]")
+            rr = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, cwd=work)
+        if rr.returncode != 0:
+            raise RuntimeError(f"조립 실패: {(rr.stderr or '')[-400:]}")
+        files = {"seconds": total, "clips": len(clips)}
+        srt, vtt = os.path.join(work, f"{tag}_ko.srt"), os.path.join(work, f"{tag}_ko.vtt")
+        if subs:
+            write_subs(subs, srt, vtt)
+        sid = e.get("series_id") or "series"
+        base = f"{sid}/E{int(e.get('number') or 0):02d}/edit/{kind}_{rid[:8]}"
+        if kind == "preview":
+            files["preview"] = storage_upload(base + ".mp4", out_mp4, "video/mp4")
+        else:
+            d = os.path.join(episode_dir(ed), f"v{r.get('rev') or 1}_{datetime.now():%m%d_%H%M}")
+            os.makedirs(d, exist_ok=True)
+            final = os.path.join(d, f"{tag}_완성.mp4")
+            shutil.move(out_mp4, final)
+            ff("-i", final, "-an", "-c:v", "copy", os.path.join(d, f"{tag}_영상만(무음).mp4"))
+            for nm in (f"{tag}_대사·현장음.wav", f"{tag}_배경음악.wav"):
+                shutil.move(os.path.join(work, nm), os.path.join(d, nm))
+            if subs:
+                shutil.copyfile(srt, os.path.join(d, f"{tag}_ko.srt"))
+            with open(os.path.join(d, "편집정보.json"), "w", encoding="utf-8") as f:
+                json.dump({"episode": e, "rev": r.get("rev"), "seconds": total, "timeline": tl}, f, ensure_ascii=False, indent=2)
+            files["folder"] = d
+            files["platform"] = PLATFORM
+            small = os.path.join(work, "small.mp4")
+            s = 640 / max(W, H)
+            ff("-i", final, "-vf", f"scale={even(W * s)}:{even(H * s)}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+               "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", small)
+            files["preview"] = storage_upload(base + ".mp4", small, "video/mp4")
+        if subs:
+            files["vtt"] = storage_upload(base + ".vtt", vtt, "text/vtt")
+        upd(status="done", progress="완료", files=files)
+        if kind == "final":
+            notify(f"{tag} 완성본 저장", f"{files['folder']}\n완성 영상·영상만·대사·배경음악·자막이 함께 있습니다")
+        shutil.rmtree(work, ignore_errors=True)
+        return f"{kind} {len(clips)}컷 {total:.1f}초" + (f" → {files.get('folder')}" if files.get("folder") else "")
+    except Exception as ex:
+        upd(status="failed", error=str(ex)[:1500])
+        raise
+
+
+EDIT_OPS = """사용할 수 있는 명령(ops):
+- {"op":"remove","clip":"c3"}  클립 빼기
+- {"op":"move","clip":"c3","to":0}  순서 바꾸기(to = 0부터 시작하는 새 위치)
+- {"op":"cut_head","clip":"c3","sec":0.5}  앞부분 잘라내기 / {"op":"cut_tail","clip":"c3","sec":1}  뒷부분 잘라내기
+- {"op":"extend_tail","clip":"c3","sec":0.5}  잘라 낸 뒷부분 되살리기(원본 길이 안에서) / {"op":"extend_head",...}
+- {"op":"gap","clip":"c3","sec":2}  이 클립 앞 검은 화면(정적) 길이를 sec로
+- {"op":"voice_offset","clip":"c3","sec":-0.5}  대사를 화면보다 먼저(음수)/나중(양수)
+- {"op":"voice_gain","clip":"c3","gain":1.2}  대사 크기(1 = 그대로)
+- {"op":"music_gain","music":"m1","gain":0.4} / {"op":"music_fade","music":"m1","fade_in":2,"fade_out":3} / {"op":"music_start","music":"m1","sec":12.5}
+- {"op":"sub_text","sub":"s4","text":"바꾼 자막"} / {"op":"sub_remove","sub":"s4"}"""
+
+
+def apply_ops(tl, ops):
+    clips = tl.setdefault("clips", [])
+    find = lambda cid: next((c for c in clips if c.get("id") == cid), None)
+    done = []
+    for o in ops or []:
+        op, c = o.get("op"), find(o.get("clip"))
+        sec = float(o.get("sec") or 0)
+        try:
+            if op == "remove" and c:
+                clips.remove(c)
+                tl["subs"] = [s for s in tl.get("subs") or [] if s.get("clip_id") != c["id"]]
+            elif op == "move" and c:
+                clips.remove(c)
+                clips.insert(max(0, min(len(clips), int(o.get("to") or 0))), c)
+            elif op == "cut_head" and c:
+                c["in"] = round(min(float(c["out"]) - 0.3, float(c["in"]) + sec), 3)
+            elif op == "cut_tail" and c:
+                c["out"] = round(max(float(c["in"]) + 0.3, float(c["out"]) - sec), 3)
+            elif op == "extend_head" and c:
+                c["in"] = round(max(0.0, float(c["in"]) - sec), 3)
+            elif op == "extend_tail" and c:
+                c["out"] = round(min(float(c.get("src_len") or c["out"]), float(c["out"]) + sec), 3)
+            elif op == "gap" and c:
+                c["gap"] = round(max(0.0, min(10.0, sec)), 2)
+            elif op == "voice_offset" and c:
+                c["voice_offset"] = round(max(-3.0, min(3.0, sec)), 2)
+            elif op == "voice_gain" and c:
+                c["voice_gain"] = round(max(0.0, min(3.0, float(o.get("gain") or 1))), 2)
+            elif op.startswith("music_"):
+                m = next((x for x in tl.get("music") or [] if x.get("id") == o.get("music")), None)
+                if not m:
+                    continue
+                if op == "music_gain":
+                    m["gain"] = round(max(0.0, min(3.0, float(o.get("gain") or 0.6))), 2)
+                elif op == "music_fade":
+                    m["fade_in"], m["fade_out"] = float(o.get("fade_in") or m.get("fade_in") or 0), float(o.get("fade_out") or m.get("fade_out") or 0)
+                elif op == "music_start":
+                    m["start"] = round(max(0.0, sec), 2)
+            elif op in ("sub_text", "sub_remove"):
+                s = next((x for x in tl.get("subs") or [] if x.get("id") == o.get("sub")), None)
+                if not s:
+                    continue
+                if op == "sub_text":
+                    s["text"] = str(o.get("text") or s["text"])
+                else:
+                    tl["subs"].remove(s)
+            else:
+                continue
+            done.append(o)
+        except Exception as ex:
+            log(f"편집 명령 건너뜀 {o}: {ex}")
+    return done
+
+
+@task("edit_command")
+def t_edit_command(t):
+    p = t.get("payload") or {}
+    ed = rpc("agent_get_edit", p_token=TOKEN, p_project=p["project_id"])
+    tl = (ed.get("project") or {}).get("timeline") or {}
+    takes = ed.get("takes") or {}
+    clips, total, _ = tl_layout(tl)
+    table = [{"clip": c["id"], "code": c.get("code") or (takes.get(c.get("take_id")) or {}).get("code"), "position_sec": c["start"],
+              "length": c["dur"], "in": c["in"], "out": c["out"], "src_len": c.get("src_len"), "gap_before": c.get("gap") or 0,
+              "voice_offset": c.get("voice_offset") or 0, "voice_gain": c.get("voice_gain", 1),
+              "dialogue": ((takes.get(c.get("take_id")) or {}).get("dialogue") or "")[:120]} for c in clips]
+    music = [{k: m.get(k) for k in ("id", "name", "start", "in", "out", "gain", "fade_in", "fade_out")} for m in tl.get("music") or []]
+    subs = [{k: s.get(k) for k in ("id", "clip_id", "text")} for s in (tl.get("subs") or [])][:200]
+    system = f"""너는 드라마 편집 보조다. 대표의 말을 타임라인 명령으로 바꾼다. 컷 이름(S03 C02, E01-S03-C02, 세 번째 컷 등)은 code와 position으로 찾는다.
+애매하면 가장 그럴듯한 해석 하나만 하고 summary에 그렇게 해석했다고 적는다. 할 수 없는 요청(색보정, 화면 효과 등)은 ops 없이 summary로 설명한다.
+{EDIT_OPS}
+답 형식: <json>{{"ops": [...], "summary": "무엇을 바꿨는지 한두 줄(한국어)"}}</json>"""
+    user = f"[대표 지시]\n{p.get('text')}\n\n[클립 {len(table)}개, 전체 {total:.1f}초]\n{json.dumps(table, ensure_ascii=False)}\n\n[음악]\n{json.dumps(music, ensure_ascii=False)}\n\n[자막]\n{json.dumps(subs, ensure_ascii=False)}"
+    text, _ = claude("claude-sonnet-5-5", system, user, max_tokens=3000, stage="edit", episode_id=(ed.get("episode") or {}).get("id"), note="말로 편집")
+    res = pick_json(text)
+    done = apply_ops(tl, res.get("ops"))
+    if done:
+        rpc("agent_save_edit", p_token=TOKEN, p_project=p["project_id"], p_timeline=tl)
+    return (res.get("summary") or "") + f" (명령 {len(done)}개 적용)"
+
+
 def run_task(tk):
     kind = tk["kind"]
     CURRENT["task"] = tk
@@ -1379,7 +1696,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
