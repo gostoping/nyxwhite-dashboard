@@ -116,6 +116,9 @@
   .keep input { position: absolute; top: 3px; left: 3px; width: auto; }
   .bdesc { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 14px; white-space: pre-wrap; margin-top: 8px; }
   audio { width: 100%; height: 36px; margin-top: 6px; }
+  .vdbox { margin-top: 10px; padding: 10px; border: 1px dashed var(--accent); border-radius: 8px; background: var(--bg); }
+  .vdp { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin-top: 10px; }
+  .vdp audio { margin: 0; flex: 1 1 100%; order: 3; }
   /* 제작 */
   .epchips { display: flex; gap: 6px; flex-wrap: wrap; }
   .chip { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 99px; padding: 4px 12px; font: inherit; font-size: 14px; cursor: pointer; }
@@ -174,7 +177,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.4.2"
+VERSION = "1.5.0"
 
 import base64
 import glob
@@ -1407,6 +1410,85 @@ def t_store(t):
     return f"보관 완료: {files['folder']}"
 
 
+# ---------------- ElevenLabs: 목소리 디자인
+def el_key():
+    k = (secrets("elevenlabs_api_key").get("elevenlabs_api_key") or "").strip().strip('"\'')
+    if not k:
+        raise RuntimeError("ElevenLabs 키가 없습니다. 대시보드 설정 → API 키에서 넣어 주세요")
+    return k
+
+
+def el_json(path, body=None, method="POST", timeout=180):
+    code, data = http_json("https://api.elevenlabs.io" + path, {"xi-api-key": el_key(), "Content-Type": "application/json",
+                                                                 "Accept": "application/json"}, method, body, timeout=timeout)
+    if code not in (200, 201):
+        det = (data or {}).get("detail") if isinstance(data, dict) else data
+        msg = (det.get("message") or det.get("status")) if isinstance(det, dict) else det
+        raise RuntimeError(f"ElevenLabs {code}: {str(msg)[:300]}")
+    return data
+
+
+@task("voice_design")
+def t_voice_design(t):
+    did = (t.get("payload") or {}).get("design_id")
+    d = rpc("agent_get_voice_design", p_token=TOKEN, p_id=did)
+    if not d:
+        raise RuntimeError("목소리 디자인 요청을 찾지 못했습니다")
+    progress(f"{d['entry_name']} 목소리 후보를 만드는 중")
+    body = {"voice_description": d["description"][:1000]}
+    sample = (d.get("sample_text") or "").strip()
+    if len(sample) >= 100:
+        body["text"] = sample[:1000]
+    else:
+        body["auto_generate_text"] = True
+    try:
+        data = el_json("/v1/text-to-voice/design", body, timeout=300)
+    except Exception as e:
+        rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
+        raise
+    previews = []
+    for i, p in enumerate(data.get("previews") or [], 1):
+        ext = "mp3" if "mpeg" in (p.get("media_type") or "audio/mpeg") else "wav"
+        local = os.path.join(HOME, "work", f"vd_{did}_{i}.{ext}")
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        with open(local, "wb") as f:
+            f.write(base64.b64decode(p.get("audio_base_64") or ""))
+        path = storage_upload(f"voices/{did}/{i}_{uuid.uuid4().hex[:6]}.{ext}", local, p.get("media_type") or "audio/mpeg")
+        os.remove(local)
+        previews.append({"generated_voice_id": p.get("generated_voice_id"), "path": path, "duration": p.get("duration_secs")})
+    if not previews:
+        rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": "후보가 만들어지지 않았습니다"})
+        raise RuntimeError("후보가 만들어지지 않았습니다")
+    rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "ready", "previews": previews})
+    log_cost("audio", "elevenlabs", "voice-design", {"calls": 1}, note=f"목소리 디자인: {d['entry_name']}", outcome="success")
+    notify(f"{d['entry_name']} 목소리 후보 {len(previews)}개 도착", "바이블 탭에서 들어 보고 골라 주세요")
+    return f"{d['entry_name']} 후보 {len(previews)}개"
+
+
+@task("voice_save")
+def t_voice_save(t):
+    did = (t.get("payload") or {}).get("design_id")
+    d = rpc("agent_get_voice_design", p_token=TOKEN, p_id=did)
+    if not d or not d.get("chosen_generated_id"):
+        raise RuntimeError("고른 목소리가 없습니다")
+    progress(f"{d['entry_name']} 목소리를 ElevenLabs에 저장하는 중")
+    desc = d["description"]
+    if len(desc) < 20:
+        desc = (desc + " — NYX WHITE 드라마 캐릭터 목소리")[:1000]
+    try:
+        data = el_json("/v1/text-to-voice", {
+            "voice_name": f"{d['entry_name']} · {d.get('series_title') or 'NYX'}"[:100], "voice_description": desc[:1000],
+            "generated_voice_id": d["chosen_generated_id"],
+            "labels": {"project": "NYX WHITE", "character": d["entry_name"][:30]},
+            "played_not_selected_voice_ids": [p["generated_voice_id"] for p in d.get("previews") or []
+                                              if p.get("generated_voice_id") and p["generated_voice_id"] != d["chosen_generated_id"]]})
+    except Exception as e:
+        rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
+        raise
+    rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "saved", "voice_id": data["voice_id"]})
+    return f"{d['entry_name']} 목소리 저장 ({data['voice_id']})"
+
+
 def run_task(tk):
     kind = tk["kind"]
     CURRENT["task"] = tk
@@ -1425,7 +1507,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
@@ -2828,7 +2910,9 @@ async function viewBible(main) {
       ${c?.voice_id ? `<div class="quiet" style="margin-top:8px">목소리 ID: <code>${esc(c.voice_id)}</code></div>` : ''}
       ${c?.voice_path && urls[c.voice_path] ? `<audio controls preload="none" src="${esc(urls[c.voice_path])}"></audio>` : ''}
       <div class="row" style="margin-top:10px"><button class="btn small" data-bedit="${esc(e.id)}">${c ? '새 버전 작성' : '내용 채우기'}</button>
-        ${n > 1 ? `<button class="btn small" data-bhist="${esc(e.id)}">이력 ${n}개</button>` : ''}</div>
+        ${n > 1 ? `<button class="btn small" data-bhist="${esc(e.id)}">이력 ${n}개</button>` : ''}
+        ${['character', 'voice'].includes(e.category) ? `<button class="btn small" data-vd="${esc(e.id)}">${c?.voice_id ? '목소리 다시 디자인' : '목소리 디자인'}</button>` : ''}</div>
+      <div id="vd-${esc(e.id)}"></div>
       <div id="bh-${esc(e.id)}"></div>
     </div>`; }).join('')}</div>`
     : `<div class="card quiet">${entries.length ? '이 분류에는 항목이 없습니다.' : '아직 항목이 없습니다. "+ 항목 추가"로 주요 인물부터 등록하세요.'}</div>`}
@@ -2855,6 +2939,12 @@ async function viewBible(main) {
   main.querySelectorAll('[data-brej]').forEach(b => b.onclick = guard(async () => {
     await q(S.sb.from('bible_versions').update({ status: 'rejected' }).eq('id', b.dataset.brej)); toast('반려했습니다'); go('bible');
   }));
+  main.querySelectorAll('[data-vd]').forEach(b => b.onclick = () => {
+    const e = entries.find(x => x.id === b.dataset.vd); openVoiceDesign(e, cur(e.id), true);
+  });
+  const vds = entries.length ? await q(S.sb.from('voice_designs').select('*').in('entry_id', entries.map(e => e.id))
+    .in('status', ['queued', 'ready', 'saving', 'saved', 'failed']).order('created_at', { ascending: false })) : [];
+  [...new Set(vds.map(d => d.entry_id))].forEach(id => { const e = entries.find(x => x.id === id); if (e) openVoiceDesign(e, cur(e.id), false); });
   main.querySelectorAll('[data-bhist]').forEach(b => b.onclick = () => {
     const box = document.getElementById('bh-' + b.dataset.bhist);
     if (box.innerHTML) { box.innerHTML = ''; return; }
@@ -2867,6 +2957,71 @@ async function viewBible(main) {
     box.querySelectorAll('[data-bact2]').forEach(x => x.onclick = activate(x.dataset.bact2));
   });
   await renderContinuity(entries, episodes);
+}
+
+// 목소리 디자인: 설명 → ElevenLabs 후보 3개 → 듣고 고르기 → 바이블 새 버전으로 적용
+const vdSample = full => { const name = full.replace(/\s*\(.*?\)\s*/g, '').trim(); return `안녕하세요, 저는 ${name}예요. 오늘 처음으로 무대에 서는 날이라 너무 떨려요. 그래도 여기까지 온 이유를 잊지 않을 거예요. 끝까지 해 볼게요. 지켜봐 주세요!`; };
+async function openVoiceDesign(entry, cur, fresh) {
+  const box = document.getElementById('vd-' + entry.id); if (!box) return;
+  const [d] = await q(S.sb.from('voice_designs').select('*').eq('entry_id', entry.id).order('created_at', { ascending: false }).limit(1));
+  const showForm = fresh || !d || d.status === 'linked';
+  if (showForm) {
+    const desc = d?.description || [entry.summary, cur?.description].filter(Boolean).join(' / ');
+    box.innerHTML = `<div class="vdbox"><b>목소리 디자인</b>
+      <p class="quiet" style="margin:4px 0">나이·성별·출신·음색·말버릇을 적으면 ElevenLabs가 후보 3개를 만듭니다. 노래 Persona가 있으면 그 음색과 비슷하게 적어 주세요.</p>
+      <label>목소리 설명 (20자 이상, 영어로 적으면 더 정확)</label>
+      <textarea id="vdDesc-${entry.id}" style="min-height:80px;font-family:inherit">${esc(desc)}</textarea>
+      <label>들어 볼 대사 (100자 이상, 한국어)</label>
+      <textarea id="vdText-${entry.id}" style="min-height:70px;font-family:inherit">${esc(d?.sample_text || vdSample(entry.name))}</textarea>
+      <div class="row" style="margin-top:8px"><button class="btn primary small" id="vdGo-${entry.id}">후보 3개 만들기</button>
+        <span class="quiet">ElevenLabs 크레딧 약간 사용 · 1분 안팎</span>
+        ${d && !fresh ? '' : `<button class="btn small" id="vdX-${entry.id}" style="margin-left:auto">닫기</button>`}</div></div>`;
+    const x = document.getElementById('vdX-' + entry.id); if (x) x.onclick = () => { box.innerHTML = ''; };
+    document.getElementById('vdGo-' + entry.id).onclick = guard(async () => {
+      const description = document.getElementById('vdDesc-' + entry.id).value.trim();
+      const sample_text = document.getElementById('vdText-' + entry.id).value.trim();
+      if (description.length < 20) return toast('목소리 설명을 20자 이상 적어 주세요');
+      if (sample_text.length < 100) return toast('들어 볼 대사를 100자 이상 적어 주세요');
+      const r = await q(S.sb.from('voice_designs').insert({ entry_id: entry.id, description, sample_text }).select('id').single());
+      await q(S.sb.from('pipeline_tasks').insert({ kind: 'voice_design', payload: { design_id: r.id } }));
+      toast('후보를 만들고 있습니다'); openVoiceDesign(entry, cur, false);
+    });
+    return;
+  }
+  let urls = {};
+  if (d.previews?.length) {
+    const { data } = await S.sb.storage.from('takes').createSignedUrls(d.previews.map(p => p.path), 3600);
+    (data || []).forEach(x => { if (x.signedUrl) urls[x.path] = x.signedUrl; });
+  }
+  const busy = ['queued', 'saving'].includes(d.status);
+  box.innerHTML = `<div class="vdbox"><div class="row"><b>목소리 디자인</b>${pill({ queued: '후보 만드는 중', ready: '골라 주세요', saving: '저장 중', saved: '저장됨 · 적용 대기', failed: '실패' }[d.status] || d.status,
+      d.status === 'failed' ? 'bad' : d.status === 'ready' || d.status === 'saved' ? 'accent' : 'warn')}
+      <button class="btn small" id="vdNew-${entry.id}" style="margin-left:auto">새로 만들기</button></div>
+    <div class="quiet" style="margin:4px 0">${esc(d.description)}</div>
+    ${busy ? '<p><span class="spin"></span>ElevenLabs에서 작업 중입니다. 잠시 뒤 자동으로 새로 고칩니다.</p>' : ''}
+    ${d.status === 'failed' ? `<div class="msg err">${esc(d.error || '실패')}</div>` : ''}
+    ${d.status === 'ready' ? (d.previews || []).map((p, i) => `<div class="vdp"><b>후보 ${i + 1}</b>
+      <audio controls preload="none" src="${esc(urls[p.path] || '')}"></audio>
+      <button class="btn small primary" data-pick="${esc(p.generated_voice_id)}">이 목소리로 정하기</button></div>`).join('') : ''}
+    ${d.status === 'saved' ? `<p>ElevenLabs에 저장됐습니다 (<code>${esc(d.voice_id)}</code>). 바이블에 적용하면 감독·목소리 고정 작업이 이 목소리를 씁니다.</p>
+      <button class="btn small primary" id="vdLink-${entry.id}">바이블에 적용</button>` : ''}</div>`;
+  document.getElementById('vdNew-' + entry.id).onclick = () => openVoiceDesign(entry, cur, true);
+  box.querySelectorAll('[data-pick]').forEach(b => b.onclick = guard(async () => {
+    await q(S.sb.from('voice_designs').update({ chosen_generated_id: b.dataset.pick, status: 'saving' }).eq('id', d.id));
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'voice_save', payload: { design_id: d.id } }));
+    toast('목소리를 저장하고 있습니다'); openVoiceDesign(entry, cur, false);
+  }));
+  const link = document.getElementById('vdLink-' + entry.id);
+  if (link) link.onclick = guard(async () => {
+    const v = await q(S.sb.from('bible_versions').insert({
+      entry_id: entry.id, description: cur?.description || entry.summary || entry.name, details: cur?.details || null,
+      image_paths: cur?.image_paths || [], voice_path: cur?.voice_path || null, voice_id: d.voice_id,
+      change_reason: '목소리 디자인으로 목소리 고정', status: 'proposed' }).select('id').single());
+    await q(S.sb.rpc('activate_bible_version', { p_id: v.id }));
+    await q(S.sb.from('voice_designs').update({ status: 'linked' }).eq('id', d.id));
+    toast(`${entry.name} 목소리를 바이블에 적용했습니다`); go('bible');
+  });
+  if (busy) setTimeout(() => { if (S.tab === 'bible' && document.getElementById('vd-' + entry.id)) openVoiceDesign(entry, cur, false).catch(() => {}); }, 6000);
 }
 
 function openBibleEditor({ entry, base, urls, fromId }) {
@@ -3141,7 +3296,7 @@ async function directiveDetail(id) {
       <td>${esc(e.actor)}<br><span class="quiet">${esc(e.devices?.name || '')}</span></td><td>${esc(human(e.summary))}</td></tr>`).join('')}</table>` : '<p class="quiet">기록이 없습니다.</p>'}`;
 }
 const JOB_NAME = {
-  writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성 (Seedance)', store: '집 PC 보관', video_review: '영상 감수',
+  voice_design: '목소리 후보 만들기', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성 (Seedance)', store: '집 PC 보관', video_review: '영상 감수',
   ping: '연결 시험', summarize_script_diff: '대본 변경 요약', split_scenes: '씬 나누기', summarize_directive: '지시 읽고 담당 정하기',
   write_prompts: '프롬프트 작성 (감독)', review_prompts: '프롬프트 감수 (대본감수자)', generate_keyframe: '키프레임 생성',
   review_keyframe: '키프레임 검사 (영상감수자)', generate_video: '영상 생성', review_video: '영상 검사 (영상감수자)',
@@ -3694,7 +3849,7 @@ const CUT_STATUS = {
   designed: ['설계됨 · 승인 대기', 'accent'], approved: ['승인 · 생성 대기', 'warn'], generating: ['생성 중', 'warn'],
   reviewing: ['감수 중', 'warn'], passed: ['통과', 'good'], failed: ['불합격·실패', 'bad'], hold: ['보류', ''], cancelled: ['취소', ''],
 };
-const TASK_LABEL = { writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
+const TASK_LABEL = { voice_design: '목소리 후보', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
 const PROD_STEPS = [['원고', '대본 탭에서 넣기'], ['작가실', '감정선 정리본'], ['컷 설계', '감독 + 대본감수'], ['생성 승인', '대표가 컷별로'], ['영상·감수', 'Seedance + 영상감수'], ['씬 보관', '집 PC · OneDrive']];
 const usdKrw = (usd, rate) => usd == null ? '-' : won(usd * (rate || 1340));
 

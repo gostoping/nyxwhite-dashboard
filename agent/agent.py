@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.4.2"
+VERSION = "1.5.0"
 
 import base64
 import glob
@@ -1243,6 +1243,85 @@ def t_store(t):
     return f"보관 완료: {files['folder']}"
 
 
+# ---------------- ElevenLabs: 목소리 디자인
+def el_key():
+    k = (secrets("elevenlabs_api_key").get("elevenlabs_api_key") or "").strip().strip('"\'')
+    if not k:
+        raise RuntimeError("ElevenLabs 키가 없습니다. 대시보드 설정 → API 키에서 넣어 주세요")
+    return k
+
+
+def el_json(path, body=None, method="POST", timeout=180):
+    code, data = http_json("https://api.elevenlabs.io" + path, {"xi-api-key": el_key(), "Content-Type": "application/json",
+                                                                 "Accept": "application/json"}, method, body, timeout=timeout)
+    if code not in (200, 201):
+        det = (data or {}).get("detail") if isinstance(data, dict) else data
+        msg = (det.get("message") or det.get("status")) if isinstance(det, dict) else det
+        raise RuntimeError(f"ElevenLabs {code}: {str(msg)[:300]}")
+    return data
+
+
+@task("voice_design")
+def t_voice_design(t):
+    did = (t.get("payload") or {}).get("design_id")
+    d = rpc("agent_get_voice_design", p_token=TOKEN, p_id=did)
+    if not d:
+        raise RuntimeError("목소리 디자인 요청을 찾지 못했습니다")
+    progress(f"{d['entry_name']} 목소리 후보를 만드는 중")
+    body = {"voice_description": d["description"][:1000]}
+    sample = (d.get("sample_text") or "").strip()
+    if len(sample) >= 100:
+        body["text"] = sample[:1000]
+    else:
+        body["auto_generate_text"] = True
+    try:
+        data = el_json("/v1/text-to-voice/design", body, timeout=300)
+    except Exception as e:
+        rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
+        raise
+    previews = []
+    for i, p in enumerate(data.get("previews") or [], 1):
+        ext = "mp3" if "mpeg" in (p.get("media_type") or "audio/mpeg") else "wav"
+        local = os.path.join(HOME, "work", f"vd_{did}_{i}.{ext}")
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        with open(local, "wb") as f:
+            f.write(base64.b64decode(p.get("audio_base_64") or ""))
+        path = storage_upload(f"voices/{did}/{i}_{uuid.uuid4().hex[:6]}.{ext}", local, p.get("media_type") or "audio/mpeg")
+        os.remove(local)
+        previews.append({"generated_voice_id": p.get("generated_voice_id"), "path": path, "duration": p.get("duration_secs")})
+    if not previews:
+        rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": "후보가 만들어지지 않았습니다"})
+        raise RuntimeError("후보가 만들어지지 않았습니다")
+    rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "ready", "previews": previews})
+    log_cost("audio", "elevenlabs", "voice-design", {"calls": 1}, note=f"목소리 디자인: {d['entry_name']}", outcome="success")
+    notify(f"{d['entry_name']} 목소리 후보 {len(previews)}개 도착", "바이블 탭에서 들어 보고 골라 주세요")
+    return f"{d['entry_name']} 후보 {len(previews)}개"
+
+
+@task("voice_save")
+def t_voice_save(t):
+    did = (t.get("payload") or {}).get("design_id")
+    d = rpc("agent_get_voice_design", p_token=TOKEN, p_id=did)
+    if not d or not d.get("chosen_generated_id"):
+        raise RuntimeError("고른 목소리가 없습니다")
+    progress(f"{d['entry_name']} 목소리를 ElevenLabs에 저장하는 중")
+    desc = d["description"]
+    if len(desc) < 20:
+        desc = (desc + " — NYX WHITE 드라마 캐릭터 목소리")[:1000]
+    try:
+        data = el_json("/v1/text-to-voice", {
+            "voice_name": f"{d['entry_name']} · {d.get('series_title') or 'NYX'}"[:100], "voice_description": desc[:1000],
+            "generated_voice_id": d["chosen_generated_id"],
+            "labels": {"project": "NYX WHITE", "character": d["entry_name"][:30]},
+            "played_not_selected_voice_ids": [p["generated_voice_id"] for p in d.get("previews") or []
+                                              if p.get("generated_voice_id") and p["generated_voice_id"] != d["chosen_generated_id"]]})
+    except Exception as e:
+        rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
+        raise
+    rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "saved", "voice_id": data["voice_id"]})
+    return f"{d['entry_name']} 목소리 저장 ({data['voice_id']})"
+
+
 def run_task(tk):
     kind = tk["kind"]
     CURRENT["task"] = tk
@@ -1261,7 +1340,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
