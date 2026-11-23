@@ -174,7 +174,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 
 import base64
 import glob
@@ -486,6 +486,25 @@ def higgsfield_probe(cred):
     return False, "; ".join(tried)
 
 
+def elevenlabs_check(el):
+    """ElevenLabs 키 확인. 권한이 좁게 묶인 키도 있어 여러 곳을 물어보고, 거절 이유를 그대로 보여 준다."""
+    tried = []
+    for path, label in (("/v1/user/subscription", "구독"), ("/v1/models", "모델"), ("/v1/voices?page_size=1", "목소리")):
+        try:
+            code, data = http_json("https://api.elevenlabs.io" + path, {"xi-api-key": el, "Accept": "application/json"}, timeout=30)
+        except Exception as e:
+            code, data = 0, {"detail": str(e)}
+        if code == 200:
+            if label == "구독" and isinstance(data, dict):
+                left = max(0, int(data.get("character_limit") or 0) - int(data.get("character_count") or 0))
+                return f"ElevenLabs: 연결 정상 (요금제 {data.get('tier', '?')}, 남은 크레딧 {left:,})"
+            return f"ElevenLabs: 연결 정상 ({label} 확인. 구독 정보는 키 권한에 없어 못 읽음)"
+        det = (data or {}).get("detail") if isinstance(data, dict) else None
+        reason = (det.get("status") or det.get("message")) if isinstance(det, dict) else (det or "")
+        tried.append(f"{label} {code}{(' ' + str(reason)[:60]) if reason else ''}")
+    return "ElevenLabs: 키가 맞지 않음 [" + "; ".join(tried) + f"] (키 {len(el)}자)"
+
+
 def test_keys():
     """키가 맞는지 비용 없이 확인한다(생성 요청을 보내지 않음)."""
     k = secrets("anthropic_api_key", "higgsfield_key_id", "higgsfield_key_secret", "elevenlabs_api_key")
@@ -509,18 +528,9 @@ def test_keys():
         ok, detail = higgsfield_probe(cred)
         out.append(f"Higgsfield: 인증 통과 ({detail})" if ok
                    else f"Higgsfield: 키가 맞지 않음 (401) [ID {len(cred[0])}자 · Secret {len(cred[1])}자] {detail}")
-    el = k.get("elevenlabs_api_key")
+    el = (k.get("elevenlabs_api_key") or "").strip().strip('"\'')
     if el:
-        try:
-            code, data = http_json("https://api.elevenlabs.io/v1/user/subscription", {"xi-api-key": el.strip(), "Accept": "application/json"}, timeout=30)
-        except Exception as e:
-            code, data = 0, {"detail": str(e)}
-        if code == 200 and isinstance(data, dict):
-            out.append(f"ElevenLabs: 연결 정상 (요금제 {data.get('tier', '?')}, 남은 크레딧 {max(0, int(data.get('character_limit') or 0) - int(data.get('character_count') or 0)):,})")
-        elif code in (401, 403):
-            out.append(f"ElevenLabs: 키가 맞지 않음 ({code})")
-        else:
-            out.append(f"ElevenLabs: 확인 실패 ({code})")
+        out.append(elevenlabs_check(el))
     return " / ".join(out), all("실패" not in o and "맞지 않음" not in o and "미등록" not in o for o in out)
 
 
