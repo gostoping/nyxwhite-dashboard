@@ -49,8 +49,17 @@ jobs:
               continue
             fi
             echo "적용: $n"
-            psql "$DB_URL" -v ON_ERROR_STOP=1 -q --single-transaction \
-              -f "$f" \
-              -c "insert into public.nyx_migrations (name) values ('$n')"
+            # 에이전트가 동시에 기록 중이면 잠금이 겹칠 수 있어 최대 5번 다시 시도한다
+            ok=0
+            for attempt in 1 2 3 4 5; do
+              if PGOPTIONS="-c lock_timeout=15s" psql "$DB_URL" -v ON_ERROR_STOP=1 -q --single-transaction \
+                   -f "$f" \
+                   -c "insert into public.nyx_migrations (name) values ('$n')"; then
+                ok=1; break
+              fi
+              echo "  잠금 충돌로 실패, $((attempt * 10))초 뒤 다시 시도 ($attempt/5)"
+              sleep $((attempt * 10))
+            done
+            if [ "$ok" != "1" ]; then echo "::error::$n 적용 실패"; exit 1; fi
           done
           echo "완료"
