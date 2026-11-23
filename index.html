@@ -3003,7 +3003,7 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 const DEFAULT_URL = 'https://fqjorcstghuiyjsirysv.supabase.co';
 const LS = { cfg: 'nix.cfg', device: 'nix.device' };
 const TABS = [
-  ['home', '홈'], ['guide', '안내'], ['scripts', '대본'], ['production', '제작'], ['edit', '편집'], ['ads', '광고'], ['bible', '바이블'], ['staff', '직원'], ['directives', '지시'], ['agents', '에이전트'], ['costs', '비용'], ['log', '기록'], ['settings', '설정'],
+  ['home', '홈'], ['guide', '안내'], ['staff', '직원'], ['scripts', '대본'], ['bible', '바이블'], ['production', '제작'], ['edit', '편집'], ['ads', '광고'], ['directives', '지시'], ['agents', '에이전트'], ['costs', '비용'], ['log', '기록'], ['settings', '설정'],
 ];
 const EP_STATUS = { writing: '집필', ready: '준비', in_production: '제작 중', review: '검토', approved: '승인', editing: '편집', done: '완료', on_hold: '보류' };
 const V_STATUS = { draft: '초안', confirmed: '확정(현재)', superseded: '이전 확정본' };
@@ -4138,6 +4138,72 @@ async function queuePhotos(entries, curOf, only) {
   return todo.length;
 }
 
+// "대본에서 필요한 것 찾기" 화별 진행: 작업(pipeline_tasks) 상태와 진행 문구("N화에서…")로 화마다 준비 중/만드는 중/완료/실패를 보여 준다
+const BX_CAT = { character: '인물', location: '장소', prop: '소품' };
+const agoText = t => { if (!t) return ''; const m = Math.max(0, Math.round((Date.now() - new Date(t)) / 60000)); return m < 1 ? '방금' : m < 60 ? `${m}분 전` : `${Math.floor(m / 60)}시간 ${m % 60}분 전`; };
+async function renderExtractBox(episodes) {
+  const box = $('#bxBox'); if (!box || !S.seriesId) return null;
+  const sid = S.seriesId;
+  const [tasks, entries, scripts] = await Promise.all([
+    q(S.sb.from('pipeline_tasks').select('id,status,progress,result,error,attempts,created_at,started_at,finished_at,devices(name)')
+      .eq('kind', 'bible_extract').eq('series_id', sid).order('created_at', { ascending: false }).limit(1)),
+    q(S.sb.from('bible_entries').select('id,category,name,appears').eq('series_id', sid)),
+    episodes.length ? q(S.sb.from('script_versions').select('episode_id').in('episode_id', episodes.map(e => e.id))) : [],
+  ]);
+  if (S.seriesId !== sid || !$('#bxBox')) return null;
+  const t = tasks[0] || null;
+  const hasText = new Set(scripts.map(s => s.episode_id));
+  const eps = episodes.filter(e => hasText.has(e.id));
+  const anyAppears = entries.some(e => (e.appears || []).length);
+  if (!t && !anyAppears) { box.innerHTML = ''; return null; }
+  const open = t && (t.status === 'queued' || t.status === 'running');
+  const curNo = Number((/(\d+)\s*화에서/.exec(t?.progress || '') || [])[1]) || null;
+  const found = no => {
+    const list = entries.filter(e => BX_CAT[e.category] && (e.appears || []).some(a => Number(a.ep) === Number(no)));
+    if (!list.length) return '<span class="quiet">찾은 항목 없음</span>';
+    return Object.entries(BX_CAT).map(([k, l]) => { const xs = list.filter(e => e.category === k); return xs.length ? `<b>${l} ${xs.length}</b> ${esc(xs.map(e => e.name).join(', '))}` : ''; })
+      .filter(Boolean).join(' · ');
+  };
+  const stateOf = no => {
+    if (!t) return 'done';
+    if (t.status === 'done') return 'done';
+    if (t.status === 'cancelled') return curNo && no < curNo ? 'done' : 'cancelled';
+    if (t.status === 'failed') return !curNo ? 'failed' : no < curNo ? 'done' : no === curNo ? 'failed' : 'stopped';
+    if (t.status === 'running' && curNo) return no < curNo ? 'done' : no === curNo ? 'working' : 'waiting';
+    return 'waiting';
+  };
+  const since = t?.started_at || t?.created_at;
+  const row = e => {
+    const st = stateOf(e.number);
+    const badge = {
+      done: pill('완료', 'good'),
+      working: pill('준비 중 · 지금 만드는 중', 'warn'),
+      waiting: pill('준비 중', 'warn'),
+      failed: pill('실패', 'bad'),
+      stopped: pill('멈춤', 'bad'),
+      cancelled: pill('취소됨'),
+    }[st];
+    const body = st === 'done' ? found(e.number)
+      : st === 'working' ? `<span class="quiet">작가실이 이 화 대본을 읽고 필요한 인물·장소·소품을 찾는 중입니다 (작업 시작 ${esc(agoText(since))})</span>`
+      : st === 'waiting' ? `<span class="quiet">${t.status === 'running' ? '앞 화가 끝나면 이어서 만듭니다'
+          : t.attempts > 0 ? `잠시 멈췄다가 다시 시도합니다${t.error || t.progress ? ` (${esc(t.error || t.progress)})` : ''}`
+          : `에이전트가 받아 가기를 기다리는 중 (요청 ${esc(agoText(t.created_at))})`}</span>`
+      : st === 'failed' ? `<span style="color:var(--bad)">${esc(t.error || '이유가 남지 않았습니다')}</span>`
+      : st === 'stopped' ? '<span class="quiet">앞 화에서 실패해서 만들지 못했습니다</span>'
+      : '<span class="quiet">작업이 취소되었습니다</span>';
+    return `<div class="row" style="gap:8px;align-items:flex-start;padding:6px 0;border-top:1px solid var(--line, rgba(127,127,127,.2))">
+      <b style="min-width:42px">${e.number}화</b>${badge}<div style="flex:1;min-width:200px">${body}</div></div>`;
+  };
+  const head = !t ? '' : open
+    ? `${pill(t.status === 'running' ? '진행 중' : '대기 중', 'warn')} <span class="quiet">요청 ${esc(fmt(t.created_at))}${t.started_at ? ` · 시작 ${esc(agoText(t.started_at))}` : ''}${t.devices?.name ? ` · ${esc(t.devices.name)}` : ''}${t.status === 'queued' && t.progress ? ` · ${esc(t.progress)}` : ''} · 8초마다 자동 갱신</span>`
+    : t.status === 'done' ? `${pill('완료', 'good')} <span class="quiet">${esc(fmt(t.finished_at))} · ${esc(t.result || '')}</span>`
+    : t.status === 'failed' ? `${pill('실패', 'bad')} <span class="quiet">${esc(fmt(t.finished_at))}</span>`
+    : pill('취소됨');
+  box.innerHTML = `<div class="card" style="margin-top:14px"><div class="row"><b>대본에서 필요한 것 찾기 — 화별 결과</b>${head}</div>
+    ${eps.length ? eps.map(row).join('') : '<p class="quiet">대본이 들어간 화가 없습니다.</p>'}</div>`;
+  return t;
+}
+
 async function viewBible(main) {
   const series = await q(S.sb.from('series').select('id,title').order('created_at'));
   if (!S.seriesId || !series.some(s => s.id === S.seriesId)) S.seriesId = series[0]?.id || null;
@@ -4169,6 +4235,7 @@ async function viewBible(main) {
     <div class="row" style="margin-top:10px">${[['all', `전체 ${entries.length}`], ...Object.entries(BIBLE_CAT).map(([k, l]) => [k, `${l} ${cnt(k)}`])].map(([k, l]) =>
       `<button class="btn small ${S.bibleCat === k ? 'primary' : ''}" data-bc="${k}">${esc(l)}</button>`).join('')}</div>
   </div>
+  <div id="bxBox"></div>
   ${proposals.length ? `<div class="row" style="margin-top:14px"><h3 style="margin:0">검토할 바이블 수정안 ${proposals.length}건</h3>
     ${proposals.some(p => p.change_reason === '대본에서 필요 항목으로 추출') ? `<button class="btn primary small" id="ballgo">대본 추출 ${proposals.filter(p => p.change_reason === '대본에서 필요 항목으로 추출').length}건 모두 적용 + 사진 만들기</button>` : ''}</div>${proposals.map(p => {
     const e = entries.find(x => x.id === p.entry_id); const c = cur(p.entry_id);
@@ -4217,8 +4284,27 @@ async function viewBible(main) {
   $('#bextract').onclick = guard(async () => {
     if (!confirm('작가실이 이 시리즈 대본을 화별로 읽고, 씬마다 필요한 인물·장소·소품을 바이블 수정안으로 올립니다.\n이미 있는 항목은 등장 씬만 보탭니다. (Claude 화당 수백 원)')) return;
     await q(S.sb.from('pipeline_tasks').insert({ kind: 'bible_extract', series_id: S.seriesId, payload: { series_id: S.seriesId } }));
-    toast('작가실에 맡겼습니다. 끝나면 알림이 옵니다');
+    toast('작가실에 맡겼습니다. 아래 화별 결과에서 진행 상황을 볼 수 있습니다');
+    watchExtract();
   });
+  // 화별 진행 칸: 작업이 대기·진행 중이면 8초마다 다시 읽고, 끝나면 바이블 전체를 새로 그려 수정안을 보여 준다
+  const watchExtract = async () => {
+    if (S.bxTimer) { clearInterval(S.bxTimer); S.bxTimer = null; }
+    const t0 = await renderExtractBox(episodes).catch(e => { console.error(e); return null; });
+    if (!t0 || !['queued', 'running'].includes(t0.status)) return;
+    const sid = S.seriesId, tid = t0.id;
+    S.bxTimer = setInterval(async () => {
+      if (S.tab !== 'bible' || !$('#bxBox') || S.seriesId !== sid) { clearInterval(S.bxTimer); S.bxTimer = null; return; }
+      const t = await renderExtractBox(episodes).catch(() => null);
+      if (!t || t.id !== tid || ['queued', 'running'].includes(t.status)) return;
+      clearInterval(S.bxTimer); S.bxTimer = null;
+      // 끝남: 편집 중이 아니면 바이블을 새로 그려 새 항목·수정안을 바로 보여 준다
+      const busy = $('#bEditor')?.innerHTML.trim() || document.querySelector('#main input:focus, #main textarea:focus');
+      if (t.status === 'done') toast('대본에서 필요한 것 찾기가 끝났습니다');
+      if (!busy) go('bible');
+    }, 8000);
+  };
+  watchExtract();
   $('#bphotos').onclick = guard(async () => {
     const n = await queuePhotos(entries, cur);
     toast(n ? `${n}개 항목의 사진 후보를 만들고 있습니다. 카드에서 골라 주세요` : '사진이 필요한 항목이 없습니다(승인된 묘사가 있어야 만들 수 있습니다)');
