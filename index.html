@@ -1252,7 +1252,7 @@ async function viewGuide(main) {
     <h3 style="margin-top:0">12. 탭 안내</h3>
     <dl>
       <dt>홈</dt><dd>에이전트가 켜져 있는지, 진행 중인 작업, 검토할 일, 최근 활동</dd>
-      <dt>대본</dt><dd>시리즈 → 화 → 버전. 대본 넣기, 확정, 버전 비교, 씬별 변경점, 화·씬별 대표 연출 메모</dd>
+      <dt>대본</dt><dd>시리즈 → 화 → 버전. 원고 넣기(파일로 여러 화 한꺼번에), 작가실 정리본과 흐름 변경 제안 승인, 확정, 버전 비교, 화·씬별 대표 연출 메모</dd>
       <dt>바이블</dt><dd>캐릭터·장소·소품·톤·목소리 기준 원본과 화별 연속성 기록. 수정안 적용·반려, 이전 버전으로 되돌리기</dd>
       <dt>직원</dt><dd>직원별 현재 지침과 이력, 수정안 적용·반려, 새 지침 작성. 감독 노하우(교훈) 기록: 지적이 쌓여 감독이 같은 실수를 반복하지 않게 합니다</dd>
       <dt>에이전트</dt><dd>각 컴퓨터 프로그램의 설치·통제. 온라인 여부, 연결 시험, 일시정지, 재시작, 업데이트</dd>
@@ -1406,17 +1406,20 @@ async function viewBulkImport(pane, series, episodes) {
       <table><tr><th>화</th><th>제목</th><th style="text-align:right">씬</th><th style="text-align:right">글자</th><th>연출 메모</th><th>대시보드</th></tr>${parsed.episodes.map(e => `
         <tr><td><b>${e.n}화</b></td><td>${esc(e.title)}</td><td style="text-align:right">${e.scenes}</td><td style="text-align:right">${e.body.length.toLocaleString()}</td>
         <td class="quiet">${notes(e.n) ? notes(e.n) + '건' : '-'}</td><td>${exist(e.n) ? pill('있는 화에 초안 추가') : pill('새 화 만들기', 'accent')}</td></tr>`).join('')}</table>
-      <label style="display:flex;gap:8px;align-items:center;color:var(--ink);margin-top:12px"><input type="checkbox" id="bkNotes" style="width:auto" checked>
+      <label style="display:flex;gap:8px;align-items:center;color:var(--ink);margin-top:12px"><input type="checkbox" id="bkDrafts" style="width:auto" checked>
+        각 화에 <b>대본 초안</b> 넣기 <span class="quiet">(끄면 아래 메모·공통 기준만 가져옵니다)</span></label>
+      <label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" id="bkNotes" style="width:auto" checked>
         앞쪽 "화별 핵심"과 뒤쪽 "연속성 체크리스트"를 각 화의 <b>대표 연출 메모(필수)</b>로 넣기</label>
       ${parsed.common ? `<label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" id="bkCommon" style="width:auto" checked>
         "전 회차 공통 제작 기준"을 바이블의 <b>스타일·톤</b> 항목으로 넣기 (${parsed.common.length}자)</label>` : ''}
+      ${!parsed.common && !Object.keys(parsed.toc).length && !Object.keys(parsed.checklist).length ? '<p class="quiet">이 파일에는 화별 핵심·공통 기준·체크리스트가 없어 원고만 들어갑니다.</p>' : ''}
       <div class="row" style="margin-top:12px"><button class="btn primary" id="bkGo">${parsed.episodes.length}개 화 넣기</button>
         <span class="quiet">같은 내용의 초안이 이미 있으면 건너뜁니다.</span></div>
       <div id="bkLog"></div>`;
     $('#bkGo').onclick = guard(async () => {
       const btn = $('#bkGo'); btn.disabled = true; btn.textContent = '넣는 중…';
       const log = m => { $('#bkLog').insertAdjacentHTML('beforeend', `<div class="quiet">${esc(m)}</div>`); };
-      const withNotes = $('#bkNotes').checked;
+      const withNotes = $('#bkNotes').checked, withDrafts = $('#bkDrafts').checked;
       let made = 0, drafts = 0, skipped = 0, noteCount = 0;
       for (const ep of parsed.episodes) {
         let row = episodes.find(e => e.number === ep.n);
@@ -1426,10 +1429,11 @@ async function viewBulkImport(pane, series, episodes) {
         } else if (!row.title) {
           await q(S.sb.from('episodes').update({ title: ep.title }).eq('id', row.id));
         }
-        const same = await q(S.sb.from('script_versions').select('id').eq('episode_id', row.id).eq('content', ep.body).limit(1));
-        if (same.length) { skipped++; log(`${ep.n}화: 같은 대본이 이미 있어 건너뜀`); continue; }
-        await q(S.sb.from('script_versions').insert({ episode_id: row.id, content: ep.body, note: `${f.name}에서 가져옴` }));
-        drafts++;
+        if (withDrafts) {
+          const same = await q(S.sb.from('script_versions').select('id').eq('episode_id', row.id).eq('content', ep.body).limit(1));
+          if (same.length) { skipped++; log(`${ep.n}화: 같은 대본이 이미 있어 대본은 건너뜀`); }
+          else { await q(S.sb.from('script_versions').insert({ episode_id: row.id, content: ep.body, note: `원고: ${f.name}` })); drafts++; }
+        }
         if (withNotes) {
           const items = [];
           if (parsed.toc[ep.n]) items.push('이 화에서 분명히 보여야 할 것: ' + parsed.toc[ep.n]);
@@ -1440,7 +1444,7 @@ async function viewBulkImport(pane, series, episodes) {
             noteCount++;
           }
         }
-        log(`${ep.n}화 「${ep.title}」: 초안 저장 (씬 ${ep.scenes}개)`);
+        log(`${ep.n}화 「${ep.title}」: ${withDrafts ? `원고 초안 (씬 ${ep.scenes}개)` : '메모만'} 처리`);
       }
       if ($('#bkCommon')?.checked) {
         const name = '전 회차 공통 제작 기준';
@@ -1470,6 +1474,7 @@ async function viewEpisode(pane, ep) {
     <div class="row"><h2 style="margin:0">${ep.number}화 ${esc(ep.title || '')}</h2>
       <select id="epStatus" style="width:auto;margin-left:auto">${Object.entries(EP_STATUS).map(([k, l]) => `<option value="${k}" ${k === ep.status ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
   </div>
+  <div id="propBox"></div>
   <div id="notesBox"></div>
   <div class="card">
     <b>새 대본 넣기</b>
@@ -1517,7 +1522,38 @@ async function viewEpisode(pane, ep) {
   pane.querySelectorAll('[data-view]').forEach(el => el.onclick = guard(() => showVersion(el.dataset.view)));
   if ($('#cmp')) $('#cmp').onclick = guard(() => compareVersions($('#cmpA').value, $('#cmpB').value));
   await renderNotes(ep);
+  renderProposals(ep).catch(() => {});
   if (S.versionId) await showVersion(S.versionId, false);
+}
+
+// 작가실 흐름 변경 제안: 대표가 승인해야 반영된다
+const PKIND = { add_scene: '장면 추가', remove_scene: '장면 삭제', reorder: '순서 변경', event_timing: '사건 시점', reveal: '반전·정보 공개',
+  relationship: '인물 관계', setting: '설정', ending: '결말·클리프행어', other: '기타' };
+const PST = { proposed: ['승인 대기', 'warn'], approved: ['승인됨', 'good'], rejected: ['반려', ''], applied: ['반영 완료', 'accent'] };
+async function renderProposals(ep) {
+  const box = $('#propBox'); if (!box) return;
+  const list = await q(S.sb.from('story_proposals').select('*').eq('episode_id', ep.id).order('created_at', { ascending: false }));
+  if (!list.length) { box.innerHTML = ''; return; }
+  const open = list.filter(p => p.status === 'proposed');
+  box.innerHTML = `<div class="card" style="border-color:${open.length ? 'var(--warn)' : 'var(--line)'}">
+    <b>작가실 흐름 변경 제안${open.length ? ` · 승인 대기 ${open.length}건` : ''}</b>
+    <p class="quiet" style="margin:4px 0 8px">작가실은 흐름을 직접 바꾸지 않습니다. 승인하면 작가실이 반영한 새 정리본을 만들고, 반려하면 다시 올리지 않습니다.</p>
+    ${list.map(p => `<div style="border-top:1px solid var(--line);padding:10px 0">
+      <div class="row">${pill(PKIND[p.kind] || p.kind)}${p.scene_no ? `<b>S#${p.scene_no}</b>` : ''}${pill(PST[p.status][0], PST[p.status][1])}<span class="quiet">${fmt(p.created_at)}</span></div>
+      ${p.current_text ? `<div class="quiet" style="margin-top:6px">지금: ${esc(p.current_text)}</div>` : ''}
+      <div style="margin-top:4px"><b>제안:</b> ${esc(p.proposed_text)}</div>
+      <div class="quiet" style="margin-top:4px">이유: ${esc(p.reason)}${p.impact ? ` · 영향: ${esc(p.impact)}` : ''}</div>
+      ${p.owner_note ? `<div class="quiet" style="margin-top:4px">대표 의견: ${esc(p.owner_note)}</div>` : ''}
+      ${p.status === 'proposed' ? `<div class="row" style="margin-top:8px"><input data-pnote="${esc(p.id)}" placeholder="의견(선택): 이렇게 바꿔서 반영해 줘" style="flex:1;min-width:200px">
+        <button class="btn small primary" data-pok="${esc(p.id)}">승인</button><button class="btn small danger" data-pno="${esc(p.id)}">반려</button></div>` : ''}
+    </div>`).join('')}</div>`;
+  const decide = (id, status) => guard(async () => {
+    const note = box.querySelector(`[data-pnote="${id}"]`)?.value.trim() || null;
+    await q(S.sb.from('story_proposals').update({ status, owner_note: note, decided_at: new Date().toISOString() }).eq('id', id));
+    toast(status === 'approved' ? '승인했습니다. 작가실이 반영한 정리본을 올립니다' : '반려했습니다'); renderProposals(ep);
+  });
+  box.querySelectorAll('[data-pok]').forEach(b => b.onclick = decide(b.dataset.pok, 'approved'));
+  box.querySelectorAll('[data-pno]').forEach(b => b.onclick = decide(b.dataset.pno, 'rejected'));
 }
 
 // 화별 대표 연출 메모
@@ -2609,9 +2645,25 @@ async function viewSettings(main) {
     <p class="quiet">이 화면이 열려 있지만 다른 창을 보고 있을 때도 알림 창을 띄웁니다. 화면을 완전히 닫았을 때의 휴대폰 알림은 다음 단계(푸시 알림)에서 추가됩니다.</p>
     <div class="row">${'Notification' in window ? (Notification.permission === 'granted' ? pill('허용됨', 'good')
       : `<button class="btn" id="perm">알림 허용하기</button>`) : '<span class="quiet">이 브라우저는 알림을 지원하지 않습니다.</span>'}</div></div>
+  <div class="card" id="wrBox"><b>작가실</b><p class="quiet">불러오는 중…</p></div>
   <div class="card" id="langBox"><b>다국어</b><p class="quiet">불러오는 중…</p></div>
   <div class="card"><b>계정</b><p class="quiet">${esc(S.user.email)}</p>
     <div class="row"><button class="btn" id="out">로그아웃</button><button class="btn small" id="cfg" style="margin-left:auto">서버 설정 초기화</button></div></div>`;
+  (async () => {
+    const box = $('#wrBox'); if (!box) return;
+    try {
+      const row = await q(S.sb.from('app_settings').select('value').eq('key', 'writers_room_auto_confirm').maybeSingle());
+      const on = row?.value === true;
+      box.innerHTML = `<b>작가실</b>
+        <p class="quiet" style="margin:4px 0 8px">원고를 올리면 작가실이 흐름은 그대로 두고 감정선과 감정 연결 장치만 다듬어 정리본을 만듭니다. 흐름을 바꾸는 것은 제안으로만 올라옵니다(대본 탭에서 승인).</p>
+        <label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" id="wrAuto" style="width:auto" ${on ? 'checked' : ''}>
+          정리본 자동 확정: 흐름 제안이 없는 정리본은 바로 확정하고 변경 요약만 알림으로 받기</label>`;
+      $('#wrAuto').onchange = guard(async e => {
+        await q(S.sb.from('app_settings').upsert({ key: 'writers_room_auto_confirm', value: e.target.checked, updated_at: new Date().toISOString() }));
+        toast(e.target.checked ? '정리본을 자동으로 확정합니다' : '정리본을 확정하기 전에 직접 확인합니다');
+      });
+    } catch (e) { box.innerHTML = `<b>작가실</b><div class="msg err">${esc(errText(e))}</div>`; }
+  })();
   renderLanguages().catch(e => { const b = $('#langBox'); if (b) b.innerHTML = `<b>다국어</b><div class="msg err">${esc(errText(e))}</div>`; });
   if ($('#perm')) $('#perm').onclick = async () => {
     const r = await Notification.requestPermission();
