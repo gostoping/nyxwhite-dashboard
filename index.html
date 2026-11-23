@@ -133,6 +133,10 @@
   .helpdrawer .lead { background: var(--accent-soft); padding: 10px 12px; border-radius: 8px; }
   .helpdrawer code { background: var(--bg); padding: 0 4px; border-radius: 4px; font-size: 13px; }
   .htab { font-size: 13px; } .htab td, .htab th { padding: 6px 5px; } .htab td:first-child { white-space: nowrap; font-weight: 600; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { border: 0; background: var(--panel); color: var(--quiet); padding: 5px 10px; font: inherit; font-size: 13px; cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button.on { background: var(--accent); color: #fff; font-weight: 600; }
   /* 편집실 */
   .ed-empty { text-align: center; padding: 30px 16px; } .ed-empty .row { justify-content: center; }
   .ed-top { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; }
@@ -247,7 +251,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.6.0"
+VERSION = "1.6.2"
 
 import base64
 import glob
@@ -1682,6 +1686,77 @@ def even(n):
     return n - (n % 2)
 
 
+def premiere_xml(path, name, clips, srcs, musics, W, H, total, src_dir):
+    """프리미어 프로·다빈치에서 여는 타임라인(FCP7 XML). 영상 V1, 대사 A1·A2, 음악 A3·A4. 소스는 같은 폴더의 '소스'에 복사."""
+    import urllib.parse
+    from xml.sax.saxutils import escape as x
+    fps = 30
+    fr = lambda s: int(round(float(s) * fps))
+    def url(p):
+        p = os.path.abspath(p).replace("\\", "/")
+        if not p.startswith("/"):
+            p = "/" + p
+        return "file://localhost" + urllib.parse.quote(p, safe="/:")
+    os.makedirs(src_dir, exist_ok=True)
+    files, fdefs = {}, {}
+    def file_el(fid, p, dur_f, video=True):
+        if fid in fdefs:
+            return f'<file id="{fid}"/>'
+        fdefs[fid] = True
+        vid = f"<video><samplecharacteristics><width>{W}</width><height>{H}</height></samplecharacteristics></video>" if video else ""
+        return (f'<file id="{fid}"><name>{x(os.path.basename(p))}</name><pathurl>{url(p)}</pathurl>'
+                f"<rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate><duration>{dur_f}</duration>"
+                f"<media>{vid}<audio><samplecharacteristics><depth>16</depth><samplerate>48000</samplerate></samplecharacteristics>"
+                f"<channelcount>2</channelcount></audio></media></file>")
+    vitems, a1, a2 = [], [], []
+    for i, (c, src) in enumerate(zip(clips, srcs), 1):
+        key = os.path.abspath(src)
+        if key not in files:
+            dst = os.path.join(src_dir, f"{c.get('code') or 'clip'}_{len(files) + 1}.mp4".replace("/", "_"))
+            if not os.path.exists(dst):
+                shutil.copyfile(src, dst)
+            files[key] = (f"file-{len(files) + 1}", dst, fr(c.get("src_len") or c["out"]))
+        fid, dst, durf = files[key]
+        st, en = fr(c["start"]), fr(c["start"] + c["dur"])
+        cin, cout = fr(c["in"]), fr(c["out"])
+        nm = x(c.get("code") or f"clip{i}")
+        vitems.append(f'<clipitem id="v{i}"><name>{nm}</name><duration>{durf}</duration><rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>'
+                      f"<start>{st}</start><end>{en}</end><in>{cin}</in><out>{cout}</out>{file_el(fid, dst, durf)}</clipitem>")
+        off = fr(float(c.get("voice_offset") or 0))
+        ast, aen = max(0, st + off), max(0, st + off) + (en - st)
+        g = float(c.get("voice_gain") if c.get("voice_gain") is not None else 1)
+        lvl = (f'<filter><effect><name>Audio Levels</name><effectid>audiolevels</effectid><effecttype>audiolevels</effecttype><mediatype>audio</mediatype>'
+               f'<parameter><parameterid>level</parameterid><name>Level</name><value>{g:.3f}</value></parameter></effect></filter>') if abs(g - 1) > 0.01 else ""
+        for trk, lst in ((1, a1), (2, a2)):
+            lst.append(f'<clipitem id="a{trk}_{i}"><name>{nm} 대사</name><duration>{durf}</duration><rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>'
+                       f"<start>{ast}</start><end>{aen}</end><in>{cin}</in><out>{cout}</out><file id=\"{fid}\"/>"
+                       f"<sourcetrack><mediatype>audio</mediatype><trackindex>{trk}</trackindex></sourcetrack>{lvl}</clipitem>")
+    m1, m2 = [], []
+    for j, (m, local) in enumerate(musics, 1):
+        dst = os.path.join(src_dir, f"music_{j}{os.path.splitext(local)[1] or '.mp3'}")
+        if not os.path.exists(dst):
+            shutil.copyfile(local, dst)
+        srclen = fr(m.get("src_len") or m.get("out") or 60)
+        mi, mo = fr(m.get("in") or 0), fr(m.get("out") or (m.get("src_len") or 60))
+        st = fr(m.get("start") or 0)
+        g = float(m.get("gain") if m.get("gain") is not None else 0.6)
+        fid = f"music-{j}"
+        for trk, lst in ((1, m1), (2, m2)):
+            lst.append(f'<clipitem id="m{trk}_{j}"><name>{x(m.get("name") or "음악")}</name><duration>{srclen}</duration><rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>'
+                       f"<start>{st}</start><end>{st + (mo - mi)}</end><in>{mi}</in><out>{mo}</out>{file_el(fid, dst, srclen, video=False)}"
+                       f"<sourcetrack><mediatype>audio</mediatype><trackindex>{trk}</trackindex></sourcetrack>"
+                       f'<filter><effect><name>Audio Levels</name><effectid>audiolevels</effectid><effecttype>audiolevels</effecttype><mediatype>audio</mediatype>'
+                       f'<parameter><parameterid>level</parameterid><name>Level</name><value>{g:.3f}</value></parameter></effect></filter></clipitem>')
+    trk = lambda items: "<track>" + "".join(items) + "</track>"
+    xml = (f'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE xmeml>\n<xmeml version="4"><sequence id="seq1"><name>{x(name)}</name>'
+           f"<duration>{fr(total)}</duration><rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>"
+           f"<media><video><format><samplecharacteristics><width>{W}</width><height>{H}</height><pixelaspectratio>square</pixelaspectratio>"
+           f"<rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate></samplecharacteristics></format>{trk(vitems)}</video>"
+           f"<audio>{trk(a1)}{trk(a2)}{trk(m1) if m1 else ''}{trk(m2) if m2 else ''}</audio></media></sequence></xmeml>")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(xml)
+
+
 @task("assemble")
 def t_assemble(t):
     rid = (t.get("payload") or {}).get("render_id")
@@ -1759,12 +1834,9 @@ def t_assemble(t):
             fc.append(f"[{k}:a]{trim},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo{fades},volume={g:.2f},adelay={ms}|{ms}[m{j}]")
             mlab.append(f"[m{j}]")
         mixdown(mlab, "mus")
-        if kind == "final":
-            fc.append("[dlg]asplit=2[dlg1][dlg2]")
-            fc.append("[mus]asplit=2[mus1][mus2]")
-            fc.append("[dlg1][mus1]amix=inputs=2:normalize=0,atrim=end=%.3f[mix]" % total)
-        else:
-            fc.append("[dlg][mus]amix=inputs=2:normalize=0,atrim=end=%.3f[mix]" % total)
+        fc.append("[dlg]asplit=2[dlg1][dlg2]")
+        fc.append("[mus]asplit=2[mus1][mus2]")
+        fc.append("[dlg1][mus1]amix=inputs=2:normalize=0,atrim=end=%.3f[mix]" % total)
         e = ed.get("episode") or {}
         tag = f"EP{int(e.get('number') or 0):02d}"
         out_mp4 = os.path.join(work, f"{tag}.mp4")
@@ -1774,6 +1846,9 @@ def t_assemble(t):
         if kind == "final":
             cmd += ["-map", "[dlg2]", "-c:a", "pcm_s16le", os.path.join(work, f"{tag}_대사·현장음.wav"),
                     "-map", "[mus2]", "-c:a", "pcm_s16le", os.path.join(work, f"{tag}_배경음악.wav")]
+        else:
+            cmd += ["-map", "[dlg2]", "-c:a", "aac", "-b:a", "96k", os.path.join(work, "stem_voice.m4a"),
+                    "-map", "[mus2]", "-c:a", "aac", "-b:a", "96k", os.path.join(work, "stem_music.m4a")]
         upd(progress=f"{'미리보기' if kind == 'preview' else '완성본'} 조립 중 ({len(clips)}컷 · {total:.1f}초)")
         progress(f"ffmpeg 조립 {len(clips)}컷 {total:.1f}초")
         rr = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, cwd=work)
@@ -1792,6 +1867,8 @@ def t_assemble(t):
         base = f"{sid}/E{int(e.get('number') or 0):02d}/edit/{kind}_{rid[:8]}"
         if kind == "preview":
             files["preview"] = storage_upload(base + ".mp4", out_mp4, "video/mp4")
+            files["voice"] = storage_upload(base + "_voice.m4a", os.path.join(work, "stem_voice.m4a"), "audio/mp4")
+            files["music"] = storage_upload(base + "_music.m4a", os.path.join(work, "stem_music.m4a"), "audio/mp4")
         else:
             d = os.path.join(episode_dir(ed), f"v{r.get('rev') or 1}_{datetime.now():%m%d_%H%M}")
             os.makedirs(d, exist_ok=True)
@@ -1802,6 +1879,14 @@ def t_assemble(t):
                 shutil.move(os.path.join(work, nm), os.path.join(d, nm))
             if subs:
                 shutil.copyfile(srt, os.path.join(d, f"{tag}_ko.srt"))
+            for c in clips:
+                c["code"] = c.get("code") or (takes.get(c["take_id"]) or {}).get("code")
+            try:
+                premiere_xml(os.path.join(d, f"{tag}_프리미어·다빈치.xml"), f"{tag} {e.get('title') or ''}".strip(),
+                             clips, srcs, musics, even(W), even(H), total, os.path.join(d, "소스"))
+                files["xml"] = True
+            except Exception as ex:
+                log(f"프리미어 XML 실패(완성본은 정상): {ex}")
             with open(os.path.join(d, "편집정보.json"), "w", encoding="utf-8") as f:
                 json.dump({"episode": e, "rev": r.get("rev"), "seconds": total, "timeline": tl}, f, ensure_ascii=False, indent=2)
             files["folder"] = d
@@ -1811,6 +1896,10 @@ def t_assemble(t):
             ff("-i", final, "-vf", f"scale={even(W * s)}:{even(H * s)}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
                "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", small)
             files["preview"] = storage_upload(base + ".mp4", small, "video/mp4")
+            for key, nm in (("voice", f"{tag}_대사·현장음.wav"), ("music", f"{tag}_배경음악.wav")):
+                m4a = os.path.join(work, f"stem_{key}.m4a")
+                ff("-i", os.path.join(d, nm), "-c:a", "aac", "-b:a", "96k", m4a)
+                files[key] = storage_upload(f"{base}_{key}.m4a", m4a, "audio/mp4")
         if subs:
             files["vtt"] = storage_upload(base + ".vtt", vtt, "text/vtt")
         upd(status="done", progress="완료", files=files)
@@ -4731,6 +4820,7 @@ function edRender() {
         <button class="btn small" id="ePrev" title="앞 컷">⏮</button><button class="btn small primary" id="ePlay" title="재생/멈춤 (스페이스)">▶</button><button class="btn small" id="eNext" title="다음 컷">⏭</button>
         <span id="eTime" class="ed-time">${fmtT(ED.t)} / ${fmtT(L.total)}</span>
         <label class="ed-chk"><input type="checkbox" id="eShowSub" ${ED.showSub !== false ? 'checked' : ''}> 자막</label>
+        <span class="seg" id="eMode">${[['full', '전체'], ['voice', '대사만'], ['music', '음악만']].map(([k, l]) => `<button data-mode="${k}" class="${(ED.mode || 'full') === k ? 'on' : ''}">${l}</button>`).join('')}</span>
       </div>
       <div class="quiet ed-note">빠른 재생입니다(대사 위치 이동·음악 페이드는 "정확한 미리보기"에서 확인).</div>
     </div>
@@ -4765,8 +4855,9 @@ function edRender() {
     <div class="quiet ed-keys">단축키: 스페이스 재생 · ←/→ 0.1초 이동(⇧ 1초) · S 나누기 · Delete 빼기 · ⌘Z 되돌리기 · 컷을 끌어 순서 변경 · 가장자리를 끌어 자르기 · 대사 막대를 끌어 대사 위치 조정</div>
   </div>
   <div class="card ed-ask">
-    <div class="row"><b>말로 편집</b><span class="quiet">예: "S03 C02 빼고, C04 끝 1초 줄이고, S05 앞에 2초 정적 넣어 줘"</span></div>
-    <div class="row" style="margin-top:6px"><input id="eAsk" placeholder="고칠 내용을 말하듯 적고 Enter" style="flex:1"><button class="btn primary" id="eAskGo">적용</button></div>
+    <div class="row"><b>말로 편집·재생</b><span class="quiet">편집: "S03 C02 빼고, C04 끝 1초 줄여 줘" · 재생: "S02부터 대사만 들려줘", "음악만", "멈춰"</span></div>
+    <div class="row" style="margin-top:6px"><input id="eAsk" placeholder="말하듯 적고 Enter (또는 🎤로 말하기)" style="flex:1">
+      <button class="btn" id="eMic" title="말로 하기 (켜 두면 계속 듣습니다)">🎤 말하기</button><button class="btn primary" id="eAskGo">실행</button></div>
     <div id="eAskRes" class="quiet" style="margin-top:6px"></div>
   </div>
   <div class="card" id="eOut"></div>`;
@@ -4931,15 +5022,19 @@ function edBind() {
     const m = { id: rid('m'), path, name: f.name.replace(/\.[^.]+$/, '').slice(0, 30), start: r3(ED.t), in: 0, out: r3(Math.min(len, Math.max(1, ED.L.total - ED.t) + 0)), src_len: r3(len), gain: 0.4, fade_in: 1, fade_out: 2 };
     edChange(tl => { tl.music.push(m); ED.sel = { type: 'music', id: m.id }; });
   });
-  const ask = guard(async () => {
-    const text = $('#eAsk').value.trim(); if (!text) return;
+  $('#eMode').querySelectorAll('[data-mode]').forEach(b => b.onclick = () => edSetMode(b.dataset.mode));
+  const ask = guard(async (spoken) => {
+    const text = (typeof spoken === 'string' ? spoken : $('#eAsk').value).trim(); if (!text) return;
+    const local = edLocalCommand(text);
+    if (local) { $('#eAsk').value = ''; $('#eAskRes').innerHTML = `▶ ${esc(local)}`; return; }
     await edSave();
     if (!ED.proj) return toast('먼저 타임라인을 만드세요');
     const r = await q(S.sb.from('pipeline_tasks').insert({ kind: 'edit_command', episode_id: ED.ep.id, payload: { project_id: ED.proj.id, text } }).select('id').single());
     $('#eAsk').value = ''; $('#eAskRes').innerHTML = '<span class="spin"></span>편집 보조가 읽는 중… (보통 10~20초)';
     ED.askId = r.id; ED.askRev = ED.proj.rev; edPollRenders();
   });
-  $('#eAskGo').onclick = ask; $('#eAsk').onkeydown = e => { if (e.key === 'Enter' && !e.isComposing) ask(); };
+  $('#eAskGo').onclick = () => ask(); $('#eAsk').onkeydown = e => { if (e.key === 'Enter' && !e.isComposing) ask(); };
+  edMicSetup(ask);
 
   const scroll = $('#eScroll'), canvas = $('#eCanvas');
   const toSec = ev => (ev.clientX - canvas.getBoundingClientRect().left) / ED.pps;
@@ -5038,7 +5133,7 @@ function edShowFrame() {
   const pos = +x.c.in + (ED.t - x.start);
   const apply = () => { try { v.currentTime = pos; } catch {} };
   if (v.readyState >= 1) apply(); else v.onloadedmetadata = apply;
-  v.volume = Math.min(1, x.c.voice_gain ?? 1);
+  v.volume = Math.min(1, x.c.voice_gain ?? 1); v.muted = ED.mode === 'music';
   edSyncSub();
 }
 function edSyncSub() {
@@ -5084,15 +5179,106 @@ function edMusicSync() {
     const url = ED.urls[m.path]; if (!url) continue;
     const a = edMusicEls[m.id] || (edMusicEls[m.id] = Object.assign(new Audio(url), { preload: 'auto' }));
     const rel = ED.t - (+m.start || 0), dur = (+m.out || 0) - (+m.in || 0);
-    if (ED.playing && rel >= 0 && rel < dur) {
-      a.volume = Math.min(1, m.gain ?? 0.6);
+    if (ED.playing && rel >= 0 && rel < dur && ED.mode !== 'voice') {
+      a.volume = Math.min(1, ED.mode === 'music' ? Math.max(0.6, m.gain ?? 0.6) : (m.gain ?? 0.6));
       const want = (+m.in || 0) + rel;
       if (Math.abs(a.currentTime - want) > 0.35) a.currentTime = want;
       if (a.paused) a.play().catch(() => {});
     } else if (!a.paused) a.pause();
   }
 }
-function edStop() { edPause(); clearInterval(ED.pollTimer); ED.pollTimer = null; }
+function edStop() { edPause(); clearInterval(ED.pollTimer); ED.pollTimer = null; edMicOff(); }
+
+// 듣기 방식: 전체 / 대사만 / 음악만 (빠른 재생과 결과물 플레이어 모두)
+function edSetMode(mode) {
+  ED.mode = mode;
+  document.querySelectorAll('#eMode [data-mode], #eRMode [data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+  const v = $('#eVid'); if (v) v.muted = mode === 'music';
+  edMusicSync(); edResultMode();
+}
+
+// 말로 재생 (비용 없음, 화면에서 바로): 재생·멈춤·대사만·음악만·씬/컷/초로 이동
+function edLocalCommand(text) {
+  const t = text.replace(/\s+/g, ' ');
+  const edit = /(빼|줄여|줄이|늘려|늘리|잘라|자르|옮겨|옮기|넣어|넣고|바꿔|바꾸|키워|낮춰|올려|크게|작게|페이드|정적|순서|지워|삭제|추가|맞춰|당겨|밀어)/.test(t);
+  const stop = /(멈춰|멈춤|정지|스톱|그만|일시\s*정지)/.test(t);
+  const play = /(재생|틀어|들려|들어|보여|플레이|play|시작)/i.test(t);
+  const mode = /대사\s*만|목소리\s*만/.test(t) ? 'voice' : /(배경\s*)?음악\s*만|bgm\s*만/i.test(t) ? 'music' : /(전체|다\s*같이|모두\s*같이|원래대로|섞어서)/.test(t) ? 'full' : null;
+  if (edit && !stop) return null;
+  if (!stop && !play && !mode) return null;
+  const target = /(미리\s*보기|완성본|결과물)/.test(t) ? 'result' : 'timeline';
+  if (stop) { edPause(); const rv = $('#eRVid'); if (rv) rv.pause(); return '멈췄습니다'; }
+  const done = [];
+  if (mode) { edSetMode(mode); done.push({ full: '전체 소리', voice: '대사만', music: '음악만' }[mode]); }
+  if (target === 'result') {
+    const rv = $('#eRVid'); if (!rv) return '아직 결과물이 없습니다';
+    rv.currentTime = 0; rv.play().catch(() => {}); edResultMode(); return `결과물 ${done.join(' ')} 재생`;
+  }
+  let at = null;
+  const sm = t.match(/S\s*0*(\d{1,3})|(\d{1,3})\s*(번\s*)?씬/i), cm = t.match(/C\s*0*(\d{1,3})|(\d{1,3})\s*(번째\s*)?컷/i), secm = t.match(/(\d+(?:\.\d+)?)\s*초/);
+  const xs = ED.L.clips;
+  if (sm || cm) {
+    const sc = sm ? +(sm[1] || sm[2]) : null, cn = cm ? +(cm[1] || cm[2]) : null;
+    let x = null;
+    if (sc != null && cn != null) x = xs.find(y => cutOf(y.c).scene_no === sc && cutOf(y.c).cut_no === cn);
+    else if (sc != null) x = xs.find(y => cutOf(y.c).scene_no === sc);
+    else if (/번째/.test(t)) x = xs[cn - 1];
+    else x = xs.find(y => cutOf(y.c).cut_no === cn && cutOf(y.c).scene_no === cutOf((edAt(ED.t) || xs[0]).c).scene_no) || xs[cn - 1];
+    if (!x) return `${sm ? 'S' + (sm[1] || sm[2]) : ''}${cm ? ' C' + (cm[1] || cm[2]) : ''}을(를) 타임라인에서 찾지 못했습니다`;
+    at = x.start; done.unshift(`${clipCode(x.c)}부터`);
+    if (cn != null && /(만|하나만|그\s*컷만)/.test(t.replace(/대사\s*만|음악\s*만/g, ''))) { edSeek(at); edPlay(x.start + x.dur); return `${clipCode(x.c)}만 ${done.slice(1).join(' ')} 재생`; }
+  } else if (/처음/.test(t)) { at = 0; done.unshift('처음부터'); }
+  else if (secm) { at = +secm[1]; done.unshift(`${secm[1]}초부터`); }
+  if (at != null) edSeek(at);
+  if (play || at != null || mode) { if (!ED.playing) edPlay(); }
+  return `${done.join(' ')} 재생`.trim();
+}
+
+// 마이크로 말하기: 켜 두면 계속 듣고, 문장이 끝날 때마다 실행합니다(크롬·사파리·엣지)
+function edMicSetup(run) {
+  const btn = $('#eMic'); if (!btn) return;
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { btn.disabled = true; btn.title = '이 브라우저는 음성 인식을 지원하지 않습니다(크롬·사파리 권장)'; return; }
+  const paint = () => { btn.textContent = ED.mic ? '● 듣는 중 (끄기)' : '🎤 말하기'; btn.classList.toggle('danger', !!ED.mic); };
+  paint();
+  btn.onclick = () => {
+    if (ED.mic) return edMicOff();
+    const rec = new SR(); rec.lang = 'ko-KR'; rec.continuous = true; rec.interimResults = true;
+    rec.onresult = e => {
+      let fin = '', mid = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) (e.results[i].isFinal ? (fin += e.results[i][0].transcript) : (mid += e.results[i][0].transcript));
+      const box = $('#eAsk'); if (box) box.value = fin || mid;
+      if (fin.trim()) run(fin.trim());
+    };
+    rec.onerror = e => { if (e.error === 'not-allowed') { toast('마이크 사용을 허용해 주세요 (주소창 왼쪽 자물쇠 → 마이크)'); edMicOff(); } };
+    rec.onend = () => { if (ED.mic === rec) { try { rec.start(); } catch {} } };
+    try { rec.start(); ED.mic = rec; paint(); toast('듣고 있습니다. 말이 끝나면 바로 실행합니다'); } catch (e) { toast('마이크를 켜지 못했습니다'); }
+  };
+  ED.micPaint = paint;
+}
+function edMicOff() { const r = ED.mic; ED.mic = null; if (r) { try { r.stop(); } catch {} } ED.micPaint && ED.micPaint(); }
+
+// 결과물 플레이어: 대사만·음악만이면 영상은 소리를 끄고 해당 트랙을 맞춰 재생
+function edResultMode() {
+  const v = $('#eRVid'); if (!v) return;
+  const mode = ED.mode || 'full';
+  const a = $('#eRAud');
+  v.muted = mode !== 'full';
+  if (!a) return;
+  const src = mode === 'voice' ? a.dataset.voice : mode === 'music' ? a.dataset.music : '';
+  if (!src) { a.pause(); return; }
+  if (a.dataset.cur !== src) { a.src = src; a.dataset.cur = src; }
+  a.currentTime = v.currentTime || 0;
+  if (!v.paused) a.play().catch(() => {}); else a.pause();
+}
+function edBindResult() {
+  const v = $('#eRVid'), a = $('#eRAud'); if (!v || !a) return;
+  const sync = () => { if ((ED.mode || 'full') === 'full') { a.pause(); return; } if (Math.abs(a.currentTime - v.currentTime) > 0.25) a.currentTime = v.currentTime; };
+  v.onplay = () => { if ((ED.mode || 'full') !== 'full') { edResultMode(); a.play().catch(() => {}); } };
+  v.onpause = () => a.pause(); v.onseeked = sync; v.ontimeupdate = sync;
+  $('#eRMode')?.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => edSetMode(b.dataset.mode));
+  edResultMode();
+}
 
 document.addEventListener('keydown', e => {
   if (S.tab !== 'edit' || !$('#eCanvas')) return;
@@ -5111,7 +5297,7 @@ async function edRenderOut() {
   const renders = await q(S.sb.from('edit_renders').select('id,kind,rev,status,progress,files,error,created_at,finished_at').eq('project_id', ED.proj.id).order('created_at', { ascending: false }).limit(8));
   const agents = await agentRows();
   const hasWin = agents.some(a => a.platform === 'windows');
-  const urlPaths = renders.flatMap(r => [r.files?.preview, r.files?.vtt]).filter(Boolean);
+  const urlPaths = renders.flatMap(r => [r.files?.preview, r.files?.vtt, r.files?.voice, r.files?.music]).filter(Boolean);
   let urls = {};
   if (urlPaths.length) { const { data } = await S.sb.storage.from('takes').createSignedUrls(urlPaths, 3600); (data || []).forEach(d => { if (d.signedUrl) urls[d.path] = d.signedUrl; }); }
   const busy = renders.some(r => ['queued', 'running'].includes(r.status));
@@ -5120,8 +5306,10 @@ async function edRenderOut() {
       <button class="btn" id="eRPrev" style="margin-left:auto">정확한 미리보기 만들기</button>
       <button class="btn primary" id="eRFinal">완성본 내보내기</button></div>
     <p class="quiet" style="margin:6px 0">정확한 미리보기: 대사 위치·음악 페이드·자막까지 실제 완성본과 똑같이, 작은 화질로 1분 안팎에 만듭니다.
-      완성본: 원본 화질로 ${hasWin ? '<b>집 PC</b>' : '켜져 있는 컴퓨터'}가 만들어 <code>00_편집본</code> 폴더에 <b>완성 영상 · 영상만(무음) · 대사·현장음 · 배경음악 · 자막(.srt)</b>을 같은 길이로 저장합니다.</p>
-    ${latest ? `<div class="ed-result"><video controls playsinline preload="metadata" src="${esc(urls[latest.files.preview] || '')}">${latest.files.vtt && urls[latest.files.vtt] ? `<track kind="subtitles" srclang="ko" label="한국어" src="${esc(urls[latest.files.vtt])}" default>` : ''}</video>
+      완성본: 원본 화질로 ${hasWin ? '<b>집 PC</b>' : '켜져 있는 컴퓨터'}가 만들어 <code>00_편집본</code> 폴더에 <b>완성 영상 · 영상만(무음) · 대사·현장음 · 배경음악 · 자막(.srt) · 프리미어/다빈치용 타임라인(.xml)</b>을 저장합니다.</p>
+    ${latest ? `<div class="ed-result"><div><video id="eRVid" controls playsinline preload="metadata" src="${esc(urls[latest.files.preview] || '')}">${latest.files.vtt && urls[latest.files.vtt] ? `<track kind="subtitles" srclang="ko" label="한국어" src="${esc(urls[latest.files.vtt])}" default>` : ''}</video>
+      <audio id="eRAud" preload="auto" data-voice="${esc(urls[latest.files.voice] || '')}" data-music="${esc(urls[latest.files.music] || '')}" hidden></audio>
+      ${latest.files.voice ? `<div class="seg" id="eRMode" style="margin-top:6px">${[['full', '전체'], ['voice', '대사만'], ['music', '음악만']].map(([k, l]) => `<button data-mode="${k}" class="${(ED.mode || 'full') === k ? 'on' : ''}">${l}</button>`).join('')}</div>` : ''}</div>
       <div><b>${latest.kind === 'final' ? '완성본' : '미리보기'} · 버전 ${latest.rev || '-'}</b><div class="quiet">${fmt(latest.finished_at)} · ${latest.files.clips}컷 · ${fmtT(latest.files.seconds)}</div>
       ${latest.files.folder ? `<div class="path-box">${esc(latest.files.folder)}</div>` : ''}</div></div>` : ''}
     ${renders.length ? `<table style="margin-top:8px">${renders.map(r => `<tr><td>${pill(r.kind === 'final' ? '완성본' : '미리보기', r.kind === 'final' ? 'accent' : '')}</td>
@@ -5138,6 +5326,7 @@ async function edRenderOut() {
     toast(kind === 'final' ? '완성본을 만들기 시작했습니다' : '정확한 미리보기를 만드는 중입니다'); edRenderOut(); edPollRenders();
   });
   $('#eRPrev').onclick = make('preview'); $('#eRFinal').onclick = make('final');
+  edBindResult();
   if (busy) edPollRenders();
 }
 function edPollRenders() {
@@ -5156,7 +5345,8 @@ function edPollRenders() {
         } else still = true;
       }
       const open = ED.proj ? await q(S.sb.from('edit_renders').select('id,status').eq('project_id', ED.proj.id).in('status', ['queued', 'running'])) : [];
-      if (open.length || ED.wasRendering) { await edRenderOut(); ED.wasRendering = open.length > 0; }
+      const rv = $('#eRVid');
+      if ((open.length || ED.wasRendering) && !(rv && !rv.paused)) { await edRenderOut(); ED.wasRendering = open.length > 0; }
       if (open.length) still = true;
       if (!still) { clearInterval(ED.pollTimer); ED.pollTimer = null; }
     } catch (e) { console.error(e); }
@@ -5259,11 +5449,16 @@ const HELP = {
 <li>컷에 붙은 자막은 컷을 옮기거나 자르면 함께 움직입니다.</li>
 <li><b>자막 대사로 다시 만들기</b>: 컷의 대사로 처음부터 다시.</li>
 <li>설정의 "자막을 화면에 새기기"를 끄면 자막은 .srt 파일로만 나옵니다(다국어용으로는 끄는 것을 권장).</li></ul>
-<h4>6. 말로 편집</h4>
-<p>"S03 C02 빼고, C04 끝 1초 줄이고, S05 앞에 2초 정적 넣고, 음악은 30%로" 처럼 적고 Enter. 10~20초 뒤 타임라인이 바뀌고 무엇을 바꿨는지 알려 줍니다. 마음에 안 들면 ↶.</p>
+<h4>6. 말로 편집·재생</h4>
+<ul><li><b>편집</b>: "S03 C02 빼고, C04 끝 1초 줄이고, S05 앞에 2초 정적 넣고, 음악은 30%로" 처럼 적고 Enter. 10~20초 뒤 타임라인이 바뀌고 무엇을 바꿨는지 알려 줍니다. 마음에 안 들면 ↶.</li>
+<li><b>재생</b>(바로, 비용 없음): "처음부터 틀어 줘", "S02부터 대사만 들려줘", "S03 C02만 재생", "음악만", "전체로", "15초부터", "멈춰", "완성본 대사만 들려줘".</li>
+<li><b>🎤 말하기</b>를 한 번 켜 두면 버튼 없이 말만으로 계속 시킬 수 있습니다. 문장이 끝나면 바로 실행합니다. 스피커 소리를 명령으로 잘못 들을 수 있으니 재생 중에는 <b>이어폰</b>을 권합니다. 처음 한 번 브라우저가 마이크 허용을 묻습니다.</li></ul>
+<h4>듣기 방식: 전체 / 대사만 / 음악만</h4>
+<p>플레이어 아래와 결과물 플레이어 아래의 버튼으로 바꿉니다. 결과물(정확한 미리보기·완성본)에서는 실제로 따로 만든 대사 트랙과 음악 트랙을 들려줍니다.</p>
 <h4>7. 결과물</h4>
 <ul><li><b>정확한 미리보기 만들기</b>: 완성본과 똑같이 섞어 작은 화질로 만듭니다(1분 안팎, 무료). 휴대폰으로도 봅니다.</li>
-<li><b>완성본 내보내기</b>: 원본 화질로 집 PC가 만들어 <code>EP01_제목 › 00_편집본 › v버전_날짜</code>에 <b>완성 영상, 영상만(무음), 대사·현장음, 배경음악, 자막(.srt), 편집정보</b>를 모두 같은 길이로 저장합니다. 쌤컷 같은 편집 프로그램에서 더 다듬을 때 이 파일들을 그대로 올리면 됩니다.</li></ul>
+<li><b>완성본 내보내기</b>: 원본 화질로 집 PC가 만들어 <code>EP01_제목 › 00_편집본 › v버전_날짜</code>에 <b>완성 영상, 영상만(무음), 대사·현장음, 배경음악, 자막(.srt), 편집정보</b>를 모두 같은 길이로 저장합니다. 쌤컷 같은 편집 프로그램에서 더 다듬을 때 이 파일들을 그대로 올리면 됩니다.</li>
+<li><b>프리미어 프로·다빈치 리졸브</b>: 같은 폴더의 <code>EP01_프리미어·다빈치.xml</code>을 열면(프리미어: 파일 → 가져오기) 컷 위치·자르기·대사 위치·음량이 그대로 담긴 타임라인이 열립니다. 영상 V1, 대사 A1·A2, 음악 A3·A4로 나뉘어 있고, 원본은 옆의 <code>소스</code> 폴더에 있습니다. 자막은 .srt를 따로 가져오세요. 폴더를 다른 컴퓨터로 옮기면 처음 열 때 "미디어 연결"로 소스 폴더를 한 번 지정하면 됩니다.</li></ul>
 <h4>단축키</h4>
 <p>스페이스 재생 · ←/→ 0.1초(⇧ 1초) · S 나누기 · Delete 빼기 · ⌘Z 되돌리기 · ⇧⌘Z 다시 하기 · Esc 선택 해제</p>`],
 

@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.6.0"
+VERSION = "1.6.2"
 
 import base64
 import glob
@@ -1445,6 +1445,77 @@ def even(n):
     return n - (n % 2)
 
 
+def premiere_xml(path, name, clips, srcs, musics, W, H, total, src_dir):
+    """프리미어 프로·다빈치에서 여는 타임라인(FCP7 XML). 영상 V1, 대사 A1·A2, 음악 A3·A4. 소스는 같은 폴더의 '소스'에 복사."""
+    import urllib.parse
+    from xml.sax.saxutils import escape as x
+    fps = 30
+    fr = lambda s: int(round(float(s) * fps))
+    def url(p):
+        p = os.path.abspath(p).replace("\\", "/")
+        if not p.startswith("/"):
+            p = "/" + p
+        return "file://localhost" + urllib.parse.quote(p, safe="/:")
+    os.makedirs(src_dir, exist_ok=True)
+    files, fdefs = {}, {}
+    def file_el(fid, p, dur_f, video=True):
+        if fid in fdefs:
+            return f'<file id="{fid}"/>'
+        fdefs[fid] = True
+        vid = f"<video><samplecharacteristics><width>{W}</width><height>{H}</height></samplecharacteristics></video>" if video else ""
+        return (f'<file id="{fid}"><name>{x(os.path.basename(p))}</name><pathurl>{url(p)}</pathurl>'
+                f"<rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate><duration>{dur_f}</duration>"
+                f"<media>{vid}<audio><samplecharacteristics><depth>16</depth><samplerate>48000</samplerate></samplecharacteristics>"
+                f"<channelcount>2</channelcount></audio></media></file>")
+    vitems, a1, a2 = [], [], []
+    for i, (c, src) in enumerate(zip(clips, srcs), 1):
+        key = os.path.abspath(src)
+        if key not in files:
+            dst = os.path.join(src_dir, f"{c.get('code') or 'clip'}_{len(files) + 1}.mp4".replace("/", "_"))
+            if not os.path.exists(dst):
+                shutil.copyfile(src, dst)
+            files[key] = (f"file-{len(files) + 1}", dst, fr(c.get("src_len") or c["out"]))
+        fid, dst, durf = files[key]
+        st, en = fr(c["start"]), fr(c["start"] + c["dur"])
+        cin, cout = fr(c["in"]), fr(c["out"])
+        nm = x(c.get("code") or f"clip{i}")
+        vitems.append(f'<clipitem id="v{i}"><name>{nm}</name><duration>{durf}</duration><rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>'
+                      f"<start>{st}</start><end>{en}</end><in>{cin}</in><out>{cout}</out>{file_el(fid, dst, durf)}</clipitem>")
+        off = fr(float(c.get("voice_offset") or 0))
+        ast, aen = max(0, st + off), max(0, st + off) + (en - st)
+        g = float(c.get("voice_gain") if c.get("voice_gain") is not None else 1)
+        lvl = (f'<filter><effect><name>Audio Levels</name><effectid>audiolevels</effectid><effecttype>audiolevels</effecttype><mediatype>audio</mediatype>'
+               f'<parameter><parameterid>level</parameterid><name>Level</name><value>{g:.3f}</value></parameter></effect></filter>') if abs(g - 1) > 0.01 else ""
+        for trk, lst in ((1, a1), (2, a2)):
+            lst.append(f'<clipitem id="a{trk}_{i}"><name>{nm} 대사</name><duration>{durf}</duration><rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>'
+                       f"<start>{ast}</start><end>{aen}</end><in>{cin}</in><out>{cout}</out><file id=\"{fid}\"/>"
+                       f"<sourcetrack><mediatype>audio</mediatype><trackindex>{trk}</trackindex></sourcetrack>{lvl}</clipitem>")
+    m1, m2 = [], []
+    for j, (m, local) in enumerate(musics, 1):
+        dst = os.path.join(src_dir, f"music_{j}{os.path.splitext(local)[1] or '.mp3'}")
+        if not os.path.exists(dst):
+            shutil.copyfile(local, dst)
+        srclen = fr(m.get("src_len") or m.get("out") or 60)
+        mi, mo = fr(m.get("in") or 0), fr(m.get("out") or (m.get("src_len") or 60))
+        st = fr(m.get("start") or 0)
+        g = float(m.get("gain") if m.get("gain") is not None else 0.6)
+        fid = f"music-{j}"
+        for trk, lst in ((1, m1), (2, m2)):
+            lst.append(f'<clipitem id="m{trk}_{j}"><name>{x(m.get("name") or "음악")}</name><duration>{srclen}</duration><rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>'
+                       f"<start>{st}</start><end>{st + (mo - mi)}</end><in>{mi}</in><out>{mo}</out>{file_el(fid, dst, srclen, video=False)}"
+                       f"<sourcetrack><mediatype>audio</mediatype><trackindex>{trk}</trackindex></sourcetrack>"
+                       f'<filter><effect><name>Audio Levels</name><effectid>audiolevels</effectid><effecttype>audiolevels</effecttype><mediatype>audio</mediatype>'
+                       f'<parameter><parameterid>level</parameterid><name>Level</name><value>{g:.3f}</value></parameter></effect></filter></clipitem>')
+    trk = lambda items: "<track>" + "".join(items) + "</track>"
+    xml = (f'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE xmeml>\n<xmeml version="4"><sequence id="seq1"><name>{x(name)}</name>'
+           f"<duration>{fr(total)}</duration><rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>"
+           f"<media><video><format><samplecharacteristics><width>{W}</width><height>{H}</height><pixelaspectratio>square</pixelaspectratio>"
+           f"<rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate></samplecharacteristics></format>{trk(vitems)}</video>"
+           f"<audio>{trk(a1)}{trk(a2)}{trk(m1) if m1 else ''}{trk(m2) if m2 else ''}</audio></media></sequence></xmeml>")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(xml)
+
+
 @task("assemble")
 def t_assemble(t):
     rid = (t.get("payload") or {}).get("render_id")
@@ -1522,12 +1593,9 @@ def t_assemble(t):
             fc.append(f"[{k}:a]{trim},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo{fades},volume={g:.2f},adelay={ms}|{ms}[m{j}]")
             mlab.append(f"[m{j}]")
         mixdown(mlab, "mus")
-        if kind == "final":
-            fc.append("[dlg]asplit=2[dlg1][dlg2]")
-            fc.append("[mus]asplit=2[mus1][mus2]")
-            fc.append("[dlg1][mus1]amix=inputs=2:normalize=0,atrim=end=%.3f[mix]" % total)
-        else:
-            fc.append("[dlg][mus]amix=inputs=2:normalize=0,atrim=end=%.3f[mix]" % total)
+        fc.append("[dlg]asplit=2[dlg1][dlg2]")
+        fc.append("[mus]asplit=2[mus1][mus2]")
+        fc.append("[dlg1][mus1]amix=inputs=2:normalize=0,atrim=end=%.3f[mix]" % total)
         e = ed.get("episode") or {}
         tag = f"EP{int(e.get('number') or 0):02d}"
         out_mp4 = os.path.join(work, f"{tag}.mp4")
@@ -1537,6 +1605,9 @@ def t_assemble(t):
         if kind == "final":
             cmd += ["-map", "[dlg2]", "-c:a", "pcm_s16le", os.path.join(work, f"{tag}_대사·현장음.wav"),
                     "-map", "[mus2]", "-c:a", "pcm_s16le", os.path.join(work, f"{tag}_배경음악.wav")]
+        else:
+            cmd += ["-map", "[dlg2]", "-c:a", "aac", "-b:a", "96k", os.path.join(work, "stem_voice.m4a"),
+                    "-map", "[mus2]", "-c:a", "aac", "-b:a", "96k", os.path.join(work, "stem_music.m4a")]
         upd(progress=f"{'미리보기' if kind == 'preview' else '완성본'} 조립 중 ({len(clips)}컷 · {total:.1f}초)")
         progress(f"ffmpeg 조립 {len(clips)}컷 {total:.1f}초")
         rr = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, cwd=work)
@@ -1555,6 +1626,8 @@ def t_assemble(t):
         base = f"{sid}/E{int(e.get('number') or 0):02d}/edit/{kind}_{rid[:8]}"
         if kind == "preview":
             files["preview"] = storage_upload(base + ".mp4", out_mp4, "video/mp4")
+            files["voice"] = storage_upload(base + "_voice.m4a", os.path.join(work, "stem_voice.m4a"), "audio/mp4")
+            files["music"] = storage_upload(base + "_music.m4a", os.path.join(work, "stem_music.m4a"), "audio/mp4")
         else:
             d = os.path.join(episode_dir(ed), f"v{r.get('rev') or 1}_{datetime.now():%m%d_%H%M}")
             os.makedirs(d, exist_ok=True)
@@ -1565,6 +1638,14 @@ def t_assemble(t):
                 shutil.move(os.path.join(work, nm), os.path.join(d, nm))
             if subs:
                 shutil.copyfile(srt, os.path.join(d, f"{tag}_ko.srt"))
+            for c in clips:
+                c["code"] = c.get("code") or (takes.get(c["take_id"]) or {}).get("code")
+            try:
+                premiere_xml(os.path.join(d, f"{tag}_프리미어·다빈치.xml"), f"{tag} {e.get('title') or ''}".strip(),
+                             clips, srcs, musics, even(W), even(H), total, os.path.join(d, "소스"))
+                files["xml"] = True
+            except Exception as ex:
+                log(f"프리미어 XML 실패(완성본은 정상): {ex}")
             with open(os.path.join(d, "편집정보.json"), "w", encoding="utf-8") as f:
                 json.dump({"episode": e, "rev": r.get("rev"), "seconds": total, "timeline": tl}, f, ensure_ascii=False, indent=2)
             files["folder"] = d
@@ -1574,6 +1655,10 @@ def t_assemble(t):
             ff("-i", final, "-vf", f"scale={even(W * s)}:{even(H * s)}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
                "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", small)
             files["preview"] = storage_upload(base + ".mp4", small, "video/mp4")
+            for key, nm in (("voice", f"{tag}_대사·현장음.wav"), ("music", f"{tag}_배경음악.wav")):
+                m4a = os.path.join(work, f"stem_{key}.m4a")
+                ff("-i", os.path.join(d, nm), "-c:a", "aac", "-b:a", "96k", m4a)
+                files[key] = storage_upload(f"{base}_{key}.m4a", m4a, "audio/mp4")
         if subs:
             files["vtt"] = storage_upload(base + ".vtt", vtt, "text/vtt")
         upd(status="done", progress="완료", files=files)
