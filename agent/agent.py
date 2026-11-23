@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 
 import base64
 import glob
@@ -1145,8 +1145,7 @@ def stt_words(path, model="scribe_v1"):
 
 def hf_image(prompt, refs, aspect, model_path):
     """Higgsfield 사진 생성(참고 사진으로 얼굴·의상·장소 고정). 경로는 설정에서 바꿀 수 있다."""
-    if not model_path:
-        raise RuntimeError("사진 모델 경로가 설정되지 않았습니다(설정 → 제작 → 사진 모델)")
+    model_path = model_path or "xai/grok-imagine-image-2.0"
     body = {"prompt": prompt, "aspect_ratio": aspect}
     if refs:
         body["image_urls"] = refs[:6]
@@ -1309,7 +1308,7 @@ def t_prep_cut(t):
                 fr.update({"prompt": fprompt, "path": storage_upload(f"{base}_{key}.jpg", jpg, "image/jpeg"), "status": "ready", "error": None})
                 frames[key] = jpg
                 os.remove(local)
-                log_cost("keyframe", "higgsfield", gen.get("image_model") or "image", {"images": 1}, episode_id=ep, scene_no=c["scene_no"],
+                log_cost("keyframe", "higgsfield", gen.get("image_model") or "xai/grok-imagine-image-2.0", {"images": 1}, episode_id=ep, scene_no=c["scene_no"],
                          cut_id=code, outcome="success", note=f"{'첫' if key == 'frame_first' else '끝'} 장면 사진")
             except Exception as ex:
                 fr.update({"prompt": fprompt, "status": "failed", "error": str(ex)[:300]})

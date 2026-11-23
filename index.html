@@ -276,7 +276,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 
 import base64
 import glob
@@ -1411,8 +1411,7 @@ def stt_words(path, model="scribe_v1"):
 
 def hf_image(prompt, refs, aspect, model_path):
     """Higgsfield 사진 생성(참고 사진으로 얼굴·의상·장소 고정). 경로는 설정에서 바꿀 수 있다."""
-    if not model_path:
-        raise RuntimeError("사진 모델 경로가 설정되지 않았습니다(설정 → 제작 → 사진 모델)")
+    model_path = model_path or "xai/grok-imagine-image-2.0"
     body = {"prompt": prompt, "aspect_ratio": aspect}
     if refs:
         body["image_urls"] = refs[:6]
@@ -1575,7 +1574,7 @@ def t_prep_cut(t):
                 fr.update({"prompt": fprompt, "path": storage_upload(f"{base}_{key}.jpg", jpg, "image/jpeg"), "status": "ready", "error": None})
                 frames[key] = jpg
                 os.remove(local)
-                log_cost("keyframe", "higgsfield", gen.get("image_model") or "image", {"images": 1}, episode_id=ep, scene_no=c["scene_no"],
+                log_cost("keyframe", "higgsfield", gen.get("image_model") or "xai/grok-imagine-image-2.0", {"images": 1}, episode_id=ep, scene_no=c["scene_no"],
                          cut_id=code, outcome="success", note=f"{'첫' if key == 'frame_first' else '끝'} 장면 사진")
             except Exception as ex:
                 fr.update({"prompt": fprompt, "status": "failed", "error": str(ex)[:300]})
@@ -5149,8 +5148,8 @@ async function renderProdSettings() {
       <div style="width:150px"><label>화면 비율</label><select id="gAsp">${['9:16', '16:9', '3:4', '1:1', '4:3', '21:9'].map(a => opt(a, G.aspect_ratio || '9:16', a + (a === '9:16' ? ' (세로·숏폼)' : a === '16:9' ? ' (가로)' : ''))).join('')}</select></div>
     </div>
     <label class="ed-chk" style="margin-top:10px"><input type="checkbox" id="gPrep" ${G.auto_prep !== false ? 'checked' : ''}> 컷 설계가 끝나면 장면 사진·대사 미리 듣기를 자동으로 준비</label>
-    <label>장면 사진 모델 (Higgsfield 경로)</label><input id="gImg" value="${esc(G.image_model || '')}" placeholder="예: bytedance/seedream/v4/edit — Higgsfield 콘솔 Explore models에서 이미지 모델의 API 경로">
-    <p class="quiet" style="margin:2px 0 0">참고 사진(바이블)을 받아 같은 얼굴·의상으로 그리는 이미지 편집 모델을 쓰세요.</p>
+    <label>장면 사진 모델 (Higgsfield 경로)</label><input id="gImg" value="${esc(G.image_model || '')}" placeholder="비워 두면 xai/grok-imagine-image-2.0 (기본)">
+    <p class="quiet" style="margin:2px 0 0">기본은 Grok Imagine 2.0(장당 약 $0.04, 바이블 사진을 참고로 같은 얼굴·의상 유지). 다른 모델로 바꾸려면 Higgsfield Explore의 모델 경로를 넣으세요.</p>
     <label>집 윈도우 PC 보관 폴더 (OneDrive 안이면 자동 백업)</label><input id="gWin" value="${esc(ST.windows_folder || '%OneDrive%\\NYX')}">
     <label>맥 작업 폴더</label><input id="gMac" value="${esc(ST.mac_folder || '~/Movies/NYX')}">
     <p class="quiet">처음에는 480p로 뽑아 확인하고, 통과한 컷만 맥에서 고화질로 올리는 것을 권합니다. 같은 15초 컷이 720p는 480p의 약 2.2배, 1080p는 약 5.5배입니다.</p>
