@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 import base64
 import glob
@@ -324,7 +324,7 @@ def higgsfield_probe(cred):
 
 def test_keys():
     """키가 맞는지 비용 없이 확인한다(생성 요청을 보내지 않음)."""
-    k = secrets("anthropic_api_key", "higgsfield_key_id", "higgsfield_key_secret")
+    k = secrets("anthropic_api_key", "higgsfield_key_id", "higgsfield_key_secret", "elevenlabs_api_key")
     out = []
     a = k.get("anthropic_api_key")
     if not a:
@@ -345,6 +345,18 @@ def test_keys():
         ok, detail = higgsfield_probe(cred)
         out.append(f"Higgsfield: 인증 통과 ({detail})" if ok
                    else f"Higgsfield: 키가 맞지 않음 (401) [ID {len(cred[0])}자 · Secret {len(cred[1])}자] {detail}")
+    el = k.get("elevenlabs_api_key")
+    if el:
+        try:
+            code, data = http_json("https://api.elevenlabs.io/v1/user/subscription", {"xi-api-key": el.strip(), "Accept": "application/json"}, timeout=30)
+        except Exception as e:
+            code, data = 0, {"detail": str(e)}
+        if code == 200 and isinstance(data, dict):
+            out.append(f"ElevenLabs: 연결 정상 (요금제 {data.get('tier', '?')}, 남은 크레딧 {max(0, int(data.get('character_limit') or 0) - int(data.get('character_count') or 0)):,})")
+        elif code in (401, 403):
+            out.append(f"ElevenLabs: 키가 맞지 않음 ({code})")
+        else:
+            out.append(f"ElevenLabs: 확인 실패 ({code})")
     return " / ".join(out), all("실패" not in o and "맞지 않음" not in o and "미등록" not in o for o in out)
 
 
