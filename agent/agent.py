@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 
 import base64
 import glob
@@ -2002,6 +2002,74 @@ def t_bible_extract(t):
     return f"새 항목 {total['new_entries']}개 · 적용 대기 {total['proposals']}개"
 
 
+def photo_block_large(path, label):
+    """묘사용: 사진을 크게(긴 변 1280) 보여 준다. ffmpeg가 없으면 원본을 그대로(5MB 이하) 보낸다."""
+    small = path + ".d.jpg"
+    try:
+        ff("-i", path, "-vf", "scale=1280:1280:force_original_aspect_ratio=decrease", "-frames:v", "1", "-q:v", "3", small)
+        with open(small, "rb") as f:
+            data, mt = f.read(), "image/jpeg"
+        os.remove(small)
+    except Exception as ex:
+        log(f"사진 줄이기 실패, 원본 사용: {ex}")
+        with open(path, "rb") as f:
+            data = f.read()
+        head = data[:12]
+        mt = ("image/png" if head.startswith(b"\x89PNG") else "image/webp" if head[8:12] == b"WEBP"
+              else "image/gif" if head.startswith(b"GIF") else "image/jpeg")
+        if len(data) > 5_000_000:
+            raise RuntimeError(f"{label}: 사진이 너무 커서 보낼 수 없습니다(5MB 이하로 줄여 주세요)")
+    return [{"type": "text", "text": label},
+            {"type": "image", "source": {"type": "base64", "media_type": mt, "data": base64.b64encode(data).decode()}}]
+
+
+@task("photo_describe")
+def t_photo_describe(t):
+    """대표가 올린 외부 사진을 보고, 영상·사진 모델에 그대로 넣을 고정 묘사(영어)와 세부 사항(한국어)을 쓴다."""
+    p = t.get("payload") or {}
+    info = rpc("agent_bible_photo_info", p_token=TOKEN, p_version=p.get("version_id")) or {}
+    if not info:
+        return "대상 버전이 없습니다(삭제됨)"
+    paths = (info.get("image_paths") or [])[:6]
+    if not paths:
+        return "사진이 없습니다"
+    cat = info.get("category")
+    progress(f"{info.get('name')}: 사진 {len(paths)}장 받는 중")
+    blocks = []
+    for i, path in enumerate(paths, 1):
+        tmp = os.path.join(HOME, "work", f"desc_{uuid.uuid4().hex[:6]}.img")
+        try:
+            fetch_to(storage_signed_url("bible", path, 3600), tmp)
+            blocks += photo_block_large(tmp, f"[사진 {i}]")
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+    focus = {
+        "character": "인물: 추정 나이대, 국적·인종 인상, 성별, 얼굴형, 이마·눈썹·눈(모양·쌍꺼풀·눈꼬리)·코·입술·턱선, 피부 톤과 질감, 점·흉터 같은 특징, "
+                     "머리 길이·모양·가르마·앞머리·색·질감, 키 인상·체형·어깨·자세, 표정 습관과 분위기, 사진 속 의상(종류·색·재질·핏)·액세서리·메이크업",
+        "location": "장소: 실내/실외, 공간의 크기와 구조, 바닥·벽·천장 재질과 색, 가구·소품 배치, 창·문 위치, 빛의 방향·색온도·시간대, 분위기, 눈에 띄는 고유한 물건",
+        "prop": "소품: 종류, 모양과 비율, 크기(손·몸 대비), 재질과 표면 질감, 색(주색·보조색), 로고·글자·무늬(실제 상표 이름은 쓰지 말 것), 낡음·흠집, 쓰는 방식",
+    }.get(cat, "사진 속 대상의 생김새를 빠짐없이")
+    system = f"""너는 드라마 제작팀의 미술·캐스팅 담당이다. 대표가 올린 기준 사진을 보고 시리즈 바이블의 고정 묘사를 쓴다.
+이 묘사는 영상·사진 생성 모델 프롬프트에 그대로 들어가서, 모든 화에서 같은 {'얼굴' if cat == 'character' else '모습'}이 나오게 하는 기준이 된다.
+- description: 영어. 세세하고 꼼꼼하게, 사진에 실제로 보이는 것만. 4~8문장(약 80~160단어). 다룰 것 — {focus}.
+  여러 장이면 공통으로 일관된 특징을 쓰고, 장마다 다른 것(의상·조명 등)은 details로 보낸다. 실존 인물·배우·브랜드 이름 금지. 추측은 쓰지 않는다.
+- details: 한국어. 바뀌면 안 되는 특징(얼굴·머리·체형 등), 사진별로 다른 점(의상·조명), 만들 때 주의할 점·금지 사항을 줄 단위로.
+답 형식: <json>{{"description": "", "details": ""}}</json>"""
+    user = blocks + [{"type": "text", "text":
+        f"시리즈: {info.get('series') or ''}\n항목: {info.get('name')} ({cat})\n대본 속 역할: {info.get('summary') or '-'}\n"
+        f"지금 적혀 있는 묘사(참고만, 사진과 다르면 사진이 우선): {info.get('description') or '-'}"}]
+    progress(f"{info.get('name')}: 작가실이 사진을 보고 묘사(프롬프트)를 쓰는 중")
+    text, _ = claude("claude-opus-5-5", system, user, max_tokens=3000, stage="other", note=f"사진 보고 바이블 묘사: {info.get('name')}")
+    d = pick_json(text)
+    desc = (d.get("description") or "").strip()
+    if not desc:
+        raise RuntimeError("Claude가 묘사를 돌려주지 않았습니다")
+    rpc("agent_bible_set_description", p_token=TOKEN, p_version=info["version_id"], p_description=desc, p_details=(d.get("details") or "").strip())
+    notify(f"{info.get('name')} 묘사 작성 완료", "바이블 탭에서 사진을 보고 쓴 묘사를 확인해 주세요")
+    return f"{info.get('name')} 묘사 {len(desc)}자"
+
+
 @task("voice_cast")
 def t_voice_cast(t):
     """시리즈 인물 전체의 목소리 설명·시험 대사를 Claude가 쓰고, 인물마다 후보 3개를 만들도록 이어서 맡긴다."""
@@ -2488,7 +2556,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"bible_extract": "대본에서 필요 항목 찾기", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기","photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:

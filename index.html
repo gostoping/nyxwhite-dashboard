@@ -282,7 +282,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 
 import base64
 import glob
@@ -2274,6 +2274,74 @@ def t_bible_extract(t):
     return f"새 항목 {total['new_entries']}개 · 적용 대기 {total['proposals']}개"
 
 
+def photo_block_large(path, label):
+    """묘사용: 사진을 크게(긴 변 1280) 보여 준다. ffmpeg가 없으면 원본을 그대로(5MB 이하) 보낸다."""
+    small = path + ".d.jpg"
+    try:
+        ff("-i", path, "-vf", "scale=1280:1280:force_original_aspect_ratio=decrease", "-frames:v", "1", "-q:v", "3", small)
+        with open(small, "rb") as f:
+            data, mt = f.read(), "image/jpeg"
+        os.remove(small)
+    except Exception as ex:
+        log(f"사진 줄이기 실패, 원본 사용: {ex}")
+        with open(path, "rb") as f:
+            data = f.read()
+        head = data[:12]
+        mt = ("image/png" if head.startswith(b"\x89PNG") else "image/webp" if head[8:12] == b"WEBP"
+              else "image/gif" if head.startswith(b"GIF") else "image/jpeg")
+        if len(data) > 5_000_000:
+            raise RuntimeError(f"{label}: 사진이 너무 커서 보낼 수 없습니다(5MB 이하로 줄여 주세요)")
+    return [{"type": "text", "text": label},
+            {"type": "image", "source": {"type": "base64", "media_type": mt, "data": base64.b64encode(data).decode()}}]
+
+
+@task("photo_describe")
+def t_photo_describe(t):
+    """대표가 올린 외부 사진을 보고, 영상·사진 모델에 그대로 넣을 고정 묘사(영어)와 세부 사항(한국어)을 쓴다."""
+    p = t.get("payload") or {}
+    info = rpc("agent_bible_photo_info", p_token=TOKEN, p_version=p.get("version_id")) or {}
+    if not info:
+        return "대상 버전이 없습니다(삭제됨)"
+    paths = (info.get("image_paths") or [])[:6]
+    if not paths:
+        return "사진이 없습니다"
+    cat = info.get("category")
+    progress(f"{info.get('name')}: 사진 {len(paths)}장 받는 중")
+    blocks = []
+    for i, path in enumerate(paths, 1):
+        tmp = os.path.join(HOME, "work", f"desc_{uuid.uuid4().hex[:6]}.img")
+        try:
+            fetch_to(storage_signed_url("bible", path, 3600), tmp)
+            blocks += photo_block_large(tmp, f"[사진 {i}]")
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+    focus = {
+        "character": "인물: 추정 나이대, 국적·인종 인상, 성별, 얼굴형, 이마·눈썹·눈(모양·쌍꺼풀·눈꼬리)·코·입술·턱선, 피부 톤과 질감, 점·흉터 같은 특징, "
+                     "머리 길이·모양·가르마·앞머리·색·질감, 키 인상·체형·어깨·자세, 표정 습관과 분위기, 사진 속 의상(종류·색·재질·핏)·액세서리·메이크업",
+        "location": "장소: 실내/실외, 공간의 크기와 구조, 바닥·벽·천장 재질과 색, 가구·소품 배치, 창·문 위치, 빛의 방향·색온도·시간대, 분위기, 눈에 띄는 고유한 물건",
+        "prop": "소품: 종류, 모양과 비율, 크기(손·몸 대비), 재질과 표면 질감, 색(주색·보조색), 로고·글자·무늬(실제 상표 이름은 쓰지 말 것), 낡음·흠집, 쓰는 방식",
+    }.get(cat, "사진 속 대상의 생김새를 빠짐없이")
+    system = f"""너는 드라마 제작팀의 미술·캐스팅 담당이다. 대표가 올린 기준 사진을 보고 시리즈 바이블의 고정 묘사를 쓴다.
+이 묘사는 영상·사진 생성 모델 프롬프트에 그대로 들어가서, 모든 화에서 같은 {'얼굴' if cat == 'character' else '모습'}이 나오게 하는 기준이 된다.
+- description: 영어. 세세하고 꼼꼼하게, 사진에 실제로 보이는 것만. 4~8문장(약 80~160단어). 다룰 것 — {focus}.
+  여러 장이면 공통으로 일관된 특징을 쓰고, 장마다 다른 것(의상·조명 등)은 details로 보낸다. 실존 인물·배우·브랜드 이름 금지. 추측은 쓰지 않는다.
+- details: 한국어. 바뀌면 안 되는 특징(얼굴·머리·체형 등), 사진별로 다른 점(의상·조명), 만들 때 주의할 점·금지 사항을 줄 단위로.
+답 형식: <json>{{"description": "", "details": ""}}</json>"""
+    user = blocks + [{"type": "text", "text":
+        f"시리즈: {info.get('series') or ''}\n항목: {info.get('name')} ({cat})\n대본 속 역할: {info.get('summary') or '-'}\n"
+        f"지금 적혀 있는 묘사(참고만, 사진과 다르면 사진이 우선): {info.get('description') or '-'}"}]
+    progress(f"{info.get('name')}: 작가실이 사진을 보고 묘사(프롬프트)를 쓰는 중")
+    text, _ = claude("claude-opus-5-5", system, user, max_tokens=3000, stage="other", note=f"사진 보고 바이블 묘사: {info.get('name')}")
+    d = pick_json(text)
+    desc = (d.get("description") or "").strip()
+    if not desc:
+        raise RuntimeError("Claude가 묘사를 돌려주지 않았습니다")
+    rpc("agent_bible_set_description", p_token=TOKEN, p_version=info["version_id"], p_description=desc, p_details=(d.get("details") or "").strip())
+    notify(f"{info.get('name')} 묘사 작성 완료", "바이블 탭에서 사진을 보고 쓴 묘사를 확인해 주세요")
+    return f"{info.get('name')} 묘사 {len(desc)}자"
+
+
 @task("voice_cast")
 def t_voice_cast(t):
     """시리즈 인물 전체의 목소리 설명·시험 대사를 Claude가 쓰고, 인물마다 후보 3개를 만들도록 이어서 맡긴다."""
@@ -2760,7 +2828,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"bible_extract": "대본에서 필요 항목 찾기", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기","photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
@@ -4122,13 +4190,13 @@ function appearsLine(e, c) {
   if (!ap.length && !need) return '';
   const byEp = {}; ap.forEach(x => { (byEp[x.ep] = byEp[x.ep] || []).push(x.scene); });
   const txt = Object.keys(byEp).sort((a, b) => a - b).map(ep => `${ep}화 ${[...new Set(byEp[ep])].sort((a, b) => a - b).map(s => 'S' + s).join('·')}`).join(' · ');
-  return `<div class="row" style="gap:6px;margin-top:6px">${need ? pill('사진 필요', 'warn') : ''}${e.origin === 'script' ? pill('대본에서 찾음') : ''}${txt ? `<span class="quiet">등장: ${esc(txt)}</span>` : ''}</div>`;
+  return `<div class="row" style="gap:6px;margin-top:6px">${need ? pill(e.photo_source === 'upload' ? '사진 직접 올릴 예정' : '사진 필요', 'warn') : ''}${e.origin === 'script' ? pill('대본에서 찾음') : ''}${txt ? `<span class="quiet">등장: ${esc(txt)}</span>` : ''}</div>`;
 }
 // 사진 없는 인물·장소·소품에 사진 디자인을 한꺼번에 맡긴다
 async function queuePhotos(entries, curOf, only) {
   const open = new Set((entries.length ? await q(S.sb.from('photo_designs').select('entry_id').in('entry_id', entries.map(e => e.id))
     .in('status', ['queued', 'ready', 'training', 'set_ready'])) : []).map(d => d.entry_id));
-  const todo = entries.filter(e => ['character', 'location', 'prop'].includes(e.category) && (!only || only.has(e.id)) && !open.has(e.id)
+  const todo = entries.filter(e => ['character', 'location', 'prop'].includes(e.category) && e.photo_source !== 'upload' && (!only || only.has(e.id)) && !open.has(e.id)
     && curOf(e.id) && !(curOf(e.id).image_paths || []).length);
   for (const e of todo) {
     const c = curOf(e.id);
@@ -4209,7 +4277,9 @@ async function viewBible(main) {
   if (!S.seriesId || !series.some(s => s.id === S.seriesId)) S.seriesId = series[0]?.id || null;
   if (!S.seriesId) { main.innerHTML = '<h2>시리즈 바이블</h2><div class="card quiet">먼저 대본 탭에서 시리즈를 만드세요.</div>'; return; }
   const [entries, episodes] = await Promise.all([
-    q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin').eq('series_id', S.seriesId).order('sort_order').order('created_at')),
+    // photo_source(사진 방식) 칸이 아직 DB에 없으면(반영 전) 없이 다시 읽는다
+    q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin,photo_source').eq('series_id', S.seriesId).order('sort_order').order('created_at'))
+      .catch(() => q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin').eq('series_id', S.seriesId).order('sort_order').order('created_at'))),
     q(S.sb.from('episodes').select('id,number,title').eq('series_id', S.seriesId).order('number')),
   ]);
   const versions = entries.length ? await q(S.sb.from('bible_versions')
@@ -4222,6 +4292,18 @@ async function viewBible(main) {
   S.bibleCat = S.bibleCat || 'all';
   const shown = entries.filter(e => S.bibleCat === 'all' || e.category === S.bibleCat);
   const cnt = k => entries.filter(e => e.category === k).length;
+  // 분류 버튼(캐릭터·장소·소품…)을 누르면 수정안·한꺼번에 만들기도 그 분류만 대상으로 한다
+  const PHOTO_CATS = ['character', 'location', 'prop'];
+  const inCat = e => !!e && (S.bibleCat === 'all' || e.category === S.bibleCat);
+  const catLabel = S.bibleCat === 'all' ? '' : (BIBLE_CAT[S.bibleCat] || '');
+  const entryOf = id => entries.find(x => x.id === id);
+  const shownProps = proposals.filter(p => inCat(entryOf(p.entry_id)));
+  const EXTRACT_REASON = '대본에서 필요 항목으로 추출';
+  const extractProps = shownProps.filter(p => p.change_reason === EXTRACT_REASON);
+  const photoTodo = entries.filter(e => inCat(e) && PHOTO_CATS.includes(e.category) && e.photo_source !== 'upload'
+    && cur(e.id) && !(cur(e.id).image_paths || []).length);
+  const hasPhotoSrc = entries.some(e => 'photo_source' in e);
+  const showPhotoBtn = S.bibleCat === 'all' || PHOTO_CATS.includes(S.bibleCat);
 
   main.innerHTML = `
   <h2>시리즈 바이블</h2>
@@ -4229,15 +4311,16 @@ async function viewBible(main) {
   <div class="card">
     <div class="row"><select id="bser" style="flex:1;min-width:160px">${series.map(s => `<option value="${esc(s.id)}" ${s.id === S.seriesId ? 'selected' : ''}>${esc(s.title)}</option>`).join('')}</select>
       <button class="btn small" id="bextract" title="작가실이 대본을 화별로 읽고 씬마다 필요한 인물·장소·소품을 찾아 바이블 항목으로 올립니다">대본에서 필요한 것 찾기</button>
-      <button class="btn small" id="bphotos" title="사진이 없는 인물·장소·소품의 사진 후보를 한꺼번에 만듭니다(인물은 Soul 2 실사)">사진 없는 항목 사진 만들기</button>
+      ${showPhotoBtn ? `<button class="btn small" id="bphotos" title="지금 고른 분류에서, 적용된 묘사는 있고 사진이 없는 항목의 사진 후보를 만듭니다. '사진: 직접 올리기'로 정한 항목은 빠집니다(인물은 Soul 2 실사)">${catLabel ? esc(catLabel) + ' ' : '사진 없는 항목 '}사진 만들기 (${photoTodo.length})</button>` : ''}
       <button class="btn small" id="bcast" title="작가실이 대본을 읽고 인물마다 목소리 설명·시험 대사를 쓰고, ElevenLabs 후보 3개씩 만듭니다">인물 목소리 한꺼번에 만들기</button>
       <button class="btn primary small" id="bnew">+ 항목 추가</button></div>
     <div class="row" style="margin-top:10px">${[['all', `전체 ${entries.length}`], ...Object.entries(BIBLE_CAT).map(([k, l]) => [k, `${l} ${cnt(k)}`])].map(([k, l]) =>
       `<button class="btn small ${S.bibleCat === k ? 'primary' : ''}" data-bc="${k}">${esc(l)}</button>`).join('')}</div>
   </div>
   <div id="bxBox"></div>
-  ${proposals.length ? `<div class="row" style="margin-top:14px"><h3 style="margin:0">검토할 바이블 수정안 ${proposals.length}건</h3>
-    ${proposals.some(p => p.change_reason === '대본에서 필요 항목으로 추출') ? `<button class="btn primary small" id="ballgo">대본 추출 ${proposals.filter(p => p.change_reason === '대본에서 필요 항목으로 추출').length}건 모두 적용 + 사진 만들기</button>` : ''}</div>${proposals.map(p => {
+  ${shownProps.length < proposals.length ? `<p class="quiet" style="margin:14px 0 0">다른 분류의 수정안 ${proposals.length - shownProps.length}건은 '전체'나 그 분류 버튼을 누르면 보입니다.</p>` : ''}
+  ${shownProps.length ? `<div class="row" style="margin-top:14px"><h3 style="margin:0">검토할 ${esc(catLabel)} 수정안 ${shownProps.length}건</h3>
+    ${extractProps.length ? `<button class="btn primary small" id="ballgo">대본 추출 ${esc(catLabel)} ${extractProps.length}건 모두 적용 + 사진 만들기</button>` : ''}</div>${shownProps.map(p => {
     const e = entries.find(x => x.id === p.entry_id); const c = cur(p.entry_id);
     return `<div class="card" style="border-color:var(--warn)">
       <div class="row"><b>${esc(e?.name)} v${p.version_no} 수정안</b>${pill(BIBLE_CAT[e?.category] || '')}<span class="quiet">${esc(p.proposed_by)} · ${fmt(p.created_at)}</span></div>
@@ -4254,6 +4337,7 @@ async function viewBible(main) {
       <div class="row"><b style="font-size:16px">${esc(e.name)}</b>${pill(BIBLE_CAT[e.category])}${c ? pill('v' + c.version_no, 'accent') : pill('승인본 없음', 'bad')}</div>
       ${e.summary ? `<div class="quiet" style="margin-top:4px">${esc(e.summary)}</div>` : ''}
       ${appearsLine(e, c)}
+      <div data-dsc="${esc(e.id)}"></div>
       ${c ? thumbs(c.image_paths, urls) : ''}
       ${c ? `<div class="bdesc">${esc(c.description)}</div>` : ''}
       ${c?.details ? `<details style="margin-top:8px"><summary class="quiet">세부 사항</summary><pre class="doc" style="margin-top:6px">${esc(c.details)}</pre></details>` : ''}
@@ -4264,6 +4348,11 @@ async function viewBible(main) {
         ${n > 1 ? `<button class="btn small" data-bhist="${esc(e.id)}">이력 ${n}개</button>` : ''}
         ${['character', 'location', 'prop'].includes(e.category) ? `<button class="btn small" data-pd="${esc(e.id)}">${e.category === 'character' ? (c?.soul_id ? '사진 다시 디자인' : '실사 사진·얼굴 고정') : '사진 디자인'}</button>` : ''}
         ${['character', 'voice'].includes(e.category) ? `<button class="btn small" data-vd="${esc(e.id)}">${c?.voice_id ? '목소리 다시 디자인' : '목소리 디자인'}</button>` : ''}</div>
+      ${PHOTO_CATS.includes(e.category) ? `<div class="row" style="gap:6px;margin-top:8px"><span class="quiet">사진:</span>
+        ${hasPhotoSrc ? `<select data-psrc="${esc(e.id)}" style="width:auto" title="직접 올리기로 정하면 '사진 만들기'를 한꺼번에 눌러도 이 항목은 만들지 않습니다">
+          <option value="auto" ${e.photo_source !== 'upload' ? 'selected' : ''}>자동으로 만들기</option>
+          <option value="upload" ${e.photo_source === 'upload' ? 'selected' : ''}>직접 올리기</option></select>` : ''}
+        <label class="btn small" style="margin:0" title="외부에서 구한 사진을 이 항목의 기준 사진으로 넣고 바로 적용합니다">사진 올리기<input type="file" accept="image/*" multiple hidden data-pup="${esc(e.id)}"></label></div>` : ''}
       <div id="pd-${esc(e.id)}"></div>
       <div id="vd-${esc(e.id)}"></div>
       <div id="bh-${esc(e.id)}"></div>
@@ -4305,15 +4394,94 @@ async function viewBible(main) {
     }, 8000);
   };
   watchExtract();
-  $('#bphotos').onclick = guard(async () => {
-    const n = await queuePhotos(entries, cur);
-    toast(n ? `${n}개 항목의 사진 후보를 만들고 있습니다. 카드에서 골라 주세요` : '사진이 필요한 항목이 없습니다(승인된 묘사가 있어야 만들 수 있습니다)');
+  // 사진 보고 묘사 쓰기: 카드마다 "프롬프트 쓰는 중 · N분째" / 실패 이유를 보여 주고, 끝나면 바이블을 새로 그린다
+  const queueDescribe = async (entryId, versionId) =>
+    q(S.sb.from('pipeline_tasks').insert({ kind: 'photo_describe', series_id: S.seriesId, payload: { entry_id: entryId, version_id: versionId } }));
+  const watchDescribe = async () => {
+    if (S.dscTimer) { clearInterval(S.dscTimer); S.dscTimer = null; }
+    const sid = S.seriesId;
+    const paint = async () => {
+      const rows = await q(S.sb.from('pipeline_tasks').select('id,status,progress,error,attempts,payload,created_at,started_at,finished_at')
+        .eq('kind', 'photo_describe').eq('series_id', sid).order('created_at', { ascending: false }).limit(200));
+      if (S.seriesId !== sid || S.tab !== 'bible') return null;
+      const last = {}; rows.forEach(r => { const id = r.payload?.entry_id; if (id && !last[id]) last[id] = r; });
+      let open = 0;
+      main.querySelectorAll('[data-dsc]').forEach(box => {
+        const t = last[box.dataset.dsc];
+        const isOpen = t && ['queued', 'running'].includes(t.status);
+        if (isOpen) open++;
+        box.innerHTML = !t ? ''
+          : isOpen ? `<div class="row" style="gap:6px;margin-top:6px">${pill('프롬프트 쓰는 중', 'warn')}<span class="quiet">${t.status === 'queued'
+              ? (t.attempts > 0 ? `잠시 뒤 다시 시도${t.error || t.progress ? ' · ' + esc(t.error || t.progress) : ''}` : `에이전트가 받아 가기를 기다리는 중 · 요청 ${esc(agoText(t.created_at))}`)
+              : `${esc(t.progress || '작가실이 사진을 보고 묘사를 쓰는 중')} · 시작 ${esc(agoText(t.started_at))}`}</span></div>`
+          : t.status === 'failed' ? `<div class="row" style="gap:6px;margin-top:6px">${pill('묘사 작성 실패', 'bad')}<span style="color:var(--bad)">${esc(t.error || '이유가 남지 않았습니다')}</span>
+              <button class="btn small" data-dscre="${esc(box.dataset.dsc)}" data-ver="${esc(t.payload?.version_id || '')}">다시 시도</button></div>`
+          : '';
+      });
+      main.querySelectorAll('[data-dscre]').forEach(b => b.onclick = guard(async () => {
+        const ver = b.dataset.ver || cur(b.dataset.dscre)?.id; if (!ver) return toast('다시 쓸 버전을 찾지 못했습니다');
+        await queueDescribe(b.dataset.dscre, ver); toast('다시 맡겼습니다'); watchDescribe();
+      }));
+      return open;
+    };
+    const open0 = await paint().catch(e => { console.error(e); return 0; });
+    if (!open0) return;
+    S.dscTimer = setInterval(async () => {
+      if (S.tab !== 'bible' || S.seriesId !== sid || !main.querySelector('[data-dsc]')) { clearInterval(S.dscTimer); S.dscTimer = null; return; }
+      const open = await paint().catch(() => 1);
+      if (open === null) { clearInterval(S.dscTimer); S.dscTimer = null; return; }
+      if (open) return;
+      clearInterval(S.dscTimer); S.dscTimer = null;
+      toast('사진을 보고 쓴 묘사가 도착했습니다');
+      const busy = $('#bEditor')?.innerHTML.trim() || document.querySelector('#main input:focus, #main textarea:focus');
+      if (!busy) go('bible');
+    }, 8000);
+  };
+  watchDescribe();
+  const bphotos = $('#bphotos');
+  if (bphotos) bphotos.onclick = guard(async () => {
+    if (!photoTodo.length) return toast(`사진을 만들 ${catLabel || ''} 항목이 없습니다(적용된 묘사가 있고, 사진이 없고, '자동으로 만들기'인 항목만 만듭니다)`);
+    const names = photoTodo.map(e => e.name);
+    if (!confirm(`${catLabel || '전체'} ${photoTodo.length}개 항목의 사진 후보를 만듭니다${S.bibleCat === 'character' || S.bibleCat === 'all' ? '(인물은 Soul 2 실사)' : ''}.\n${names.slice(0, 20).join(', ')}${names.length > 20 ? ` 외 ${names.length - 20}개` : ''}\n\n직접 올릴 항목은 먼저 카드에서 '사진: 직접 올리기'로 바꾸면 빠집니다.`)) return;
+    const n = await queuePhotos(photoTodo, cur);
+    toast(n ? `${n}개 항목의 사진 후보를 만들고 있습니다. 카드에서 골라 주세요` : '이미 사진을 만들고 있는 항목뿐입니다');
     if (n) go('bible');
   });
+  // 항목별 사진 방식: 자동으로 만들기 / 직접 올리기
+  main.querySelectorAll('[data-psrc]').forEach(s => s.onchange = guard(async () => {
+    await q(S.sb.from('bible_entries').update({ photo_source: s.value }).eq('id', s.dataset.psrc));
+    const e = entryOf(s.dataset.psrc); if (e) e.photo_source = s.value;
+    toast(s.value === 'upload' ? `${e?.name || ''}: 직접 올리기로 정했습니다. '사진 만들기'에서 빠집니다` : `${e?.name || ''}: 자동으로 만들기로 정했습니다`);
+    go('bible');
+  }));
+  // 외부 사진 올리기: 지금 적용본(없으면 작가실 수정안) 묘사에 사진을 붙여 새 버전으로 바로 적용한다
+  main.querySelectorAll('[data-pup]').forEach(inp => inp.onchange = guard(async () => {
+    const files = [...inp.files]; inp.value = '';
+    if (!files.length) return;
+    if (files.some(f => f.size > 15e6)) return toast('사진이 너무 큽니다 (15MB까지)');
+    const e = entryOf(inp.dataset.pup); if (!e) return;
+    const active = cur(e.id), prop = proposals.find(p => p.entry_id === e.id);
+    const base = active || prop;
+    if (!confirm(`${e.name}에 사진 ${files.length}장을 넣고 바로 적용합니다.${!active && prop ? '\n아직 적용 안 된 작가실 묘사도 함께 적용됩니다.' : ''}${active?.image_paths?.length ? `\n기존 사진 ${active.image_paths.length}장은 그대로 두고 덧붙입니다.` : ''}`)) return;
+    toast('사진 올리는 중…');
+    const added = [];
+    for (const f of files) added.push(await uploadBibleFile(e.id, f));
+    const v = await q(S.sb.from('bible_versions').insert({
+      entry_id: e.id, description: base?.description || e.summary || e.name, details: base?.details || null,
+      voice_id: base?.voice_id || null, soul_id: base?.soul_id || null, voice_path: base?.voice_path || null,
+      image_paths: [...(base?.image_paths || []), ...added], change_reason: '대표가 사진 직접 올림', status: 'proposed',
+    }).select('id,version_no').single());
+    await q(S.sb.rpc('activate_bible_version', { p_id: v.id }));
+    if (!active && prop) await q(S.sb.from('bible_versions').update({ status: 'rejected' }).eq('id', prop.id).eq('status', 'proposed'));
+    if (hasPhotoSrc && e.photo_source !== 'upload') await q(S.sb.from('bible_entries').update({ photo_source: 'upload' }).eq('id', e.id)).catch(() => {});
+    await queueDescribe(e.id, v.id);
+    toast(`${e.name} 사진 ${files.length}장 적용했습니다 (v${v.version_no}). 작가실이 사진을 보고 묘사를 씁니다`); go('bible');
+  }));
   const ballgo = $('#ballgo');
   if (ballgo) ballgo.onclick = guard(async () => {
-    const list = proposals.filter(p => p.change_reason === '대본에서 필요 항목으로 추출');
-    if (!confirm(`대본에서 찾은 ${list.length}개 항목을 바이블에 적용하고, 사진이 없는 항목은 사진 후보를 만듭니다(인물은 Soul 2 실사 4장).\n직접 사진을 넣을 항목은 먼저 그 카드에서 "고쳐서 적용"으로 사진을 올려 주세요.`)) return;
+    const list = extractProps;
+    const manual = list.filter(p => entryOf(p.entry_id)?.photo_source === 'upload').length;
+    if (!confirm(`대본에서 찾은 ${catLabel ? catLabel + ' ' : ''}${list.length}개 항목을 바이블에 적용하고, 사진이 없는 항목은 사진 후보를 만듭니다(인물은 Soul 2 실사 4장).${manual ? `\n'직접 올리기'로 정한 ${manual}개는 적용만 하고 사진은 만들지 않습니다.` : ''}\n직접 사진을 넣을 항목은 먼저 그 카드에서 '사진: 직접 올리기'로 바꾸거나 '사진 올리기'로 사진을 넣어 주세요.`)) return;
     for (const p of list) await q(S.sb.rpc('activate_bible_version', { p_id: p.id }));
     const fresh = await q(S.sb.from('bible_versions').select('id,entry_id,description,image_paths,status').in('entry_id', list.map(p => p.entry_id)).eq('status', 'active'));
     const n = await queuePhotos(entries, id => fresh.find(v => v.entry_id === id), new Set(list.map(p => p.entry_id)));
@@ -4798,7 +4966,7 @@ async function directiveDetail(id) {
       <td>${esc(e.actor)}<br><span class="quiet">${esc(e.devices?.name || '')}</span></td><td>${esc(human(e.summary))}</td></tr>`).join('')}</table>` : '<p class="quiet">기록이 없습니다.</p>'}`;
 }
 const JOB_NAME = {
-  bible_extract: '대본에서 필요 항목 찾기', photo_design: '사진 디자인', photo_set: '얼굴 학습·기준 사진', prep_cut: '컷 준비(사진·목소리)', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보 만들기', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성 (Seedance)', store: '집 PC 보관', video_review: '영상 감수',
+  bible_extract: '대본에서 필요 항목 찾기', photo_describe: '사진 보고 묘사 쓰기',photo_design: '사진 디자인', photo_set: '얼굴 학습·기준 사진', prep_cut: '컷 준비(사진·목소리)', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보 만들기', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성 (Seedance)', store: '집 PC 보관', video_review: '영상 감수',
   ping: '연결 시험', summarize_script_diff: '대본 변경 요약', split_scenes: '씬 나누기', summarize_directive: '지시 읽고 담당 정하기',
   write_prompts: '프롬프트 작성 (감독)', review_prompts: '프롬프트 감수 (감정감수자)', generate_keyframe: '키프레임 생성',
   review_keyframe: '키프레임 검사 (영상감수자)', generate_video: '영상 생성', review_video: '영상 검사 (영상감수자)',
@@ -5373,7 +5541,7 @@ const CUT_STATUS = {
   designed: ['설계됨 · 승인 대기', 'accent'], approved: ['승인 · 생성 대기', 'warn'], generating: ['생성 중', 'warn'],
   reviewing: ['감수 중', 'warn'], passed: ['통과', 'good'], failed: ['불합격·실패', 'bad'], hold: ['보류', ''], cancelled: ['취소', ''],
 };
-const TASK_LABEL = { bible_extract: '대본에서 필요 항목 찾기', photo_design: '사진 디자인', photo_set: '얼굴 학습', prep_cut: '사진·목소리 준비', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
+const TASK_LABEL = { bible_extract: '대본에서 필요 항목 찾기', photo_describe: '사진 보고 묘사 쓰기',photo_design: '사진 디자인', photo_set: '얼굴 학습', prep_cut: '사진·목소리 준비', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
 const PROD_STEPS = [['원고', '대본 탭에서 넣기'], ['작가실', '감정선 정리본'], ['컷 설계', '컷 나누기·대사 미리 듣기·장면 사진'], ['생성 승인', '대표가 컷별로'], ['영상·감수', 'Seedance + 영상감수'], ['씬 보관', '집 PC · OneDrive']];
 const usdKrw = (usd, rate) => usd == null ? '-' : won(usd * (rate || 1340));
 
