@@ -1,0 +1,56 @@
+# Supabase 자동 반영
+# sql/migrations 폴더에 새 SQL 파일이 올라오면 Supabase에 순서대로 한 번씩 적용합니다.
+# 이미 적용한 파일은 public.nyx_migrations 표에 기록되어 다시 실행하지 않습니다.
+# 필요한 비밀값: 저장소 Settings → Secrets and variables → Actions → SUPABASE_DB_URL
+#   (Supabase → Connect → "Session pooler" 연결 문자열, 비밀번호 포함)
+name: DB 자동 반영
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sql/migrations/**'
+      - '.github/workflows/db-migrate.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: db-migrate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: psql 준비
+        run: command -v psql || (sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client)
+
+      - name: SQL 적용
+        env:
+          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DB_URL:-}" ]; then
+            echo "::error::SUPABASE_DB_URL 비밀값이 아직 없습니다. 저장소 Settings → Secrets and variables → Actions에서 추가하세요."
+            exit 1
+          fi
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -q -c "
+            create table if not exists public.nyx_migrations (name text primary key, applied_at timestamptz not null default now());
+            alter table public.nyx_migrations enable row level security;"
+          for f in $(ls sql/migrations/*.sql | sort); do
+            n=$(basename "$f")
+            if [ "$(psql "$DB_URL" -At -c "select 1 from public.nyx_migrations where name = '$n'")" = "1" ]; then
+              echo "건너뜀(이미 적용): $n"
+              continue
+            fi
+            echo "적용: $n"
+            psql "$DB_URL" -v ON_ERROR_STOP=1 -q --single-transaction \
+              -f "$f" \
+              -c "insert into public.nyx_migrations (name) values ('$n')"
+          done
+          echo "완료"

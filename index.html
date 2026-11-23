@@ -965,6 +965,7 @@ async function viewGuide(main) {
       <li><b>컷 단위</b>: 씬을 최대 15초짜리 컷으로 나눕니다(기본 8~12초). 실패해도 그 컷만 다시 만들면 되고, 대사 중간에서는 끊지 않습니다.</li>
       <li><b>레퍼런스 팩</b>: 감독은 프롬프트를 쓰기 전에 바이블(인물 기준 사진·고정 묘사 문장·이번 화 의상·장소)과 직전 컷의 끝 상태·마지막 프레임을 먼저 모읍니다. 인물 묘사는 바이블 문장을 글자 그대로 씁니다.</li>
       <li><b>이어 찍기</b>: 승인된 직전 컷의 마지막 프레임을 다음 컷의 시작 장면으로 씁니다. 컷이 바뀌어도 얼굴·의상이 튀지 않게 하는 가장 강력한 장치입니다.</li>
+      <li><b>대표 연출 메모</b>: 대본 탭에서 화·씬마다 "이 장면은 중요", "물잔 들 때 슬로우" 같은 지시를 남기면 감독이 컷 카드와 프롬프트에 옮기고, 감수자가 반영됐는지 확인합니다. "필수" 메모가 빠지면 반려됩니다.</li>
       <li><b>피드백 양식</b>: 감수자는 지적마다 근거(대본 원문 줄 또는 바이블 항목·버전)와 <b>바꿔 넣을 문장</b>을 줍니다. 감독은 지적마다 응답표(반영함 / 반영 못 함과 이유)로 답합니다. 2회차부터 감수자는 이전 지적이 해결됐는지부터 확인하고 기준을 바꾸지 않습니다.</li>
     </ul>
     ${svgPipeline()}
@@ -1065,7 +1066,7 @@ async function viewGuide(main) {
     <h3 style="margin-top:0">12. 탭 안내</h3>
     <dl>
       <dt>홈</dt><dd>에이전트가 켜져 있는지, 진행 중인 작업, 검토할 일, 최근 활동</dd>
-      <dt>대본</dt><dd>시리즈 → 화 → 버전. 대본 넣기, 확정, 버전 비교, 씬별 변경점</dd>
+      <dt>대본</dt><dd>시리즈 → 화 → 버전. 대본 넣기, 확정, 버전 비교, 씬별 변경점, 화·씬별 대표 연출 메모</dd>
       <dt>바이블</dt><dd>캐릭터·장소·소품·톤·목소리 기준 원본과 화별 연속성 기록. 수정안 적용·반려, 이전 버전으로 되돌리기</dd>
       <dt>직원</dt><dd>5명의 현재 지침과 이력. 수정안 적용·반려, 새 지침 작성</dd>
       <dt>에이전트</dt><dd>각 컴퓨터 프로그램의 설치·통제. 온라인 여부, 연결 시험, 일시정지, 재시작, 업데이트</dd>
@@ -1155,6 +1156,7 @@ async function viewEpisode(pane, ep) {
     <div class="row"><h2 style="margin:0">${ep.number}화 ${esc(ep.title || '')}</h2>
       <select id="epStatus" style="width:auto;margin-left:auto">${Object.entries(EP_STATUS).map(([k, l]) => `<option value="${k}" ${k === ep.status ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
   </div>
+  <div id="notesBox"></div>
   <div class="card">
     <b>새 대본 넣기</b>
     <p class="quiet">붙여 넣거나 .txt 파일을 고르면 초안으로 저장됩니다. 버전 번호와 변경 요약은 "확정"할 때 붙습니다.</p>
@@ -1200,7 +1202,56 @@ async function viewEpisode(pane, ep) {
   }));
   pane.querySelectorAll('[data-view]').forEach(el => el.onclick = guard(() => showVersion(el.dataset.view)));
   if ($('#cmp')) $('#cmp').onclick = guard(() => compareVersions($('#cmpA').value, $('#cmpB').value));
+  await renderNotes(ep);
   if (S.versionId) await showVersion(S.versionId, false);
+}
+
+// 화별 대표 연출 메모
+const NOTE_ST = { open: ['반영 대기', 'warn'], applied: ['반영됨', 'accent'], closed: ['확인 완료', 'good'] };
+async function renderNotes(ep) {
+  const box = $('#notesBox'); if (!box) return;
+  let notes;
+  try {
+    notes = await q(S.sb.from('episode_notes').select('id,scene_no,priority,important,content,status,applied_note,created_at')
+      .eq('episode_id', ep.id).order('created_at'));
+  } catch (e) {
+    box.innerHTML = `<div class="card"><b>대표 연출 메모</b><div class="msg err">${esc(errText(e))}</div></div>`; return;
+  }
+  notes.sort((a, b) => (a.scene_no ?? -1) - (b.scene_no ?? -1));
+  box.innerHTML = `<div class="card" style="border-color:var(--accent)">
+    <b>대표 연출 메모</b>
+    <p class="quiet" style="margin:4px 0 8px">이 화를 만들 때 꼭 반영할 연출 의도를 남기세요. 감독이 컷 카드와 프롬프트에 옮기고, 감수자가 반영됐는지 확인합니다. "필수" 메모가 빠지면 감수에서 반려됩니다.</p>
+    ${notes.length ? `<table>${notes.map(n => `<tr>
+      <td style="white-space:nowrap"><b>${n.scene_no ? 'S#' + n.scene_no : '화 전체'}</b></td>
+      <td>${esc(n.content)}<div style="margin-top:4px">${pill(n.priority === 'must' ? '필수' : '참고', n.priority === 'must' ? 'accent' : '')} ${n.important ? pill('중요 장면', 'warn') : ''}</div>
+        ${n.applied_note ? `<div class="quiet" style="margin-top:4px">반영 내용: ${esc(n.applied_note)}</div>` : ''}</td>
+      <td style="white-space:nowrap">${pill(NOTE_ST[n.status]?.[0] || n.status, NOTE_ST[n.status]?.[1])}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn small" data-nst="${esc(n.id)}" data-v="${n.status === 'closed' ? 'open' : 'closed'}">${n.status === 'closed' ? '다시 열기' : '확인 완료'}</button>
+        <button class="btn small danger" data-ndel="${esc(n.id)}">삭제</button></td></tr>`).join('')}</table>`
+      : '<p class="quiet">아직 메모가 없습니다.</p>'}
+    <div class="row" style="margin-top:10px;align-items:flex-end">
+      <div style="width:130px"><label>씬 번호</label><input id="nsc" inputmode="numeric" placeholder="비우면 화 전체"></div>
+      <div style="width:140px"><label>종류</label><select id="npri"><option value="must">필수 반영</option><option value="nice">참고</option></select></div>
+      <label style="margin:0 0 10px;display:flex;gap:6px;align-items:center;color:var(--ink)"><input type="checkbox" id="nimp" style="width:auto"> 중요 장면</label>
+    </div>
+    <textarea id="ntxt" style="min-height:70px;font-family:inherit" placeholder="예: 주인공이 물잔을 들 때는 슬로우로 움직여 줘 / 이 장면은 매우 중요하니 공들여 촬영"></textarea>
+    <div class="row" style="margin-top:8px"><button class="btn primary" id="nadd">메모 추가</button></div>
+  </div>`;
+  $('#nadd').onclick = guard(async () => {
+    const content = $('#ntxt').value.trim(); if (!content) return toast('메모 내용을 적어 주세요');
+    const sc = parseInt($('#nsc').value, 10);
+    await q(S.sb.from('episode_notes').insert({ episode_id: ep.id, scene_no: Number.isFinite(sc) ? sc : null,
+      priority: $('#npri').value, important: $('#nimp').checked, content }));
+    toast('연출 메모를 남겼습니다'); await renderNotes(ep);
+  });
+  box.querySelectorAll('[data-nst]').forEach(b => b.onclick = guard(async () => {
+    await q(S.sb.from('episode_notes').update({ status: b.dataset.v }).eq('id', b.dataset.nst)); await renderNotes(ep);
+  }));
+  box.querySelectorAll('[data-ndel]').forEach(b => b.onclick = guard(async () => {
+    if (!confirm('이 메모를 지울까요?')) return;
+    await q(S.sb.from('episode_notes').delete().eq('id', b.dataset.ndel)); await renderNotes(ep);
+  }));
 }
 
 async function showVersion(id, scroll = true) {
