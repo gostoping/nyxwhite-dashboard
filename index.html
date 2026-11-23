@@ -177,7 +177,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 import base64
 import glob
@@ -1435,7 +1435,7 @@ def t_voice_design(t):
     if not d:
         raise RuntimeError("목소리 디자인 요청을 찾지 못했습니다")
     progress(f"{d['entry_name']} 목소리 후보를 만드는 중")
-    body = {"voice_description": d["description"][:1000]}
+    body = {"voice_description": d["description"].split("\n[노래]")[0][:1000]}
     sample = (d.get("sample_text") or "").strip()
     if len(sample) >= 100:
         body["text"] = sample[:1000]
@@ -1465,6 +1465,45 @@ def t_voice_design(t):
     return f"{d['entry_name']} 후보 {len(previews)}개"
 
 
+@task("voice_cast")
+def t_voice_cast(t):
+    """시리즈 인물 전체의 목소리 설명·시험 대사를 Claude가 쓰고, 인물마다 후보 3개를 만들도록 이어서 맡긴다."""
+    p = t.get("payload") or {}
+    sid = t.get("series_id") or p.get("series_id")
+    cast = rpc("agent_series_cast", p_token=TOKEN, p_series=sid) or {}
+    chars = [c for c in cast.get("characters") or [] if (p.get("redo") or not c.get("voice_id")) and not c.get("open_design")]
+    if p.get("entry_ids"):
+        chars = [c for c in chars if c["entry_id"] in p["entry_ids"]]
+    if not chars:
+        return "목소리를 새로 만들 인물이 없습니다(이미 정했거나 후보가 기다리는 중)"
+    title = (cast.get("series") or {}).get("title", "")
+    progress(f"작가실이 「{title}」 인물 {len(chars)}명의 목소리를 설계하는 중")
+    system = """너는 드라마 캐스팅 디렉터 겸 음성 감독이다. 대본과 인물 설정을 읽고 인물마다 ElevenLabs 목소리 디자인용 설명을 쓴다.
+- voice_description: 영어 200~600자. 나이, 성별, 출신·억양(한국어를 말할 때의 억양), 음색(밝음·허스키·두께·높이), 말 속도, 감정 표현 습관, 녹음 품질("clean studio recording").
+  실존 인물·배우·가수 이름은 쓰지 않는다. 인물끼리 확실히 구별되게 높이·질감·속도를 다르게 잡는다.
+- sample_text: 그 인물이 대본에서 할 법한 한국어 대사 130~250자. 감정이 두세 번 바뀌게(설렘→긴장→다짐 등) 써서 목소리 폭을 들을 수 있게.
+- singing_hint: 노래 장면이 있다면 어울리는 노래 음색 한 줄(한국어). 없으면 빈 문자열.
+답 형식: <json>{"voices": [{"entry_id": "", "name": "", "voice_description": "", "sample_text": "", "singing_hint": ""}]}</json>"""
+    user = f"시리즈: {title}\n\n[인물]\n" + json.dumps([{k: c.get(k) for k in ("entry_id", "name", "summary", "description", "details")} for c in chars], ensure_ascii=False) \
+        + "\n\n[대본 앞부분]\n" + "\n\n".join(f"{s['number']}화 {s.get('title') or ''}\n{s.get('text') or ''}" for s in cast.get("scripts") or [])[:40000]
+    text, _ = claude("claude-opus-5-5", system, user, max_tokens=6000, stage="other", note=f"시리즈 목소리 설계: {title}")
+    voices = pick_json(text).get("voices") or []
+    ids = {c["entry_id"] for c in chars}
+    made = []
+    for v in voices:
+        if v.get("entry_id") not in ids or len(v.get("voice_description") or "") < 20:
+            continue
+        sample = (v.get("sample_text") or "").strip()
+        if len(sample) < 100:
+            sample = (sample + " " + "오늘은 정말 긴 하루였어요. 그래도 끝까지 해낼 거예요. 지켜봐 주세요.")[:300]
+        desc = v["voice_description"] + (f"\n[노래] {v['singing_hint']}" if v.get("singing_hint") else "")
+        did = rpc("agent_add_voice_design", p_token=TOKEN, p_entry=v["entry_id"], p_description=desc[:1000], p_sample=sample)
+        rpc("agent_add_task", p_token=TOKEN, p={"kind": "voice_design", "payload": {"design_id": did}})
+        made.append(v.get("name") or "")
+    notify(f"「{title}」 목소리 후보 준비 시작", f"{', '.join(made)} — 몇 분 뒤 바이블 탭에서 인물별 후보 3개를 듣고 골라 주세요")
+    return f"인물 {len(made)}명 목소리 설계 → 후보 만들기 시작: {', '.join(made)}"
+
+
 @task("voice_save")
 def t_voice_save(t):
     did = (t.get("payload") or {}).get("design_id")
@@ -1472,7 +1511,7 @@ def t_voice_save(t):
     if not d or not d.get("chosen_generated_id"):
         raise RuntimeError("고른 목소리가 없습니다")
     progress(f"{d['entry_name']} 목소리를 ElevenLabs에 저장하는 중")
-    desc = d["description"]
+    desc = d["description"].split("\n[노래]")[0]
     if len(desc) < 20:
         desc = (desc + " — NYX WHITE 드라마 캐릭터 목소리")[:1000]
     try:
@@ -1507,7 +1546,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
@@ -2884,6 +2923,7 @@ async function viewBible(main) {
   <p class="quiet">모든 화가 따르는 기준 원본입니다. 감독은 여기 적힌 문장만 프롬프트에 쓰고, 영상감수자는 여기 사진과 비교해 채점합니다. 적용은 대표만 할 수 있습니다.</p>
   <div class="card">
     <div class="row"><select id="bser" style="flex:1;min-width:160px">${series.map(s => `<option value="${esc(s.id)}" ${s.id === S.seriesId ? 'selected' : ''}>${esc(s.title)}</option>`).join('')}</select>
+      <button class="btn small" id="bcast" title="작가실이 대본을 읽고 인물마다 목소리 설명·시험 대사를 쓰고, ElevenLabs 후보 3개씩 만듭니다">인물 목소리 한꺼번에 만들기</button>
       <button class="btn primary small" id="bnew">+ 항목 추가</button></div>
     <div class="row" style="margin-top:10px">${[['all', `전체 ${entries.length}`], ...Object.entries(BIBLE_CAT).map(([k, l]) => [k, `${l} ${cnt(k)}`])].map(([k, l]) =>
       `<button class="btn small ${S.bibleCat === k ? 'primary' : ''}" data-bc="${k}">${esc(l)}</button>`).join('')}</div>
@@ -2928,6 +2968,16 @@ async function viewBible(main) {
   $('#bser').onchange = e => { S.seriesId = e.target.value; S.episodeId = null; S.contEp = null; go('bible'); };
   main.querySelectorAll('[data-bc]').forEach(b => b.onclick = () => { S.bibleCat = b.dataset.bc; go('bible'); });
   $('#bnew').onclick = () => openBibleEditor({ urls });
+  $('#bcast').onclick = guard(async () => {
+    const chars = entries.filter(e => e.category === 'character');
+    if (!chars.length) return toast('먼저 캐릭터를 바이블에 등록해 주세요 (+ 항목 추가)');
+    const noVoice = chars.filter(e => !cur(e.id)?.voice_id);
+    const redo = !noVoice.length && confirm('모든 인물에 목소리가 정해져 있습니다. 전부 새로 디자인할까요?');
+    if (!noVoice.length && !redo) return;
+    if (noVoice.length && !confirm(`목소리가 없는 인물 ${noVoice.length}명(${noVoice.map(e => e.name).join(', ')})의 목소리를 만듭니다.\n작가실이 대본을 읽고 인물별 설명·시험 대사를 쓰고, 인물마다 후보 3개를 만듭니다.\n(Claude 수십 원 + ElevenLabs 크레딧 약간)`)) return;
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'voice_cast', series_id: S.seriesId, payload: { series_id: S.seriesId, redo } }));
+    toast('작가실에 맡겼습니다. 몇 분 뒤 인물 카드에 후보가 나타납니다');
+  });
   main.querySelectorAll('[data-bedit]').forEach(b => b.onclick = () => {
     const e = entries.find(x => x.id === b.dataset.bedit); openBibleEditor({ entry: e, base: cur(e.id), urls });
   });
@@ -3296,7 +3346,7 @@ async function directiveDetail(id) {
       <td>${esc(e.actor)}<br><span class="quiet">${esc(e.devices?.name || '')}</span></td><td>${esc(human(e.summary))}</td></tr>`).join('')}</table>` : '<p class="quiet">기록이 없습니다.</p>'}`;
 }
 const JOB_NAME = {
-  voice_design: '목소리 후보 만들기', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성 (Seedance)', store: '집 PC 보관', video_review: '영상 감수',
+  voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보 만들기', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성 (Seedance)', store: '집 PC 보관', video_review: '영상 감수',
   ping: '연결 시험', summarize_script_diff: '대본 변경 요약', split_scenes: '씬 나누기', summarize_directive: '지시 읽고 담당 정하기',
   write_prompts: '프롬프트 작성 (감독)', review_prompts: '프롬프트 감수 (대본감수자)', generate_keyframe: '키프레임 생성',
   review_keyframe: '키프레임 검사 (영상감수자)', generate_video: '영상 생성', review_video: '영상 검사 (영상감수자)',
@@ -3849,7 +3899,7 @@ const CUT_STATUS = {
   designed: ['설계됨 · 승인 대기', 'accent'], approved: ['승인 · 생성 대기', 'warn'], generating: ['생성 중', 'warn'],
   reviewing: ['감수 중', 'warn'], passed: ['통과', 'good'], failed: ['불합격·실패', 'bad'], hold: ['보류', ''], cancelled: ['취소', ''],
 };
-const TASK_LABEL = { voice_design: '목소리 후보', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
+const TASK_LABEL = { voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
 const PROD_STEPS = [['원고', '대본 탭에서 넣기'], ['작가실', '감정선 정리본'], ['컷 설계', '감독 + 대본감수'], ['생성 승인', '대표가 컷별로'], ['영상·감수', 'Seedance + 영상감수'], ['씬 보관', '집 PC · OneDrive']];
 const usdKrw = (usd, rate) => usd == null ? '-' : won(usd * (rate || 1340));
 
@@ -3891,6 +3941,10 @@ async function renderProduction(ep, quietRefresh = false) {
     q(S.sb.from('app_settings').select('key,value').in('key', ['generation', 'storage'])),
   ]);
   const rate = costSet?.krw_per_usd || 1340;
+  try {
+    const chars = await q(S.sb.from('bible_entries').select('name,bible_versions(voice_id,status)').eq('series_id', S.seriesId).eq('category', 'character'));
+    S.noVoice = chars.filter(c => !(c.bible_versions || []).some(v => v.status === 'active' && v.voice_id)).map(c => c.name);
+  } catch { S.noVoice = []; }
   const G = Object.fromEntries(gen.map(r => [r.key, r.value]));
   const takes = cuts.length ? await q(S.sb.from('production_takes').select('*').in('cut_id', cuts.map(c => c.id)).order('take_no')) : [];
   const urls = await signTakeUrls(takes);
@@ -3920,6 +3974,7 @@ async function renderProduction(ep, quietRefresh = false) {
     </div>
     <div class="quiet" style="margin-top:8px">생성 설정: Seedance 2.5 · ${esc(G.generation?.resolution || '480p')} · 화면 ${esc(G.generation?.aspect_ratio || '9:16')} · 배경음악 없이 대사·현장음만
       · 보관: ${hasWin ? '집 PC(OneDrive)' : '<b>집 PC 에이전트 미설치</b> — 생성한 컴퓨터에만 저장'} · <a href="#settings" id="pSet">바꾸기</a></div>
+    ${S.noVoice?.length ? `<div class="msg" style="background:var(--accent-soft)">목소리가 정해지지 않은 인물: <b>${esc(S.noVoice.join(', '))}</b> — <a href="#bible" id="pVoice">바이블에서 한꺼번에 만들기</a></div>` : ''}
     ${online.length ? '' : '<div class="msg err">켜져 있는 에이전트가 없습니다. 버튼을 눌러도 에이전트가 켜질 때까지 기다립니다.</div>'}
   </div>
 
@@ -4027,6 +4082,7 @@ function bindProduction(ep, ctx) {
   const addTask = row => q(S.sb.from('pipeline_tasks').insert({ episode_id: ep.id, ...row }));
   const again = () => renderProduction(ep).catch(e => toast('오류: ' + errText(e)));
   $('#pSet').onclick = e => { e.preventDefault(); go('settings'); };
+  const pv = $('#pVoice'); if (pv) pv.onclick = e => { e.preventDefault(); go('bible'); };
   $('#pWr').onclick = guard(async () => {
     if (hasOpen('writers_room')) return toast('작가실이 이미 일하고 있습니다');
     if (!confirm('작가실이 원고를 읽고 흐름은 그대로 둔 채 감정선만 다듬은 정리본을 만듭니다.\n자동 확정이 켜져 있고 흐름 변경 제안이 없으면 바로 확정 → 감독 컷 설계까지 이어집니다.\n(Claude 비용, 한 화에 수백 원 수준)')) return;

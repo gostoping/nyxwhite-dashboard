@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 import base64
 import glob
@@ -1268,7 +1268,7 @@ def t_voice_design(t):
     if not d:
         raise RuntimeError("목소리 디자인 요청을 찾지 못했습니다")
     progress(f"{d['entry_name']} 목소리 후보를 만드는 중")
-    body = {"voice_description": d["description"][:1000]}
+    body = {"voice_description": d["description"].split("\n[노래]")[0][:1000]}
     sample = (d.get("sample_text") or "").strip()
     if len(sample) >= 100:
         body["text"] = sample[:1000]
@@ -1298,6 +1298,45 @@ def t_voice_design(t):
     return f"{d['entry_name']} 후보 {len(previews)}개"
 
 
+@task("voice_cast")
+def t_voice_cast(t):
+    """시리즈 인물 전체의 목소리 설명·시험 대사를 Claude가 쓰고, 인물마다 후보 3개를 만들도록 이어서 맡긴다."""
+    p = t.get("payload") or {}
+    sid = t.get("series_id") or p.get("series_id")
+    cast = rpc("agent_series_cast", p_token=TOKEN, p_series=sid) or {}
+    chars = [c for c in cast.get("characters") or [] if (p.get("redo") or not c.get("voice_id")) and not c.get("open_design")]
+    if p.get("entry_ids"):
+        chars = [c for c in chars if c["entry_id"] in p["entry_ids"]]
+    if not chars:
+        return "목소리를 새로 만들 인물이 없습니다(이미 정했거나 후보가 기다리는 중)"
+    title = (cast.get("series") or {}).get("title", "")
+    progress(f"작가실이 「{title}」 인물 {len(chars)}명의 목소리를 설계하는 중")
+    system = """너는 드라마 캐스팅 디렉터 겸 음성 감독이다. 대본과 인물 설정을 읽고 인물마다 ElevenLabs 목소리 디자인용 설명을 쓴다.
+- voice_description: 영어 200~600자. 나이, 성별, 출신·억양(한국어를 말할 때의 억양), 음색(밝음·허스키·두께·높이), 말 속도, 감정 표현 습관, 녹음 품질("clean studio recording").
+  실존 인물·배우·가수 이름은 쓰지 않는다. 인물끼리 확실히 구별되게 높이·질감·속도를 다르게 잡는다.
+- sample_text: 그 인물이 대본에서 할 법한 한국어 대사 130~250자. 감정이 두세 번 바뀌게(설렘→긴장→다짐 등) 써서 목소리 폭을 들을 수 있게.
+- singing_hint: 노래 장면이 있다면 어울리는 노래 음색 한 줄(한국어). 없으면 빈 문자열.
+답 형식: <json>{"voices": [{"entry_id": "", "name": "", "voice_description": "", "sample_text": "", "singing_hint": ""}]}</json>"""
+    user = f"시리즈: {title}\n\n[인물]\n" + json.dumps([{k: c.get(k) for k in ("entry_id", "name", "summary", "description", "details")} for c in chars], ensure_ascii=False) \
+        + "\n\n[대본 앞부분]\n" + "\n\n".join(f"{s['number']}화 {s.get('title') or ''}\n{s.get('text') or ''}" for s in cast.get("scripts") or [])[:40000]
+    text, _ = claude("claude-opus-5-5", system, user, max_tokens=6000, stage="other", note=f"시리즈 목소리 설계: {title}")
+    voices = pick_json(text).get("voices") or []
+    ids = {c["entry_id"] for c in chars}
+    made = []
+    for v in voices:
+        if v.get("entry_id") not in ids or len(v.get("voice_description") or "") < 20:
+            continue
+        sample = (v.get("sample_text") or "").strip()
+        if len(sample) < 100:
+            sample = (sample + " " + "오늘은 정말 긴 하루였어요. 그래도 끝까지 해낼 거예요. 지켜봐 주세요.")[:300]
+        desc = v["voice_description"] + (f"\n[노래] {v['singing_hint']}" if v.get("singing_hint") else "")
+        did = rpc("agent_add_voice_design", p_token=TOKEN, p_entry=v["entry_id"], p_description=desc[:1000], p_sample=sample)
+        rpc("agent_add_task", p_token=TOKEN, p={"kind": "voice_design", "payload": {"design_id": did}})
+        made.append(v.get("name") or "")
+    notify(f"「{title}」 목소리 후보 준비 시작", f"{', '.join(made)} — 몇 분 뒤 바이블 탭에서 인물별 후보 3개를 듣고 골라 주세요")
+    return f"인물 {len(made)}명 목소리 설계 → 후보 만들기 시작: {', '.join(made)}"
+
+
 @task("voice_save")
 def t_voice_save(t):
     did = (t.get("payload") or {}).get("design_id")
@@ -1305,7 +1344,7 @@ def t_voice_save(t):
     if not d or not d.get("chosen_generated_id"):
         raise RuntimeError("고른 목소리가 없습니다")
     progress(f"{d['entry_name']} 목소리를 ElevenLabs에 저장하는 중")
-    desc = d["description"]
+    desc = d["description"].split("\n[노래]")[0]
     if len(desc) < 20:
         desc = (desc + " — NYX WHITE 드라마 캐릭터 목소리")[:1000]
     try:
@@ -1340,7 +1379,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
