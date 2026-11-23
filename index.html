@@ -1305,7 +1305,7 @@ async function viewScripts(main) {
         <button class="btn small" id="addSer">+</button></div>
       </div>
       <div class="card">
-        <div class="row"><b>화 목록</b><button class="btn small" id="addEp" style="margin-left:auto">+ 화 추가</button></div>
+        <div class="row"><b>화 목록</b><button class="btn small" id="bulk" style="margin-left:auto">파일로 여러 화 넣기</button><button class="btn small" id="addEp">+ 화 추가</button></div>
         ${episodes.length ? `<table>${episodes.map(e => {
           const v = latest.find(l => l.episode_id === e.id);
           const d = drafts.filter(x => x.episode_id === e.id).length;
@@ -1332,7 +1332,133 @@ async function viewScripts(main) {
     S.episodeId = r.id; S.versionId = null; go('scripts');
   });
   main.querySelectorAll('tr[data-ep]').forEach(tr => tr.onclick = () => { S.episodeId = tr.dataset.ep; S.versionId = null; go('scripts'); });
+  $('#bulk').onclick = () => { if (!S.seriesId) return toast('먼저 시리즈를 만드세요 (+ 버튼)'); S.episodeId = null; viewBulkImport($('#epPane'), series, episodes); };
   if (S.episodeId && episodes.some(e => e.id === S.episodeId)) await viewEpisode($('#epPane'), episodes.find(e => e.id === S.episodeId));
+}
+
+// 여러 화가 들어 있는 대본 파일을 화별로 나눈다 ("EP.01 — 제목" 형식)
+function parseBulkScript(text) {
+  const lines = text.replace(/\r/g, '').split('\n');
+  const epRe = /^\s*EP\.?\s*0*(\d{1,3})\s*[—–\-:]\s*(.+?)\s*$/;
+  const idx = [];
+  lines.forEach((l, i) => { const m = l.match(epRe); if (m) idx.push({ i, n: +m[1], title: m[2] }); });
+  // 마지막 화 뒤에 붙은 체크리스트 구역(있으면)부터는 대본이 아니다
+  const lastEp = idx.length ? idx[idx.length - 1].i : -1;
+  const endIdx = lines.findIndex((l, i) => i > lastEp && /체크리스트/.test(l) && !/^\s*☐/.test(l));
+  const episodes = idx.map((e, k) => {
+    const stop = k + 1 < idx.length ? idx[k + 1].i : (endIdx > e.i ? endIdx : lines.length);
+    const body = lines.slice(e.i, stop).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    const scenes = body.split('\n').filter(l => /^\s*\d{1,2}:\d{2}\s*[–\-~]\s*\d{1,2}:\d{2}/.test(l)).length;
+    return { n: e.n, title: e.title, body, scenes };
+  });
+  const pl = (idx.length ? lines.slice(0, idx[0].i) : []).map(s => s.trim()).filter(Boolean);
+  const toc = {};
+  for (let i = 0; i < pl.length - 1; i++) {
+    const m = pl[i].match(/^(\d{1,3})화$/);
+    if (m && !/^\d{1,3}화$/.test(pl[i + 1]) && !/공통 제작 기준/.test(pl[i + 1])) toc[+m[1]] = pl[i + 1];
+  }
+  const ci = pl.findIndex(l => /공통 제작 기준/.test(l));
+  const common = ci >= 0 ? pl.slice(ci + 1).join('\n\n') : '';
+  const checklist = {};
+  if (endIdx >= 0) lines.slice(endIdx).forEach(l => {
+    const m = l.match(/EP\s*0*(\d{1,3})(?:\s*[~\-–]\s*(?:EP\s*)?0*(\d{1,3}))?\s+(.+)$/);
+    if (m) { const a = +m[1], b = m[2] ? +m[2] : a; for (let n = a; n <= b; n++) (checklist[n] = checklist[n] || []).push(m[3].trim()); }
+  });
+  return { episodes, toc, common, checklist };
+}
+
+async function loadMammoth() {
+  if (window.mammoth) return window.mammoth;
+  await new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js';
+    s.onload = res; s.onerror = () => rej(new Error('Word 파일 읽기 도구를 불러오지 못했습니다. 인터넷 연결을 확인하세요.'));
+    document.head.appendChild(s);
+  });
+  return window.mammoth;
+}
+async function readScriptFile(f) {
+  if (/\.docx$/i.test(f.name)) {
+    const m = await loadMammoth();
+    const r = await m.extractRawText({ arrayBuffer: await f.arrayBuffer() });
+    return r.value;
+  }
+  return await f.text();
+}
+
+async function viewBulkImport(pane, series, episodes) {
+  const ser = series.find(s => s.id === S.seriesId);
+  pane.innerHTML = `<div class="card" style="border-color:var(--accent)">
+    <div class="row"><h2 style="margin:0">파일로 여러 화 넣기</h2><button class="btn small" id="bkClose" style="margin-left:auto">닫기</button></div>
+    <p class="quiet">Word(.docx)나 텍스트(.txt) 파일 하나에 여러 화가 들어 있으면 "EP.01 — 제목" 줄을 기준으로 화별로 나눠 <b>${esc(ser?.title || '')}</b>에 넣습니다.
+    각 화에는 <b>초안</b>으로 들어가고, 화마다 읽어 보신 뒤 "확정"을 누르면 제작이 시작됩니다. 대본은 이 브라우저에서 Supabase로 바로 가며 GitHub에는 올라가지 않습니다.</p>
+    <input type="file" id="bkFile" accept=".docx,.txt,.md,text/plain">
+    <div id="bkPrev" style="margin-top:12px"></div></div>`;
+  $('#bkClose').onclick = () => go('scripts');
+  $('#bkFile').onchange = guard(async e => {
+    const f = e.target.files[0]; if (!f) return;
+    $('#bkPrev').innerHTML = '<p class="quiet">읽는 중…</p>';
+    const parsed = parseBulkScript(await readScriptFile(f));
+    if (!parsed.episodes.length) { $('#bkPrev').innerHTML = '<div class="msg err">"EP.01 — 제목" 형식의 화 구분을 찾지 못했습니다.</div>'; return; }
+    const exist = n => episodes.find(e => e.number === n);
+    const notes = n => (parsed.toc[n] ? 1 : 0) + (parsed.checklist[n] || []).length;
+    $('#bkPrev').innerHTML = `
+      <table><tr><th>화</th><th>제목</th><th style="text-align:right">씬</th><th style="text-align:right">글자</th><th>연출 메모</th><th>대시보드</th></tr>${parsed.episodes.map(e => `
+        <tr><td><b>${e.n}화</b></td><td>${esc(e.title)}</td><td style="text-align:right">${e.scenes}</td><td style="text-align:right">${e.body.length.toLocaleString()}</td>
+        <td class="quiet">${notes(e.n) ? notes(e.n) + '건' : '-'}</td><td>${exist(e.n) ? pill('있는 화에 초안 추가') : pill('새 화 만들기', 'accent')}</td></tr>`).join('')}</table>
+      <label style="display:flex;gap:8px;align-items:center;color:var(--ink);margin-top:12px"><input type="checkbox" id="bkNotes" style="width:auto" checked>
+        앞쪽 "화별 핵심"과 뒤쪽 "연속성 체크리스트"를 각 화의 <b>대표 연출 메모(필수)</b>로 넣기</label>
+      ${parsed.common ? `<label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" id="bkCommon" style="width:auto" checked>
+        "전 회차 공통 제작 기준"을 바이블의 <b>스타일·톤</b> 항목으로 넣기 (${parsed.common.length}자)</label>` : ''}
+      <div class="row" style="margin-top:12px"><button class="btn primary" id="bkGo">${parsed.episodes.length}개 화 넣기</button>
+        <span class="quiet">같은 내용의 초안이 이미 있으면 건너뜁니다.</span></div>
+      <div id="bkLog"></div>`;
+    $('#bkGo').onclick = guard(async () => {
+      const btn = $('#bkGo'); btn.disabled = true; btn.textContent = '넣는 중…';
+      const log = m => { $('#bkLog').insertAdjacentHTML('beforeend', `<div class="quiet">${esc(m)}</div>`); };
+      const withNotes = $('#bkNotes').checked;
+      let made = 0, drafts = 0, skipped = 0, noteCount = 0;
+      for (const ep of parsed.episodes) {
+        let row = episodes.find(e => e.number === ep.n);
+        if (!row) {
+          row = await q(S.sb.from('episodes').insert({ series_id: S.seriesId, number: ep.n, title: ep.title }).select('id,number,title').single());
+          episodes.push(row); made++;
+        } else if (!row.title) {
+          await q(S.sb.from('episodes').update({ title: ep.title }).eq('id', row.id));
+        }
+        const same = await q(S.sb.from('script_versions').select('id').eq('episode_id', row.id).eq('content', ep.body).limit(1));
+        if (same.length) { skipped++; log(`${ep.n}화: 같은 대본이 이미 있어 건너뜀`); continue; }
+        await q(S.sb.from('script_versions').insert({ episode_id: row.id, content: ep.body, note: `${f.name}에서 가져옴` }));
+        drafts++;
+        if (withNotes) {
+          const items = [];
+          if (parsed.toc[ep.n]) items.push('이 화에서 분명히 보여야 할 것: ' + parsed.toc[ep.n]);
+          (parsed.checklist[ep.n] || []).forEach(c => items.push('연속성 체크: ' + c));
+          const have = (await q(S.sb.from('episode_notes').select('content').eq('episode_id', row.id))).map(n => n.content);
+          for (const c of items.filter(c => !have.includes(c))) {
+            await q(S.sb.from('episode_notes').insert({ episode_id: row.id, scene_no: null, priority: 'must', important: false, content: c }));
+            noteCount++;
+          }
+        }
+        log(`${ep.n}화 「${ep.title}」: 초안 저장 (씬 ${ep.scenes}개)`);
+      }
+      if ($('#bkCommon')?.checked) {
+        const name = '전 회차 공통 제작 기준';
+        let entry = (await q(S.sb.from('bible_entries').select('id').eq('series_id', S.seriesId).eq('category', 'style').eq('name', name).limit(1)))[0];
+        if (!entry) entry = await q(S.sb.from('bible_entries').insert({ series_id: S.seriesId, category: 'style', name, summary: '대본 파일의 공통 제작 기준' }).select('id').single());
+        const cur = (await q(S.sb.from('bible_versions').select('description').eq('entry_id', entry.id).eq('status', 'active').limit(1)))[0];
+        if (cur?.description === parsed.common) log('바이블: 공통 제작 기준이 이미 같은 내용으로 적용되어 있음');
+        else {
+          const v = await q(S.sb.from('bible_versions').insert({ entry_id: entry.id, description: parsed.common, change_reason: `${f.name}에서 가져옴`, status: 'proposed' }).select('id').single());
+          await q(S.sb.rpc('activate_bible_version', { p_id: v.id }));
+          log('바이블: 스타일·톤 "전 회차 공통 제작 기준" 적용');
+        }
+      }
+      toast(`완료: 새 화 ${made}개, 초안 ${drafts}개, 연출 메모 ${noteCount}건${skipped ? `, 건너뜀 ${skipped}` : ''}`);
+      btn.textContent = '완료'; log('끝났습니다. 왼쪽 화 목록에서 각 화를 열어 초안을 읽고 "확정"을 누르세요.');
+      setTimeout(() => go('scripts'), 2500);
+    });
+  });
 }
 
 async function viewEpisode(pane, ep) {
