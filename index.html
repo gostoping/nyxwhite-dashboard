@@ -777,12 +777,22 @@ function go(tab) {
 }
 const pill = (text, kind = '') => `<span class="pill ${kind}">${esc(text)}</span>`;
 
+// 에이전트 상태: agent_status(새 방식) 기준으로 이름·온라인 여부를 만든다
+async function agentRows() {
+  const rows = await q(S.sb.from('agent_status').select('device_id,platform,paused,current_job,last_seen_at,state,devices(name)'));
+  return rows.filter(r => r.state !== 'removed').map(r => ({
+    name: r.devices?.name || '이름 없음', platform: r.platform, paused: r.paused,
+    current_job: r.current_job ? (JOB_NAME[r.current_job] || r.current_job) : null, last_seen_at: r.last_seen_at,
+    alive: !!r.last_seen_at && (Date.now() - new Date(r.last_seen_at)) / 1000 < 60,
+  }));
+}
+
 // ------------------------------------------------------------------
 // 홈
 // ------------------------------------------------------------------
 async function viewHome(main) {
   const [agents, staff, directives, jobs, activity, episodes] = await Promise.all([
-    q(S.sb.from('v_agents').select('*')),
+    agentRows(),
     q(S.sb.from('v_staff').select('name,pending_proposals')),
     q(S.sb.from('directives').select('id').in('status', ['received', 'in_progress'])),
     q(S.sb.from('jobs').select('status,type,error,updated_at').in('status', ['queued', 'running', 'failed', 'on_hold']).order('updated_at', { ascending: false }).limit(200)),
@@ -806,9 +816,9 @@ async function viewHome(main) {
   </div>
   <h3>에이전트</h3>
   <div class="card">${agents.length ? `<table><tr><th>기기</th><th>상태</th><th>현재 작업</th><th>마지막 통신</th></tr>${agents.map(a => `
-    <tr><td>${esc(a.name)}</td><td>${a.alive ? pill('온라인', 'good') : pill('오프라인', 'bad')}</td>
+    <tr><td>${esc(a.name)}</td><td>${a.alive ? (a.paused ? pill('일시정지', 'warn') : pill('온라인', 'good')) : a.last_seen_at ? pill('오프라인', 'bad') : pill('설치 전', 'warn')}</td>
     <td>${esc(a.current_job || '-')}</td><td class="quiet">${fmt(a.last_seen_at)}</td></tr>`).join('')}</table>`
-    : '<p class="quiet">아직 등록된 에이전트가 없습니다. Windows 에이전트를 설치하면 여기에 표시됩니다.</p>'}</div>
+    : '<p class="quiet">아직 등록된 에이전트가 없습니다. 에이전트 탭에서 추가하세요.</p>'}</div>
   ${failed.length ? `<h3>최근 실패한 작업</h3><div class="card"><table>${failed.map(j => `
     <tr><td>${esc(JOB_NAME[j.type] || j.type)}</td><td class="quiet">${esc(j.error || '')}</td><td class="quiet">${fmt(j.updated_at)}</td></tr>`).join('')}</table></div>` : ''}
   <h3>최근 활동</h3>
@@ -1548,9 +1558,9 @@ async function viewDirectives(main) {
     q(S.sb.from('directives').select('id,content,summary,status,result_note,progress_note,assigned_to_label,assigned_reason,assigned_at,started_at,completed_at,scene_no,created_at,created_by,devices(name),staff(name),episodes(number,series(title))')
       .order('created_at', { ascending: false }).limit(200)),
     q(S.sb.from('episodes').select('id,number,title,series(title)').order('number')),
-    q(S.sb.from('v_agents').select('name,alive,kind')),
+    agentRows(),
   ]);
-  const winAlive = agents.some(a => a.kind === 'windows_agent' && a.alive);
+  const winAlive = agents.some(a => a.platform === 'windows' && a.alive);
   const open = list.filter(d => ['received', 'assigned', 'in_progress'].includes(d.status));
   S.dirFilter = S.dirFilter || 'open';
   const shown = S.dirFilter === 'open' ? open : S.dirFilter === 'closed' ? list.filter(d => !open.includes(d)) : list;
