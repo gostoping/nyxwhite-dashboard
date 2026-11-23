@@ -9,7 +9,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 import json
 import os
@@ -188,6 +188,66 @@ def check_update(force=False):
     install_update(code, ver)
     log(f"자동 업데이트: v{VERSION} → v{ver} ({src})")
     return ver
+
+
+# ------------------------------------------------------------------ 비용 기록
+# 모든 유료 호출은 반드시 log_cost로 남긴다. 결과가 정해지면 set_cost_outcome으로
+# success(최종 결과에 쓰임) / failed(버려진 시도) / hold(보류) 를 표시한다.
+PRICES = {"at": 0, "krw_per_usd": None, "prices": []}
+
+
+def price(provider, model, unit):
+    """단가표에서 달러 단가를 찾는다(10분마다 새로 읽음). 없으면 None."""
+    if time.time() - PRICES["at"] > 600:
+        try:
+            pb = rpc("agent_price_book", p_token=TOKEN) or {}
+            PRICES.update(at=time.time(), krw_per_usd=pb.get("krw_per_usd"), prices=pb.get("prices") or [])
+        except Exception as e:
+            log(f"단가표 읽기 실패: {e}")
+    for p in PRICES["prices"]:
+        if p.get("provider") == provider and p.get("model") == model and p.get("unit") == unit:
+            return float(p["usd"]) if p.get("usd") is not None else None
+    return None
+
+
+def estimate_usd(provider, model, qty):
+    """사용량(qty)과 단가표로 달러 비용을 계산한다. 단가가 없으면 None."""
+    total, known = 0.0, False
+    pairs = [("seconds", "per_second", 1), ("images", "per_image", 1), ("calls", "per_call", 1),
+             ("input_tokens", "per_1m_input_tokens", 1e-6), ("output_tokens", "per_1m_output_tokens", 1e-6)]
+    for key, unit, scale in pairs:
+        if qty.get(key):
+            u = price(provider, model, unit)
+            if u is not None:
+                total += u * float(qty[key]) * scale
+                known = True
+    return round(total, 6) if known else None
+
+
+def log_cost(stage, provider, model, qty, *, episode_id=None, scene_no=None, cut_id=None, attempt_no=None,
+             usd=None, outcome="pending", job_id=None, note=None):
+    """비용 한 줄을 기록하고 그 id를 돌려준다. 기록 실패가 작업을 멈추지는 않는다."""
+    try:
+        if usd is None:
+            usd = estimate_usd(provider, model, qty or {})
+        return rpc("agent_log_cost", p_token=TOKEN, p_cost={
+            "stage": stage, "provider": provider, "model": model, "qty": qty, "usd": usd,
+            "episode_id": episode_id, "scene_no": scene_no, "cut_id": cut_id, "attempt_no": attempt_no,
+            "outcome": outcome, "job_id": job_id, "note": note})
+    except Exception as e:
+        log(f"비용 기록 실패: {e}")
+        return None
+
+
+def set_cost_outcome(ids, outcome, reason=None, cause=None):
+    ids = [i for i in (ids or []) if i]
+    if not ids:
+        return 0
+    try:
+        return rpc("agent_set_cost_outcome", p_token=TOKEN, p_ids=ids, p_outcome=outcome, p_reason=reason, p_cause=cause)
+    except Exception as e:
+        log(f"비용 결과 기록 실패: {e}")
+        return 0
 
 
 # ------------------------------------------------------------------ 잠자기 방지

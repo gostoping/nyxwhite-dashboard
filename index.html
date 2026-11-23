@@ -116,6 +116,13 @@
   .keep input { position: absolute; top: 3px; left: 3px; width: auto; }
   .bdesc { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 14px; white-space: pre-wrap; margin-top: 8px; }
   audio { width: 100%; height: 36px; margin-top: 6px; }
+  @media print {
+    header, nav.tabs, .noprint, .toast, #npanel { display: none !important; }
+    body.print-invoice main > *:not(#invoice) { display: none !important; }
+    body, html, main { background: #fff !important; color: #000 !important; }
+    .card { border: 0; break-inside: avoid; }
+    main { max-width: none; padding: 0; }
+  }
 </style>
 </head>
 <body>
@@ -135,7 +142,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 import json
 import os
@@ -314,6 +321,66 @@ def check_update(force=False):
     install_update(code, ver)
     log(f"자동 업데이트: v{VERSION} → v{ver} ({src})")
     return ver
+
+
+# ------------------------------------------------------------------ 비용 기록
+# 모든 유료 호출은 반드시 log_cost로 남긴다. 결과가 정해지면 set_cost_outcome으로
+# success(최종 결과에 쓰임) / failed(버려진 시도) / hold(보류) 를 표시한다.
+PRICES = {"at": 0, "krw_per_usd": None, "prices": []}
+
+
+def price(provider, model, unit):
+    """단가표에서 달러 단가를 찾는다(10분마다 새로 읽음). 없으면 None."""
+    if time.time() - PRICES["at"] > 600:
+        try:
+            pb = rpc("agent_price_book", p_token=TOKEN) or {}
+            PRICES.update(at=time.time(), krw_per_usd=pb.get("krw_per_usd"), prices=pb.get("prices") or [])
+        except Exception as e:
+            log(f"단가표 읽기 실패: {e}")
+    for p in PRICES["prices"]:
+        if p.get("provider") == provider and p.get("model") == model and p.get("unit") == unit:
+            return float(p["usd"]) if p.get("usd") is not None else None
+    return None
+
+
+def estimate_usd(provider, model, qty):
+    """사용량(qty)과 단가표로 달러 비용을 계산한다. 단가가 없으면 None."""
+    total, known = 0.0, False
+    pairs = [("seconds", "per_second", 1), ("images", "per_image", 1), ("calls", "per_call", 1),
+             ("input_tokens", "per_1m_input_tokens", 1e-6), ("output_tokens", "per_1m_output_tokens", 1e-6)]
+    for key, unit, scale in pairs:
+        if qty.get(key):
+            u = price(provider, model, unit)
+            if u is not None:
+                total += u * float(qty[key]) * scale
+                known = True
+    return round(total, 6) if known else None
+
+
+def log_cost(stage, provider, model, qty, *, episode_id=None, scene_no=None, cut_id=None, attempt_no=None,
+             usd=None, outcome="pending", job_id=None, note=None):
+    """비용 한 줄을 기록하고 그 id를 돌려준다. 기록 실패가 작업을 멈추지는 않는다."""
+    try:
+        if usd is None:
+            usd = estimate_usd(provider, model, qty or {})
+        return rpc("agent_log_cost", p_token=TOKEN, p_cost={
+            "stage": stage, "provider": provider, "model": model, "qty": qty, "usd": usd,
+            "episode_id": episode_id, "scene_no": scene_no, "cut_id": cut_id, "attempt_no": attempt_no,
+            "outcome": outcome, "job_id": job_id, "note": note})
+    except Exception as e:
+        log(f"비용 기록 실패: {e}")
+        return None
+
+
+def set_cost_outcome(ids, outcome, reason=None, cause=None):
+    ids = [i for i in (ids or []) if i]
+    if not ids:
+        return 0
+    try:
+        return rpc("agent_set_cost_outcome", p_token=TOKEN, p_ids=ids, p_outcome=outcome, p_reason=reason, p_cause=cause)
+    except Exception as e:
+        log(f"비용 결과 기록 실패: {e}")
+        return 0
 
 
 # ------------------------------------------------------------------ 잠자기 방지
@@ -584,7 +651,7 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 const DEFAULT_URL = 'https://fqjorcstghuiyjsirysv.supabase.co';
 const LS = { cfg: 'nix.cfg', device: 'nix.device' };
 const TABS = [
-  ['home', '홈'], ['guide', '안내'], ['scripts', '대본'], ['bible', '바이블'], ['staff', '직원'], ['directives', '지시'], ['agents', '에이전트'], ['log', '기록'], ['settings', '설정'],
+  ['home', '홈'], ['guide', '안내'], ['scripts', '대본'], ['bible', '바이블'], ['staff', '직원'], ['directives', '지시'], ['agents', '에이전트'], ['costs', '비용'], ['log', '기록'], ['settings', '설정'],
 ];
 const EP_STATUS = { writing: '집필', ready: '준비', in_production: '제작 중', review: '검토', approved: '승인', editing: '편집', done: '완료', on_hold: '보류' };
 const V_STATUS = { draft: '초안', confirmed: '확정(현재)', superseded: '이전 확정본' };
@@ -890,7 +957,7 @@ function go(tab) {
   S.tab = tab; history.replaceState(null, '', '#' + tab);
   document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('on', b.dataset.t === tab));
   const main = $('#main'); main.innerHTML = '<p class="quiet">불러오는 중…</p>';
-  ({ home: viewHome, guide: viewGuide, scripts: viewScripts, bible: viewBible, staff: viewStaff, directives: viewDirectives, agents: viewAgents, log: viewLog, settings: viewSettings }[tab])(main)
+  ({ home: viewHome, guide: viewGuide, scripts: viewScripts, bible: viewBible, staff: viewStaff, directives: viewDirectives, agents: viewAgents, costs: viewCosts, log: viewLog, settings: viewSettings }[tab])(main)
     .catch(e => { console.error(e); main.innerHTML = `<div class="msg err">${esc(errText(e))}</div>`; });
 }
 const pill = (text, kind = '') => `<span class="pill ${kind}">${esc(text)}</span>`;
@@ -1188,6 +1255,7 @@ async function viewGuide(main) {
       <dt>바이블</dt><dd>캐릭터·장소·소품·톤·목소리 기준 원본과 화별 연속성 기록. 수정안 적용·반려, 이전 버전으로 되돌리기</dd>
       <dt>직원</dt><dd>5명의 현재 지침과 이력. 수정안 적용·반려, 새 지침 작성</dd>
       <dt>에이전트</dt><dd>각 컴퓨터 프로그램의 설치·통제. 온라인 여부, 연결 시험, 일시정지, 재시작, 업데이트</dd>
+      <dt>비용</dt><dd>모든 지출 장부, 순수 제작비와 실패(누수) 비용 구분, 화별 견적서와 배포 시점 최종 견적서, 매출 대비 비용, 만들기 전 사전 견적, 단가표</dd>
       <dt>지시</dt><dd>대표님 지시 보내기. 지시마다 보낸 사람 → 받는 직원, 접수 → 배정 → 처리 중 → 완료 단계와 결과가 표시되고, 단계가 바뀔 때마다 종 모양 알림이 옵니다.</dd>
       <dt>기록</dt><dd>모든 활동. 기기별·주체별·내용으로 찾아볼 수 있습니다.</dd>
       <dt>설정</dt><dd>이 기기 이름, 2단계 인증, 로그아웃</dd>
@@ -2013,6 +2081,269 @@ async function renderAgentList(newest) {
     if (!confirm('이 에이전트의 연결을 끊을까요? 그 컴퓨터의 프로그램은 더 이상 일을 받지 못합니다.')) return;
     await q(S.sb.rpc('remove_agent', { p_device: b.dataset.remove })); toast('연결을 끊었습니다'); renderAgentList(newest);
   }));
+}
+
+// ------------------------------------------------------------------
+// 비용·견적서: 장부(모든 지출 한 줄씩), 순수 제작비 vs 누수 비용, 화별 견적서, 사전 견적
+// ------------------------------------------------------------------
+const STAGE = { script_revision: '대본 수정·변경 요약', cut_card: '컷 카드·프롬프트(감독)', prompt_review: '프롬프트 감수',
+  keyframe: '키프레임 생성', keyframe_review: '키프레임 검사', video: '영상 생성(Higgsfield)', video_review: '영상 검사',
+  final_review: '최종 감수', evaluate: '채점(평가자)', upscale: '업스케일(맥)', subtitle: '자막(맥)', audio: '음량·음성(맥)',
+  edit: '편집(쌤컷)', directive: '지시 처리', fixed: '고정비(구독 등)', other: '기타' };
+const OUTCOME = { success: ['순수 제작비', 'good'], failed: ['실패(누수)', 'bad'], pending: ['진행 중', 'accent'], hold: ['보류', 'warn'] };
+const CAUSE = { director: '감독(프롬프트)', tool: '영상 도구 한계', script: '대본', standard: '기준', other: '기타' };
+const UNIT = { per_second: '초당', per_1m_input_tokens: '입력 100만 토큰당', per_1m_output_tokens: '출력 100만 토큰당', per_image: '이미지 1장당', per_call: '1회당', per_month: '월' };
+const won = n => n == null || isNaN(n) ? '-' : Math.round(n).toLocaleString('ko-KR') + '원';
+const usdf = n => n == null || isNaN(n) ? '-' : '$' + Number(n).toFixed(2);
+const sum = (rows, f = r => r.krw) => rows.reduce((a, r) => a + (Number(f(r)) || 0), 0);
+const qtyText = q => !q ? '' : [q.seconds && `${q.seconds}초`, q.images && `${q.images}장`, q.calls && `${q.calls}회`,
+  q.input_tokens && `입력 ${Number(q.input_tokens).toLocaleString()}`, q.output_tokens && `출력 ${Number(q.output_tokens).toLocaleString()}`].filter(Boolean).join(' · ');
+const groupBy = (rows, key) => rows.reduce((m, r) => { const k = key(r) ?? '-'; (m[k] = m[k] || []).push(r); return m; }, {});
+
+function buildInvoice(events, meta) {
+  const by = o => events.filter(e => e.outcome === o);
+  const success = by('success'), failed = by('failed'), pending = by('pending'), hold = by('hold');
+  const stageRows = rows => Object.entries(groupBy(rows, r => r.stage)).map(([k, rs]) => ({
+    stage: k, label: STAGE[k] || k, count: rs.length, krw: sum(rs), usd: sum(rs, r => r.usd),
+    seconds: sum(rs, r => r.qty?.seconds), tokens: sum(rs, r => (r.qty?.input_tokens || 0) + (r.qty?.output_tokens || 0)),
+  })).sort((a, b) => b.krw - a.krw);
+  const total = sum(events), pure = sum(success), leak = sum(failed);
+  const successCuts = new Set(success.filter(e => e.stage === 'video' && e.cut_id).map(e => e.cut_id)).size;
+  return {
+    title: meta.title, generated_at: new Date().toISOString(), krw_per_usd: meta.krw_per_usd,
+    totals: { total, pure, leak, pending: sum(pending), hold: sum(hold), count: events.length,
+      leak_rate: total ? leak / total : 0, success_cuts: successCuts, per_cut: successCuts ? pure / successCuts : null },
+    success_by_stage: stageRows(success), failed_by_stage: stageRows(failed),
+    failed_by_cause: Object.entries(groupBy(failed, r => r.failure_cause || 'other')).map(([k, rs]) => ({ cause: CAUSE[k] || k, count: rs.length, krw: sum(rs) }))
+      .sort((a, b) => b.krw - a.krw),
+    failed_items: failed.slice().sort((a, b) => (b.krw || 0) - (a.krw || 0)).slice(0, 40).map(e => ({
+      cut_id: e.cut_id, stage: STAGE[e.stage] || e.stage, attempt_no: e.attempt_no, reason: e.failure_reason,
+      cause: CAUSE[e.failure_cause] || '', krw: e.krw, at: e.occurred_at })),
+    pending_by_stage: stageRows(pending), hold_by_stage: stageRows(hold),
+    has_edit: events.some(e => e.stage === 'edit'), revenue: meta.revenue ?? null,
+  };
+}
+
+function invoiceHtml(d) {
+  const t = d.totals;
+  const stageTable = rows => rows.length ? `<table><tr><th>단계</th><th style="text-align:right">건수</th><th>사용량</th><th style="text-align:right">금액</th></tr>${rows.map(r => `
+    <tr><td>${esc(r.label)}</td><td style="text-align:right">${r.count}</td>
+    <td class="quiet">${[r.seconds && r.seconds + '초', r.tokens && r.tokens.toLocaleString() + '토큰'].filter(Boolean).join(' · ')}</td>
+    <td style="text-align:right;white-space:nowrap">${won(r.krw)}</td></tr>`).join('')}</table>` : '<p class="quiet">없음</p>';
+  const profit = d.revenue != null ? d.revenue - t.total : null;
+  return `
+    <div class="row"><h3 style="margin:0">견적서 · ${esc(d.title)}</h3>
+      <span class="quiet" style="margin-left:auto">작성 ${fmt(d.generated_at)} · 환율 1$ = ${Number(d.krw_per_usd || 0).toLocaleString()}원</span></div>
+    <div class="grid" style="margin-top:12px">
+      <div class="card stat"><div class="n">${won(t.total)}</div><div class="l">총 사용액 (${t.count}건)</div></div>
+      <div class="card stat"><div class="n" style="color:var(--good)">${won(t.pure)}</div><div class="l">순수 제작비 (최종 결과에 쓰인 비용)</div></div>
+      <div class="card stat"><div class="n" style="color:var(--bad)">${won(t.leak)}</div><div class="l">실패로 버려진 비용 · 누수율 ${(t.leak_rate * 100).toFixed(1)}%</div></div>
+      <div class="card stat"><div class="n">${t.per_cut != null ? won(t.per_cut) : '-'}</div><div class="l">완성 컷당 순수 제작비 (${t.success_cuts}컷)</div></div>
+    </div>
+    <h3>1. 순수 제작비: 이것만 만들었을 때의 비용</h3>
+    ${stageTable(d.success_by_stage)}
+    ${d.has_edit ? '' : '<p class="quiet">편집(쌤컷)·맥 로컬 처리(자막·음량·업스케일): 0원 (무료 프로그램, 전기료 제외)</p>'}
+    <h3>2. 추가 비용: 실패해서 다시 만든 비용</h3>
+    <div class="split" style="grid-template-columns:1fr 1fr">
+      <div><b class="quiet">원인별</b>${d.failed_by_cause.length ? `<table>${d.failed_by_cause.map(r => `<tr><td>${esc(r.cause)}</td>
+        <td style="text-align:right">${r.count}건</td><td style="text-align:right">${won(r.krw)}</td></tr>`).join('')}</table>` : '<p class="quiet">없음</p>'}</div>
+      <div><b class="quiet">단계별</b>${stageTable(d.failed_by_stage)}</div>
+    </div>
+    ${d.failed_items.length ? `<b class="quiet">실패 내역 (금액 큰 순${d.failed_items.length >= 40 ? ', 상위 40건' : ''})</b><table>
+      <tr><th>컷</th><th>단계</th><th>시도</th><th>원인</th><th>이유</th><th style="text-align:right">금액</th></tr>${d.failed_items.map(f => `
+      <tr><td style="white-space:nowrap">${esc(f.cut_id || '-')}</td><td>${esc(f.stage)}</td><td>${f.attempt_no ? f.attempt_no + '회차' : '-'}</td>
+      <td>${esc(f.cause)}</td><td class="quiet">${esc(f.reason || '')}</td><td style="text-align:right;white-space:nowrap">${won(f.krw)}</td></tr>`).join('')}</table>` : ''}
+    <h3>3. 진행 중 · 보류</h3>
+    <table><tr><td>진행 중 (결과 대기)</td><td style="text-align:right">${won(t.pending)}</td></tr>
+      <tr><td>보류된 컷에 쓴 비용</td><td style="text-align:right">${won(t.hold)}</td></tr></table>
+    <h3>4. 합계</h3>
+    <table>
+      <tr><td>순수 제작비</td><td style="text-align:right">${won(t.pure)}</td></tr>
+      <tr><td>+ 실패로 버려진 비용</td><td style="text-align:right">${won(t.leak)}</td></tr>
+      <tr><td>+ 진행 중 · 보류</td><td style="text-align:right">${won(t.pending + t.hold)}</td></tr>
+      <tr><td><b>총 사용액</b></td><td style="text-align:right"><b>${won(t.total)}</b></td></tr>
+      ${d.revenue != null ? `<tr><td>매출</td><td style="text-align:right">${won(d.revenue)}</td></tr>
+      <tr><td><b>매출 − 총 사용액</b></td><td style="text-align:right;color:${profit >= 0 ? 'var(--good)' : 'var(--bad)'}"><b>${won(profit)}</b></td></tr>
+      <tr><td>매출 대비 비용</td><td style="text-align:right">${d.revenue ? (t.total / d.revenue * 100).toFixed(1) + '%' : '-'}</td></tr>` : ''}
+    </table>`;
+}
+
+async function viewCosts(main) {
+  const [eps, settings, prices] = await Promise.all([
+    q(S.sb.from('episodes').select('id,number,title,series(title)').order('number')),
+    q(S.sb.from('cost_settings').select('krw_per_usd').eq('id', 1).maybeSingle()),
+    q(S.sb.from('price_book').select('*').order('provider').order('model')),
+  ]);
+  const fx = Number(settings?.krw_per_usd || 1340);
+  S.costEp = S.costEp || 'all'; S.costOut = S.costOut || 'all'; S.costPage = S.costPage || 0;
+  if (S.costEp !== 'all' && !eps.some(e => e.id === S.costEp)) S.costEp = 'all';
+  let qy = S.sb.from('cost_events').select('*').order('occurred_at', { ascending: false }).limit(5000);
+  if (S.costEp !== 'all') qy = qy.eq('episode_id', S.costEp);
+  const events = await q(qy);
+  const ep = eps.find(e => e.id === S.costEp);
+  const fin = ep ? await q(S.sb.from('episode_finance').select('*').eq('episode_id', ep.id).maybeSingle()) : null;
+  const finals = ep ? await q(S.sb.from('final_invoices').select('id,label,created_at,snapshot').eq('episode_id', ep.id).order('created_at', { ascending: false })) : [];
+  const title = ep ? `${ep.series?.title || ''} ${ep.number}화 ${ep.title || ''}`.trim() : '전체 작품';
+  const inv = buildInvoice(events, { title, krw_per_usd: fx, revenue: fin?.revenue_krw ?? null });
+  const shown = S.costOut === 'all' ? events : events.filter(e => e.outcome === S.costOut);
+  const PER = 50, pages = Math.max(1, Math.ceil(shown.length / PER)); if (S.costPage >= pages) S.costPage = 0;
+  const pageRows = shown.slice(S.costPage * PER, S.costPage * PER + PER);
+  const missing = prices.filter(p => p.usd == null);
+  // 완성된 컷만 기준으로: 그 컷들에 영상 생성을 평균 몇 번 했나
+  const doneCuts = new Set(events.filter(e => e.stage === 'video' && e.outcome === 'success' && e.cut_id).map(e => e.cut_id));
+  const realCuts = doneCuts.size;
+  const realTries = realCuts ? events.filter(e => e.stage === 'video' && doneCuts.has(e.cut_id)).length / realCuts : null;
+  const aiPerCut = realCuts ? sum(events.filter(e => !['video', 'keyframe', 'fixed'].includes(e.stage))) / realCuts : null;
+  const chip = (k, l, n, krw) => `<button class="btn small ${S.costOut === k ? 'primary' : ''}" data-co="${k}">${l} ${n}건 · ${won(krw)}</button>`;
+
+  main.innerHTML = `
+  <h2>비용 · 견적서</h2>
+  <p class="quiet">모든 지출을 한 줄씩 기록합니다. 최종 결과에 쓰인 비용은 <b>순수 제작비</b>, 실패해서 버려진 비용은 <b>누수</b>로 나눠 봅니다.</p>
+  <div class="card noprint"><div class="row">
+    <select id="cep" style="width:auto;min-width:200px"><option value="all">전체 작품</option>${eps.map(e =>
+      `<option value="${esc(e.id)}" ${e.id === S.costEp ? 'selected' : ''}>${esc(e.series?.title || '')} ${e.number}화 ${esc(e.title || '')}</option>`).join('')}</select>
+    <span class="quiet" style="margin-left:auto">환율 1$ =</span><input id="cfx" value="${fx}" inputmode="decimal" style="width:90px"><span class="quiet">원</span>
+    <button class="btn small" id="cfxs">환율 저장</button></div></div>
+  ${missing.length ? `<div class="msg err noprint" style="background:rgba(183,121,31,.12);color:var(--warn)">단가가 비어 있는 항목 ${missing.length}개(${missing.map(p => esc(p.label || p.model)).join(', ')}): 아래 단가표에서 넣어 주세요. 비어 있으면 그 비용은 0원으로 계산됩니다.</div>` : ''}
+  <div class="card" id="invoice">${events.length ? invoiceHtml(inv) : `<h3 style="margin-top:0">견적서 · ${esc(title)}</h3>
+    <p class="quiet">아직 기록된 비용이 없습니다. AI 직원과 영상 생성이 시작되면 자동으로 쌓이고, 직접 쓴 비용은 아래에서 손으로 넣을 수 있습니다.</p>`}
+    <div class="row noprint" style="margin-top:12px">
+      <button class="btn" id="cprint">견적서 인쇄 · PDF</button>
+      ${ep ? `<label style="margin:0">매출(원)</label><input id="crev" inputmode="numeric" value="${fin?.revenue_krw ?? ''}" style="width:140px" placeholder="수익화 후 입력">
+        <button class="btn small" id="crevs">매출 저장</button>
+        <button class="btn primary" id="cfinal" style="margin-left:auto">배포 시점 최종 견적서로 확정</button>` : '<span class="quiet">화를 고르면 매출 입력과 최종 견적서 확정을 할 수 있습니다.</span>'}
+    </div>
+    ${finals.length ? `<div class="noprint" style="margin-top:10px"><b class="quiet">확정된 최종 견적서</b>${finals.map(f =>
+      `<div class="row" style="margin-top:6px"><span>${esc(f.label)}</span><span class="quiet">${fmt(f.created_at)} · ${won(f.snapshot?.totals?.total)}</span>
+      <button class="btn small" data-fv="${esc(f.id)}">보기</button></div>`).join('')}</div>` : ''}
+  </div>
+  <div id="finalView"></div>
+
+  <div class="card noprint">
+    <div class="row"><b>비용 장부</b><span class="quiet">최근 것부터</span></div>
+    <div class="row" style="margin:10px 0">
+      ${chip('all', '전체', events.length, sum(events))}
+      ${Object.entries(OUTCOME).map(([k, [l]]) => chip(k, l, events.filter(e => e.outcome === k).length, sum(events.filter(e => e.outcome === k)))).join('')}
+    </div>
+    ${pageRows.length ? `<table><tr><th>시각</th><th>컷</th><th>단계</th><th class="hide-m">사용량</th><th>결과</th><th class="hide-m">이유</th><th style="text-align:right">금액</th></tr>${pageRows.map(e => `
+      <tr><td class="quiet" style="white-space:nowrap">${fmt(e.occurred_at)}</td><td style="white-space:nowrap">${esc(e.cut_id || '-')}${e.attempt_no ? ` <span class="quiet">${e.attempt_no}회차</span>` : ''}</td>
+      <td>${esc(STAGE[e.stage] || e.stage)}${e.source === 'manual' ? ' ' + pill('수동') : ''}</td><td class="quiet hide-m">${esc(qtyText(e.qty))}</td>
+      <td>${pill(OUTCOME[e.outcome]?.[0] || e.outcome, OUTCOME[e.outcome]?.[1])}</td>
+      <td class="quiet hide-m">${esc([CAUSE[e.failure_cause], e.failure_reason, e.note].filter(Boolean).join(' · '))}</td>
+      <td style="text-align:right;white-space:nowrap">${won(e.krw)}${e.usd != null ? `<br><span class="quiet">${usdf(e.usd)}</span>` : ''}</td></tr>`).join('')}</table>
+      ${pages > 1 ? `<div class="row" style="margin-top:8px"><button class="btn small" id="cprev" ${S.costPage === 0 ? 'disabled' : ''}>이전</button>
+        <span class="quiet">${S.costPage + 1} / ${pages}</span><button class="btn small" id="cnext" ${S.costPage >= pages - 1 ? 'disabled' : ''}>다음</button></div>` : ''}`
+      : '<p class="quiet">해당하는 기록이 없습니다.</p>'}
+  </div>
+
+  <div class="card noprint">
+    <b>사전 견적: 만들기 전에 예상 비용 계산</b>
+    <p class="quiet" style="margin:4px 0 8px">재시도 횟수와 AI 직원 비용은 쌓인 기록이 있으면 실제 평균을 기본값으로 씁니다.</p>
+    <div class="row" style="align-items:flex-end">
+      <div style="width:110px"><label>컷 수</label><input id="eCuts" inputmode="numeric" value="40"></div>
+      <div style="width:120px"><label>컷 평균 길이(초)</label><input id="eSec" inputmode="decimal" value="10"></div>
+      <div style="flex:1;min-width:170px"><label>영상 모델</label><select id="eModel">${prices.filter(p => p.unit === 'per_second').map(p =>
+        `<option value="${p.usd ?? 0}">${esc(p.label || p.model)} (${p.usd != null ? '$' + p.usd : '단가 미입력'}/초)</option>`).join('')}</select></div>
+      <div style="width:150px"><label>컷당 영상 생성 횟수</label><input id="eTries" inputmode="decimal" value="${realTries ? realTries.toFixed(2) : '1.3'}"></div>
+      <div style="width:150px"><label>키프레임 1장($)</label><input id="eKf" inputmode="decimal" value="0"></div>
+      <div style="width:170px"><label>AI 직원 비용/컷(원)</label><input id="eAi" inputmode="numeric" value="${aiPerCut ? Math.round(aiPerCut) : 0}"></div>
+    </div>
+    <div id="eOut" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card noprint">
+    <b>단가표</b>
+    <table style="margin-top:6px"><tr><th>항목</th><th>단위</th><th>단가($)</th><th class="hide-m">출처</th><th></th></tr>${prices.map(p => `
+      <tr><td>${esc(p.label || p.model)}<br><span class="quiet">${esc(p.provider)} · ${esc(p.model)}</span></td><td>${UNIT[p.unit] || p.unit}</td>
+      <td><input data-pu="${esc(p.id)}" value="${p.usd ?? ''}" placeholder="미입력" inputmode="decimal" style="width:100px"></td>
+      <td class="quiet hide-m">${esc(p.source || '')}</td><td><button class="btn small" data-ps="${esc(p.id)}">저장</button></td></tr>`).join('')}</table>
+    <div class="row" style="margin-top:10px;align-items:flex-end">
+      <div style="width:120px"><label>회사</label><input id="pProv" placeholder="higgsfield"></div>
+      <div style="width:150px"><label>모델</label><input id="pModel" placeholder="kling-4.0-720p"></div>
+      <div style="width:170px"><label>단위</label><select id="pUnit">${Object.entries(UNIT).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
+      <div style="width:110px"><label>단가($)</label><input id="pUsd" inputmode="decimal"></div>
+      <div style="flex:1;min-width:140px"><label>표시 이름</label><input id="pLabel"></div>
+      <button class="btn" id="pAdd">단가 추가</button></div>
+  </div>
+
+  <div class="card noprint">
+    <b>비용 직접 입력</b>
+    <p class="quiet" style="margin:4px 0 8px">Higgsfield 웹에서 직접 만든 영상, 구독료처럼 에이전트가 모르는 비용을 넣습니다.</p>
+    <div class="row" style="align-items:flex-end">
+      <div style="flex:1;min-width:170px"><label>화</label><select id="mEp"><option value="">화 없음(공통)</option>${eps.map(e =>
+        `<option value="${esc(e.id)}" ${e.id === S.costEp ? 'selected' : ''}>${esc(e.series?.title || '')} ${e.number}화</option>`).join('')}</select></div>
+      <div style="width:140px"><label>컷 ID (선택)</label><input id="mCut" placeholder="E01-S03-C02"></div>
+      <div style="width:180px"><label>단계</label><select id="mStage">${Object.entries(STAGE).map(([k, l]) => `<option value="${k}" ${k === 'video' ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      <div style="width:140px"><label>결과</label><select id="mOut">${Object.entries(OUTCOME).map(([k, [l]]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
+      <div style="width:130px"><label>금액</label><input id="mAmt" inputmode="decimal"></div>
+      <div style="width:90px"><label>단위</label><select id="mCur"><option value="krw">원</option><option value="usd">$</option></select></div>
+    </div>
+    <label>메모 / 실패 이유</label><input id="mNote" placeholder="예: Higgsfield 웹에서 직접 생성, 얼굴이 달라서 폐기">
+    <div class="row" style="margin-top:8px"><button class="btn primary" id="mAdd">기록</button></div>
+  </div>`;
+
+  $('#cep').onchange = e => { S.costEp = e.target.value; S.costPage = 0; go('costs'); };
+  main.querySelectorAll('[data-co]').forEach(b => b.onclick = () => { S.costOut = b.dataset.co; S.costPage = 0; go('costs'); });
+  if ($('#cprev')) $('#cprev').onclick = () => { S.costPage--; go('costs'); };
+  if ($('#cnext')) $('#cnext').onclick = () => { S.costPage++; go('costs'); };
+  $('#cfxs').onclick = guard(async () => {
+    const v = Number($('#cfx').value); if (!(v > 0)) return toast('환율을 숫자로 넣어 주세요');
+    await q(S.sb.from('cost_settings').update({ krw_per_usd: v, updated_at: new Date().toISOString() }).eq('id', 1));
+    toast('환율을 저장했습니다. 앞으로 기록되는 비용부터 적용됩니다'); go('costs');
+  });
+  $('#cprint').onclick = () => { document.body.classList.add('print-invoice'); window.print(); setTimeout(() => document.body.classList.remove('print-invoice'), 500); };
+  if ($('#crevs')) $('#crevs').onclick = guard(async () => {
+    const v = $('#crev').value.trim() === '' ? null : Number($('#crev').value.replace(/,/g, ''));
+    await q(S.sb.from('episode_finance').upsert({ episode_id: ep.id, revenue_krw: v, updated_at: new Date().toISOString() }));
+    toast('매출을 저장했습니다'); go('costs');
+  });
+  if ($('#cfinal')) $('#cfinal').onclick = guard(async () => {
+    const label = prompt('최종 견적서 이름', `${ep.number}화 배포본 (${new Date().toLocaleDateString('ko-KR')})`); if (!label) return;
+    await q(S.sb.from('final_invoices').insert({ episode_id: ep.id, label, snapshot: inv }));
+    toast('최종 견적서를 확정해 보관했습니다'); go('costs');
+  });
+  main.querySelectorAll('[data-fv]').forEach(b => b.onclick = () => {
+    const f = finals.find(x => x.id === b.dataset.fv);
+    $('#finalView').innerHTML = `<div class="card" style="border-color:var(--accent)"><div class="row noprint"><b>확정본: ${esc(f.label)}</b>
+      <button class="btn small" id="fvClose" style="margin-left:auto">닫기</button></div>${invoiceHtml(f.snapshot)}</div>`;
+    $('#fvClose').onclick = () => { $('#finalView').innerHTML = ''; };
+    $('#finalView').scrollIntoView({ behavior: 'smooth' });
+  });
+  const est = () => {
+    const n = id => Number($(id).value) || 0;
+    const cuts = n('#eCuts'), sec = n('#eSec'), perSec = n('#eModel'), tries = Math.max(1, n('#eTries')), kf = n('#eKf'), ai = n('#eAi');
+    const videoMin = cuts * sec * perSec * fx, video = videoMin * tries, kfCost = cuts * kf * fx * Math.max(1, (tries + 1) / 2), aiCost = cuts * ai;
+    const total = video + kfCost + aiCost, ideal = videoMin + cuts * kf * fx + aiCost;
+    $('#eOut').innerHTML = `<table>
+      <tr><td>영상 생성 (${cuts}컷 × ${sec}초 × ${tries}회)</td><td style="text-align:right">${won(video)}</td></tr>
+      <tr><td>키프레임</td><td style="text-align:right">${won(kfCost)}</td></tr>
+      <tr><td>AI 직원 (감독·감수·평가)</td><td style="text-align:right">${won(aiCost)}</td></tr>
+      <tr><td><b>예상 합계</b></td><td style="text-align:right"><b>${won(total)}</b> <span class="quiet">(${usdf(total / fx)})</span></td></tr>
+      <tr><td class="quiet">한 번에 모두 성공했을 때(최소)</td><td style="text-align:right" class="quiet">${won(ideal)}</td></tr>
+      <tr><td class="quiet">재시도로 늘어나는 예상 금액</td><td style="text-align:right" class="quiet">${won(total - ideal)}</td></tr></table>
+      ${perSec === 0 ? '<p class="quiet">선택한 모델의 단가가 비어 있습니다.</p>' : ''}`;
+  };
+  ['#eCuts', '#eSec', '#eModel', '#eTries', '#eKf', '#eAi'].forEach(id => $(id).oninput = $(id).onchange = est); est();
+  main.querySelectorAll('[data-ps]').forEach(b => b.onclick = guard(async () => {
+    const raw = main.querySelector(`[data-pu="${b.dataset.ps}"]`).value.trim();
+    const v = raw === '' ? null : Number(raw); if (raw !== '' && !(v >= 0)) return toast('단가를 숫자로 넣어 주세요');
+    await q(S.sb.from('price_book').update({ usd: v, updated_at: new Date().toISOString(), source: '대표 입력' }).eq('id', b.dataset.ps));
+    toast('단가를 저장했습니다'); go('costs');
+  }));
+  $('#pAdd').onclick = guard(async () => {
+    const provider = $('#pProv').value.trim(), model = $('#pModel').value.trim(); if (!provider || !model) return toast('회사와 모델을 넣어 주세요');
+    const usd = $('#pUsd').value.trim() === '' ? null : Number($('#pUsd').value);
+    await q(S.sb.from('price_book').insert({ provider, model, unit: $('#pUnit').value, usd, label: $('#pLabel').value.trim() || null, source: '대표 입력' }));
+    toast('단가를 추가했습니다'); go('costs');
+  });
+  $('#mAdd').onclick = guard(async () => {
+    const amt = Number($('#mAmt').value.replace(/,/g, '')); if (!(amt > 0)) return toast('금액을 넣어 주세요');
+    const usd = $('#mCur').value === 'usd' ? amt : null, krw = $('#mCur').value === 'krw' ? amt : null;
+    const out = $('#mOut').value, note = $('#mNote').value.trim() || null;
+    await q(S.sb.from('cost_events').insert({ episode_id: $('#mEp').value || null, cut_id: $('#mCut').value.trim() || null, stage: $('#mStage').value,
+      outcome: out, usd, krw, source: 'manual', note: out === 'failed' ? null : note, failure_reason: out === 'failed' ? note : null }));
+    toast('비용을 기록했습니다'); go('costs');
+  });
 }
 
 // ------------------------------------------------------------------
