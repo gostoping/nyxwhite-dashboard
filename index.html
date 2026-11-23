@@ -1254,7 +1254,7 @@ async function viewGuide(main) {
       <dt>홈</dt><dd>에이전트가 켜져 있는지, 진행 중인 작업, 검토할 일, 최근 활동</dd>
       <dt>대본</dt><dd>시리즈 → 화 → 버전. 대본 넣기, 확정, 버전 비교, 씬별 변경점, 화·씬별 대표 연출 메모</dd>
       <dt>바이블</dt><dd>캐릭터·장소·소품·톤·목소리 기준 원본과 화별 연속성 기록. 수정안 적용·반려, 이전 버전으로 되돌리기</dd>
-      <dt>직원</dt><dd>5명의 현재 지침과 이력. 수정안 적용·반려, 새 지침 작성</dd>
+      <dt>직원</dt><dd>직원별 현재 지침과 이력, 수정안 적용·반려, 새 지침 작성. 감독 노하우(교훈) 기록: 지적이 쌓여 감독이 같은 실수를 반복하지 않게 합니다</dd>
       <dt>에이전트</dt><dd>각 컴퓨터 프로그램의 설치·통제. 온라인 여부, 연결 시험, 일시정지, 재시작, 업데이트</dd>
       <dt>비용</dt><dd>모든 지출 장부, 순수 제작비와 실패(누수) 비용 구분, 화별 견적서와 배포 시점 최종 견적서, 매출 대비 비용, 만들기 전 사전 견적, 단가표</dd>
       <dt>지시</dt><dd>대표님 지시 보내기. 지시마다 보낸 사람 → 받는 직원, 접수 → 배정 → 처리 중 → 완료 단계와 결과가 표시되고, 단계가 바뀔 때마다 종 모양 알림이 옵니다.</dd>
@@ -1526,6 +1526,7 @@ async function viewStaff(main) {
       <div class="row" style="margin-top:10px"><button class="btn primary small" data-act="${esc(g.id)}">적용</button>
       <button class="btn small" data-edit="${esc(g.id)}">고쳐서 적용</button>
       <button class="btn danger small" data-rej="${esc(g.id)}">반려</button></div></div>`; }).join('')}` : ''}
+  <div id="lessonBox"></div>
   ${staff.map(s => {
     const cur = all.find(g => g.staff_id === s.id && g.status === 'active');
     const hist = all.filter(g => g.staff_id === s.id && g.status !== 'proposed');
@@ -1541,6 +1542,7 @@ async function viewStaff(main) {
     </div>`; }).join('')}
   <div id="editor"></div>`;
 
+  renderLessons().catch(e => { const b = $('#lessonBox'); if (b) b.innerHTML = `<div class="card"><b>감독 노하우</b><div class="msg err">${esc(errText(e))}</div></div>`; });
   main.querySelectorAll('[data-act]').forEach(b => b.onclick = guard(async () => {
     if (!confirm('이 지침을 적용할까요? 현재 지침은 이전 버전으로 보관됩니다.')) return;
     await q(S.sb.rpc('activate_guideline', { p_id: b.dataset.act })); toast('적용했습니다'); go('staff');
@@ -1793,6 +1795,58 @@ async function renderContinuity(entries, episodes) {
     if (!confirm('이 기록을 지울까요?')) return;
     await q(S.sb.from('continuity_logs').delete().eq('id', b.dataset.cdel)); redraw();
   }));
+}
+
+// 감독 노하우(교훈) 기록
+const LCAT = { face: '얼굴', costume: '의상', location: '장소', prop: '소품', continuity: '연속성', expression: '표정', emotion_tone: '감정·톤',
+  dialogue: '대사', camera: '카메라', motion: '움직임', prompt: '프롬프트', localization: '현지화', other: '기타' };
+const LST = { active: ['적용 중', 'good'], candidate: ['후보', 'warn'], retired: ['꺼짐', ''] };
+async function renderLessons() {
+  const box = $('#lessonBox'); if (!box) return;
+  const [lessons, series] = await Promise.all([
+    q(S.sb.from('director_lessons').select('*').order('hit_count', { ascending: false }).order('last_seen_at', { ascending: false }).limit(500)),
+    q(S.sb.from('series').select('id,title').order('created_at')),
+  ]);
+  S.lessonSt = S.lessonSt || 'active';
+  const cnt = k => lessons.filter(l => l.status === k).length;
+  const shown = lessons.filter(l => S.lessonSt === 'all' || l.status === S.lessonSt);
+  const sname = id => id ? (series.find(x => x.id === id)?.title || '시리즈') : '모든 시리즈 공통';
+  box.innerHTML = `<div class="card" style="border-color:var(--accent)">
+    <div class="row"><b>감독 노하우 (교훈 기록)</b>
+      <span class="quiet">감수자·평가자·대표에게 받은 지적이 쌓이고, 감독은 작업 전에 '적용 중' 교훈을 먼저 읽고 적용합니다.</span></div>
+    <p class="quiet" style="margin:6px 0">같은 문제가 두 번 나오면 자동으로 '적용 중'이 되고, 3번 넘게 반복되면 평가자가 지침 수정안으로 올립니다. 지침과 바이블이 항상 우선합니다.</p>
+    <div class="row" style="margin:8px 0">${[['active', `적용 중 ${cnt('active')}`], ['candidate', `후보 ${cnt('candidate')}`], ['retired', `꺼짐 ${cnt('retired')}`], ['all', `전체 ${lessons.length}`]].map(([k, l]) =>
+      `<button class="btn small ${S.lessonSt === k ? 'primary' : ''}" data-lst="${k}">${l}</button>`).join('')}</div>
+    ${shown.length ? `<table><tr><th>분류</th><th>앞으로의 규칙</th><th class="hide-m">근거</th><th style="text-align:right">반복</th><th></th></tr>${shown.map(l => `<tr>
+      <td style="white-space:nowrap">${pill(LCAT[l.category] || l.category)}<br><span class="quiet">${esc(sname(l.series_id))}</span></td>
+      <td><b>${esc(l.rule)}</b><div class="quiet" style="margin-top:2px">문제: ${esc(l.problem)}</div>
+        ${l.bad_example || l.good_example ? `<div class="quiet" style="margin-top:2px">${l.bad_example ? '실패: ' + esc(l.bad_example) : ''}${l.good_example ? ' → 통과: ' + esc(l.good_example) : ''}</div>` : ''}</td>
+      <td class="quiet hide-m">${esc((l.sources || []).join(', '))}${(l.cut_refs || []).length ? '<br>' + esc(l.cut_refs.slice(0, 4).join(', ')) + (l.cut_refs.length > 4 ? ` 외 ${l.cut_refs.length - 4}` : '') : ''}</td>
+      <td style="text-align:right;white-space:nowrap">${l.hit_count}회${l.applied_ok ? `<br><span class="quiet">효과 ${l.applied_ok}회</span>` : ''}</td>
+      <td style="text-align:right;white-space:nowrap">${pill(LST[l.status][0], LST[l.status][1])}<br>
+        ${l.status !== 'active' ? `<button class="btn small" data-lset="active" data-lid="${esc(l.id)}">적용</button>` : ''}
+        ${l.status !== 'retired' ? `<button class="btn small" data-lset="retired" data-lid="${esc(l.id)}">끄기</button>` : ''}</td></tr>`).join('')}</table>`
+      : '<p class="quiet">아직 교훈이 없습니다. 제작이 시작되면 평가자가 컷마다 정리해 쌓습니다. 대표님이 직접 가르칠 내용도 아래에 넣을 수 있습니다.</p>'}
+    <div class="row" style="margin-top:12px;align-items:flex-end">
+      <div style="width:130px"><label>분류</label><select id="lCat">${Object.entries(LCAT).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></div>
+      <div style="width:180px"><label>범위</label><select id="lSer"><option value="">모든 시리즈 공통</option>${series.map(x => `<option value="${esc(x.id)}">${esc(x.title)}</option>`).join('')}</select></div>
+      <div style="flex:1;min-width:200px"><label>문제 (무엇이 아쉬웠나)</label><input id="lProb" placeholder="예: 대사할 때 표정이 거의 변하지 않음"></div>
+    </div>
+    <label>앞으로의 규칙 (감독이 그대로 따를 한 문장)</label><input id="lRule" placeholder="예: 대사 컷은 2초마다 눈썹·입꼬리 변화를 표정 타임라인에 적는다">
+    <div class="row" style="margin-top:8px"><button class="btn primary" id="lAdd">대표 가르침으로 추가 (바로 적용)</button></div>
+  </div>`;
+  box.querySelectorAll('[data-lst]').forEach(b => b.onclick = () => { S.lessonSt = b.dataset.lst; renderLessons(); });
+  box.querySelectorAll('[data-lset]').forEach(b => b.onclick = guard(async () => {
+    await q(S.sb.from('director_lessons').update({ status: b.dataset.lset, updated_at: new Date().toISOString() }).eq('id', b.dataset.lid));
+    toast(b.dataset.lset === 'active' ? '적용 중으로 바꿨습니다' : '껐습니다. 감독이 더 이상 참고하지 않습니다'); renderLessons();
+  }));
+  $('#lAdd').onclick = guard(async () => {
+    const problem = $('#lProb').value.trim(), rule = $('#lRule').value.trim();
+    if (!problem || !rule) return toast('문제와 규칙을 모두 적어 주세요');
+    await q(S.sb.from('director_lessons').insert({ series_id: $('#lSer').value || null, category: $('#lCat').value, problem, rule,
+      fingerprint: 'owner:' + Date.now().toString(36), sources: ['대표'], status: 'active' }));
+    toast('감독 노하우에 추가했습니다'); renderLessons();
+  });
 }
 
 // ------------------------------------------------------------------
