@@ -9,7 +9,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 
 import json
 import os
@@ -271,13 +271,48 @@ def http_json(url, headers, method="GET", body=None, timeout=60):
 
 
 def higgsfield_cred(k):
-    """Higgsfield 인증 값 'ID:Secret'. 한 칸에 'ID:Secret'을 통째로 넣은 경우도 받아 준다."""
-    hid = (k.get("higgsfield_key_id") or "").strip().strip('"\'')
-    hsec = (k.get("higgsfield_key_secret") or "").strip().strip('"\'')
+    """Higgsfield 인증 값 (ID, Secret). 한 칸에 'ID:Secret'을 통째로 넣은 경우, 앞에 'Key '가 붙은 경우도 받아 준다."""
+    def clean(v):
+        v = (v or "").strip().strip('"\'').strip()
+        if v.lower().startswith("key "):
+            v = v[4:].strip()
+        return v
+    hid, hsec = clean(k.get("higgsfield_key_id")), clean(k.get("higgsfield_key_secret"))
     for v in (hid, hsec):
         if ":" in v and len(v.split(":", 1)[1]) > 8:
-            return v
-    return f"{hid}:{hsec}" if hid and hsec else ""
+            i, s2 = v.split(":", 1)
+            return i.strip(), s2.strip()
+    return (hid, hsec) if hid and hsec else None
+
+
+HF_BASES = ["https://platform.higgsfield.ai", "https://api.higgsfield.ai"]
+
+
+def higgsfield_probe(cred):
+    """주소 2곳 x 인증 방식 2가지로 인증만 확인한다(없는 요청 번호의 상태 조회, 비용 없음).
+    통과한 조합을 hf_auth.json에 기억해 이후 영상 생성에 쓴다."""
+    hid, hsec = cred
+    schemes = [("key", {"Authorization": f"Key {hid}:{hsec}"}),
+               ("legacy", {"hf-api-key": hid, "hf-secret": hsec})]
+    tried = []
+    for base in HF_BASES:
+        for name, h in schemes:
+            try:
+                code, data = http_json(f"{base}/requests/00000000-0000-0000-0000-000000000000/status",
+                                       {**h, "Accept": "application/json"}, timeout=20)
+            except Exception as e:
+                code, data = 0, {"detail": type(e).__name__}
+            if code not in (401, 403) and code:
+                try:
+                    open(os.path.join(HOME, "hf_auth.json"), "w").write(json.dumps({"base": base, "scheme": name}))
+                except Exception:
+                    pass
+                return True, f"{base.split('//')[1]} · {name} · 응답 {code}"
+            hint = ""
+            if isinstance(data, dict):
+                hint = str(data.get("detail") or data.get("message") or data.get("error") or data.get("raw") or "")[:80]
+            tried.append(f"{base.split('//')[1]}/{name}={code}{(' ' + hint) if hint else ''}")
+    return False, "; ".join(tried)
 
 
 def test_keys():
@@ -300,16 +335,9 @@ def test_keys():
     if not cred:
         out.append("Higgsfield: 키 미등록")
     else:
-        # 없는 요청 번호의 상태를 물어 인증만 확인한다: 401/403이면 키가 틀림, 그 밖이면 키는 받아들여짐
-        code, data = http_json("https://api.higgsfield.ai/requests/00000000-0000-0000-0000-000000000000/status",
-                               {"Authorization": f"Key {cred}", "Accept": "application/json"})
-        if code in (401, 403):
-            hint = ""
-            if isinstance(data, dict):
-                hint = str(data.get("detail") or data.get("message") or data.get("error") or data.get("raw") or "")[:120]
-            out.append(f"Higgsfield: 키가 맞지 않음 ({code}) {hint}".strip())
-        else:
-            out.append(f"Higgsfield: 인증 통과 (응답 {code})")
+        ok, detail = higgsfield_probe(cred)
+        out.append(f"Higgsfield: 인증 통과 ({detail})" if ok
+                   else f"Higgsfield: 키가 맞지 않음 (401) [ID {len(cred[0])}자 · Secret {len(cred[1])}자] {detail}")
     return " / ".join(out), all("실패" not in o and "맞지 않음" not in o and "미등록" not in o for o in out)
 
 
