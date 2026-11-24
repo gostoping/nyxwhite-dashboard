@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.16.4"
+VERSION = "1.17.0"
 
 import base64
 import glob
@@ -478,24 +478,34 @@ class _Current(threading.local):
 CURRENT = _Current()
 # 짧은 바이블 일은 긴 일(컷 설계·영상)과 따로 줄을 서서 바로 처리한다(컷 설계 중에도 고쳐쓰기 반영이 기다리지 않게)
 QUICK_KINDS = ["bible_prompt", "coord_review", "photo_describe"]
-QUICK = {"busy": None}
+# 바이블 사진(Higgsfield 후보·얼굴 학습)도 영상 생성·컷 설계 뒤에 줄 서지 않게 따로
+PHOTO_KINDS = ["photo_design", "photo_set"]
+QUICK = {"busy": None, "photo": None}
 
 
-def quick_lane():
+def lane(kinds, slot, label):
     while True:
         try:
             if not QUICK.get("paused"):
-                tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=QUICK_KINDS, p_platform=PLATFORM)
+                tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=kinds, p_platform=PLATFORM)
                 if tk and tk.get("id"):
-                    QUICK["busy"] = tk["kind"]
+                    QUICK[slot] = tk["kind"]
                     try:
                         run_task(tk)
                     finally:
-                        QUICK["busy"] = None
+                        QUICK[slot] = None
                     continue
         except Exception as e:
-            log(f"짧은 일 줄 오류: {e}")
+            log(f"{label} 오류: {e}")
         time.sleep(5)
+
+
+def quick_lane():
+    lane(QUICK_KINDS, "busy", "짧은 일 줄")
+
+
+def lanes_busy():
+    return QUICK.get("busy") or QUICK.get("photo")
 
 
 def progress(text):
@@ -1722,6 +1732,8 @@ def hf_submit_wait(path, body, what="사진", timeout=900):
             raise RuntimeError(f"{what} 생성 {s}")
         if s == "completed":
             return st
+        el = int(time.time() - (deadline - timeout))
+        progress(f"Higgsfield {what}: {'차례 기다리는 중(Higgsfield 대기열)' if s in ('queued', 'pending', None) else '만드는 중'} · {el // 60}분 {el % 60}초 지남")
     raise RuntimeError(f"{what} 생성 시간 초과")
 
 
@@ -2488,6 +2500,11 @@ def t_photo_design(t):
         raise Retry(45, "바이블 영어 프롬프트 반영·감수가 먼저 끝나야 해서 기다리는 중(끝나면 바로 만듭니다)")
     if d.get("use_bible") and d.get("prompt_en"):   # 대표가 묘사 칸을 손대지 않았으면 만들 때의 최신 영어 프롬프트
         d["prompt"] = d["prompt_en"]
+    lr = d.get("last_review") or {}   # 지난 후보에서 코디네이터가 찾은 문제를 이번 프롬프트에 반영
+    if d.get("use_bible") and lr.get("prompt_improved") and not lr.get("bible_fixed"):
+        d["prompt"] = lr["prompt_improved"]
+    if lr.get("avoid"):
+        d["prompt"] = (d.get("prompt") or "").rstrip(". ") + ". Avoid: " + ", ".join(lr["avoid"]) + "."
     if re.search(r"[가-힣]", d.get("prompt") or ""):
         # 한글 묘사는 작가실이 영어 프롬프트로 옮긴 뒤에 만든다(사진 모델은 영어가 정확)
         if d.get("prompt_en"):
@@ -3085,7 +3102,11 @@ def design_check(did):
 2) 사진 안에 글자가 찍혀 있지 않은가 — 이름표·사원증·명찰·자막·간판·워터마크·로고(예: '김도연' 같은 이름). 하나라도 있으면 문제
 3) {'후보끼리 같은 사람으로 쓸 수 있는가(세트면 모두 같은 사람인가), ' if cat == 'character' else ''}실사 사진인가(그림·3D 아님)
 match: "ok"(그대로 써도 됨) | "issue"(문제 있음). issues는 한국어로 짧게, 글자가 보이면 그 글자를 text에.
-답 형식: <json>{{"images": [{{"no": 1, "match": "ok", "issues": [], "text": ""}}], "best": [1], "summary": "한국어 한 줄(몇 장이 쓸 만한지)"}}</json>"""
+그리고 다음 생성이 더 나아지게: 문제의 원인이 프롬프트에 있으면(모호함·빠진 특징·글자를 부르는 표현: 사원증·명찰·유니폼 로고 등) prompt_improved에 고친 영어 프롬프트 전체를,
+avoid에 생성 모델에 넣을 금지 사항(영어 짧은 구, 예: "no ID badge", "no lanyard", "not older than 25")을 준다.
+문제가 바이블 묘사 자체와 다르게 나온 탓이 아니라 프롬프트가 부족한 탓이면 fix_bible_prompt를 true로.
+답 형식: <json>{{"images": [{{"no": 1, "match": "ok", "issues": [], "text": ""}}], "best": [1], "summary": "한국어 한 줄(몇 장이 쓸 만한지)",
+"prompt_improved": "", "avoid": [], "fix_bible_prompt": false, "improve_note": "무엇을 고쳤는지 한국어 한 줄"}}</json>"""
     progress(f"코디네이터가 {name} 사진 {len(items)}장을 프롬프트와 비교하는 중")
     text, _ = claude("claude-sonnet-5-5", system, [{"type": "text", "text": f"항목: {name} ({cat})\n[프롬프트]\n{prompt}"}] + blocks,
                      max_tokens=2500, stage="other", note=f"코디네이터 사진 확인: {name}")
@@ -3099,10 +3120,20 @@ match: "ok"(그대로 써도 됨) | "issue"(문제 있음). issues는 한국어�
         out.append({"path": x["path"], "ok": v.get("match") == "ok", "issues": [str(s)[:120] for s in (v.get("issues") or [])][:4],
                     "text": str(v.get("text") or "")[:60]})
     bad = sum(1 for x in out if not x["ok"])
+    improved = clean_en(json.dumps({"prompt_en": r.get("prompt_improved") or ""})) if bad else ""
+    avoid = [str(x)[:60] for x in (r.get("avoid") or []) if re.match(r"^[ -~]+$", str(x))][:8] if bad else []
+    bible_fixed = False
+    if improved and r.get("fix_bible_prompt") and d.get("cur_version_id"):   # 프롬프트가 부족했던 것이면 바이블 영어 프롬프트도 고친다(기록 남김)
+        rpc("agent_bible_set_prompt", p_token=TOKEN, p_version=d["cur_version_id"], p_prompt=improved)
+        rpc("agent_bible_review_save", p_token=TOKEN, p={"series_id": d.get("series_id"), "entry_id": d.get("entry_id"), "version_id": d["cur_version_id"],
+            "verdict": "fixed", "checks": [{"item": "사진 후보 확인에서 프롬프트 부족", "status": "fixed", "where": "prompt", "note": str(r.get("improve_note") or "")[:200]}],
+            "prompt_before": prompt[:2000], "prompt_after": improved, "summary": f"사진 후보 {bad}/{len(out)}장 문제 → 영어 프롬프트 보정"})
+        bible_fixed = True
     rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"review": {"items": out, "best": r.get("best") or [], "summary": str(r.get("summary") or "")[:300],
                                                                          "prompt": prompt[:600], "checked_at": datetime.now().isoformat(timespec="seconds"),
-                                                                         "stage": d.get("status")}})
-    return f"{name} 사진 {len(out)}장 확인: 문제 {bad}장"
+                                                                         "stage": d.get("status"), "prompt_improved": improved or None, "avoid": avoid,
+                                                                         "improve_note": str(r.get("improve_note") or "")[:200], "bible_fixed": bible_fixed}})
+    return f"{name} 사진 {len(out)}장 확인: 문제 {bad}장" + (" · 다음 후보용 프롬프트 개선" if improved or avoid else "")
 
 
 @task("coord_review")
@@ -3827,14 +3858,15 @@ def main():
         try:
             info["latest_seen"] = LATEST_SEEN
             hb = rpc("agent_heartbeat", p_token=TOKEN, p_platform=PLATFORM, p_version=VERSION,
-                     p_state="busy" if QUICK.get("busy") else ("error" if last_error else ("paused" if paused else "idle")),
-                     p_current_job=QUICK.get("busy"), p_last_error=last_error, p_info=info)
+                     p_state="busy" if lanes_busy() else ("error" if last_error else ("paused" if paused else "idle")),
+                     p_current_job=lanes_busy(), p_last_error=last_error, p_info=info)
             DEVICE_ID, paused = hb.get("device_id"), bool(hb.get("paused"))
             QUICK["paused"] = paused
             if not QUICK.get("started"):   # 첫 연결이 된 뒤에 짧은 일 줄을 연다
                 QUICK["started"] = True
                 threading.Thread(target=quick_lane, daemon=True).start()
-                log("짧은 일 줄(바이블 반영·코디네이터 감수) 시작")
+                threading.Thread(target=lane, args=(PHOTO_KINDS, "photo", "사진 줄"), daemon=True).start()
+                log("짧은 일 줄(바이블 반영·코디네이터 감수)·사진 줄(Higgsfield 후보·얼굴 학습) 시작")
             last_error = None
             if os.path.exists(PENDING):  # 새 버전이 정상적으로 연결됨 → 업데이트 확정
                 os.remove(PENDING)
@@ -3842,7 +3874,7 @@ def main():
             for c in hb.get("commands") or []:
                 handle_command(c)
             if not paused:
-                tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=sorted(TASKS), p_platform=PLATFORM)
+                tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=sorted(k for k in TASKS if k not in PHOTO_KINDS), p_platform=PLATFORM)
                 if tk and tk.get("id"):
                     busy = True
                     with Beat(info, tk) as beat:
@@ -3856,8 +3888,8 @@ def main():
                         busy = True
                         run_job(j)
         except Restart:
-            for _ in range(60):   # 짧은 일 줄이 하던 일을 마칠 때까지 잠깐(최대 2분) 기다린다
-                if not QUICK.get("busy"):
+            for _ in range(300):   # 다른 줄이 하던 일을 마칠 때까지 기다린다(최대 10분)
+                if not lanes_busy():
                     break
                 time.sleep(2)
             log("재시작")
@@ -3869,15 +3901,20 @@ def main():
                 log("토큰이 맞지 않습니다. 대시보드에서 토큰을 다시 발급하고 설치 명령을 다시 실행하세요.")
                 time.sleep(300)
                 continue
-        if not busy and not QUICK.get("busy"):
-            try:
-                if check_update():
-                    log("새 버전으로 재시작")
-                    sys.exit(0)
-            except SystemExit:
-                raise
-            except Exception as e:
-                log(f"업데이트 확인 실패(다음에 다시 시도): {e}")
+        # 업데이트 확인은 일이 계속 있어도 일 사이마다(10분 간격) 한다 — 바쁘면 영영 옛 버전에 머물던 문제
+        try:
+            if check_update():
+                for _ in range(300):
+                    if not lanes_busy():
+                        break
+                    time.sleep(2)
+                log("새 버전으로 재시작")
+                sys.exit(0)
+        except SystemExit:
+            raise
+        except Exception as e:
+            log(f"업데이트 확인 실패(다음에 다시 시도): {e}")
+        if not busy:
             time.sleep(BEAT_SECONDS)
 
 

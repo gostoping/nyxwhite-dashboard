@@ -212,7 +212,7 @@
   .pdimg img, .thumbs img, .bimgs img, .tmpimg img, .kf img { cursor: zoom-in; }
   .rvbox { border: 1px dashed var(--line); border-radius: 8px; padding: 8px 10px; margin-top: 8px; font-size: 13px; background: var(--panel); }
   .rvchk { margin: 4px 0 2px; padding-left: 4px; list-style: none; } .rvchk li { margin: 2px 0; } .rvchk li.missing, .rvchk li.conflict { color: var(--bad); }
-  .pdimg { position: relative; } .pdrv { position: absolute; left: 4px; top: 4px; font-size: 11px; padding: 1px 6px; border-radius: 6px; color: #fff; background: rgba(47,133,90,.9); max-width: 90%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .pdimg { position: relative; } .pdrv { pointer-events: none; position: absolute; left: 4px; top: 4px; font-size: 11px; padding: 1px 6px; border-radius: 6px; color: #fff; background: rgba(47,133,90,.9); max-width: 90%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .pdrv.bad { background: rgba(197,48,48,.92); } .pdimg.rvbad img { outline: 3px solid var(--bad); outline-offset: -3px; }
   .folded { max-height: var(--fold-h, 520px); overflow: hidden; position: relative; padding-bottom: 34px !important; }
   .folded::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 70px; background: linear-gradient(transparent, var(--panel) 75%); pointer-events: none; }
@@ -333,7 +333,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.16.4"
+VERSION = "1.17.0"
 
 import base64
 import glob
@@ -801,24 +801,34 @@ class _Current(threading.local):
 CURRENT = _Current()
 # 짧은 바이블 일은 긴 일(컷 설계·영상)과 따로 줄을 서서 바로 처리한다(컷 설계 중에도 고쳐쓰기 반영이 기다리지 않게)
 QUICK_KINDS = ["bible_prompt", "coord_review", "photo_describe"]
-QUICK = {"busy": None}
+# 바이블 사진(Higgsfield 후보·얼굴 학습)도 영상 생성·컷 설계 뒤에 줄 서지 않게 따로
+PHOTO_KINDS = ["photo_design", "photo_set"]
+QUICK = {"busy": None, "photo": None}
 
 
-def quick_lane():
+def lane(kinds, slot, label):
     while True:
         try:
             if not QUICK.get("paused"):
-                tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=QUICK_KINDS, p_platform=PLATFORM)
+                tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=kinds, p_platform=PLATFORM)
                 if tk and tk.get("id"):
-                    QUICK["busy"] = tk["kind"]
+                    QUICK[slot] = tk["kind"]
                     try:
                         run_task(tk)
                     finally:
-                        QUICK["busy"] = None
+                        QUICK[slot] = None
                     continue
         except Exception as e:
-            log(f"짧은 일 줄 오류: {e}")
+            log(f"{label} 오류: {e}")
         time.sleep(5)
+
+
+def quick_lane():
+    lane(QUICK_KINDS, "busy", "짧은 일 줄")
+
+
+def lanes_busy():
+    return QUICK.get("busy") or QUICK.get("photo")
 
 
 def progress(text):
@@ -2045,6 +2055,8 @@ def hf_submit_wait(path, body, what="사진", timeout=900):
             raise RuntimeError(f"{what} 생성 {s}")
         if s == "completed":
             return st
+        el = int(time.time() - (deadline - timeout))
+        progress(f"Higgsfield {what}: {'차례 기다리는 중(Higgsfield 대기열)' if s in ('queued', 'pending', None) else '만드는 중'} · {el // 60}분 {el % 60}초 지남")
     raise RuntimeError(f"{what} 생성 시간 초과")
 
 
@@ -2811,6 +2823,11 @@ def t_photo_design(t):
         raise Retry(45, "바이블 영어 프롬프트 반영·감수가 먼저 끝나야 해서 기다리는 중(끝나면 바로 만듭니다)")
     if d.get("use_bible") and d.get("prompt_en"):   # 대표가 묘사 칸을 손대지 않았으면 만들 때의 최신 영어 프롬프트
         d["prompt"] = d["prompt_en"]
+    lr = d.get("last_review") or {}   # 지난 후보에서 코디네이터가 찾은 문제를 이번 프롬프트에 반영
+    if d.get("use_bible") and lr.get("prompt_improved") and not lr.get("bible_fixed"):
+        d["prompt"] = lr["prompt_improved"]
+    if lr.get("avoid"):
+        d["prompt"] = (d.get("prompt") or "").rstrip(". ") + ". Avoid: " + ", ".join(lr["avoid"]) + "."
     if re.search(r"[가-힣]", d.get("prompt") or ""):
         # 한글 묘사는 작가실이 영어 프롬프트로 옮긴 뒤에 만든다(사진 모델은 영어가 정확)
         if d.get("prompt_en"):
@@ -3408,7 +3425,11 @@ def design_check(did):
 2) 사진 안에 글자가 찍혀 있지 않은가 — 이름표·사원증·명찰·자막·간판·워터마크·로고(예: '김도연' 같은 이름). 하나라도 있으면 문제
 3) {'후보끼리 같은 사람으로 쓸 수 있는가(세트면 모두 같은 사람인가), ' if cat == 'character' else ''}실사 사진인가(그림·3D 아님)
 match: "ok"(그대로 써도 됨) | "issue"(문제 있음). issues는 한국어로 짧게, 글자가 보이면 그 글자를 text에.
-답 형식: <json>{{"images": [{{"no": 1, "match": "ok", "issues": [], "text": ""}}], "best": [1], "summary": "한국어 한 줄(몇 장이 쓸 만한지)"}}</json>"""
+그리고 다음 생성이 더 나아지게: 문제의 원인이 프롬프트에 있으면(모호함·빠진 특징·글자를 부르는 표현: 사원증·명찰·유니폼 로고 등) prompt_improved에 고친 영어 프롬프트 전체를,
+avoid에 생성 모델에 넣을 금지 사항(영어 짧은 구, 예: "no ID badge", "no lanyard", "not older than 25")을 준다.
+문제가 바이블 묘사 자체와 다르게 나온 탓이 아니라 프롬프트가 부족한 탓이면 fix_bible_prompt를 true로.
+답 형식: <json>{{"images": [{{"no": 1, "match": "ok", "issues": [], "text": ""}}], "best": [1], "summary": "한국어 한 줄(몇 장이 쓸 만한지)",
+"prompt_improved": "", "avoid": [], "fix_bible_prompt": false, "improve_note": "무엇을 고쳤는지 한국어 한 줄"}}</json>"""
     progress(f"코디네이터가 {name} 사진 {len(items)}장을 프롬프트와 비교하는 중")
     text, _ = claude("claude-sonnet-5-5", system, [{"type": "text", "text": f"항목: {name} ({cat})\n[프롬프트]\n{prompt}"}] + blocks,
                      max_tokens=2500, stage="other", note=f"코디네이터 사진 확인: {name}")
@@ -3422,10 +3443,20 @@ match: "ok"(그대로 써도 됨) | "issue"(문제 있음). issues는 한국어�
         out.append({"path": x["path"], "ok": v.get("match") == "ok", "issues": [str(s)[:120] for s in (v.get("issues") or [])][:4],
                     "text": str(v.get("text") or "")[:60]})
     bad = sum(1 for x in out if not x["ok"])
+    improved = clean_en(json.dumps({"prompt_en": r.get("prompt_improved") or ""})) if bad else ""
+    avoid = [str(x)[:60] for x in (r.get("avoid") or []) if re.match(r"^[ -~]+$", str(x))][:8] if bad else []
+    bible_fixed = False
+    if improved and r.get("fix_bible_prompt") and d.get("cur_version_id"):   # 프롬프트가 부족했던 것이면 바이블 영어 프롬프트도 고친다(기록 남김)
+        rpc("agent_bible_set_prompt", p_token=TOKEN, p_version=d["cur_version_id"], p_prompt=improved)
+        rpc("agent_bible_review_save", p_token=TOKEN, p={"series_id": d.get("series_id"), "entry_id": d.get("entry_id"), "version_id": d["cur_version_id"],
+            "verdict": "fixed", "checks": [{"item": "사진 후보 확인에서 프롬프트 부족", "status": "fixed", "where": "prompt", "note": str(r.get("improve_note") or "")[:200]}],
+            "prompt_before": prompt[:2000], "prompt_after": improved, "summary": f"사진 후보 {bad}/{len(out)}장 문제 → 영어 프롬프트 보정"})
+        bible_fixed = True
     rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"review": {"items": out, "best": r.get("best") or [], "summary": str(r.get("summary") or "")[:300],
                                                                          "prompt": prompt[:600], "checked_at": datetime.now().isoformat(timespec="seconds"),
-                                                                         "stage": d.get("status")}})
-    return f"{name} 사진 {len(out)}장 확인: 문제 {bad}장"
+                                                                         "stage": d.get("status"), "prompt_improved": improved or None, "avoid": avoid,
+                                                                         "improve_note": str(r.get("improve_note") or "")[:200], "bible_fixed": bible_fixed}})
+    return f"{name} 사진 {len(out)}장 확인: 문제 {bad}장" + (" · 다음 후보용 프롬프트 개선" if improved or avoid else "")
 
 
 @task("coord_review")
@@ -4150,14 +4181,15 @@ def main():
         try:
             info["latest_seen"] = LATEST_SEEN
             hb = rpc("agent_heartbeat", p_token=TOKEN, p_platform=PLATFORM, p_version=VERSION,
-                     p_state="busy" if QUICK.get("busy") else ("error" if last_error else ("paused" if paused else "idle")),
-                     p_current_job=QUICK.get("busy"), p_last_error=last_error, p_info=info)
+                     p_state="busy" if lanes_busy() else ("error" if last_error else ("paused" if paused else "idle")),
+                     p_current_job=lanes_busy(), p_last_error=last_error, p_info=info)
             DEVICE_ID, paused = hb.get("device_id"), bool(hb.get("paused"))
             QUICK["paused"] = paused
             if not QUICK.get("started"):   # 첫 연결이 된 뒤에 짧은 일 줄을 연다
                 QUICK["started"] = True
                 threading.Thread(target=quick_lane, daemon=True).start()
-                log("짧은 일 줄(바이블 반영·코디네이터 감수) 시작")
+                threading.Thread(target=lane, args=(PHOTO_KINDS, "photo", "사진 줄"), daemon=True).start()
+                log("짧은 일 줄(바이블 반영·코디네이터 감수)·사진 줄(Higgsfield 후보·얼굴 학습) 시작")
             last_error = None
             if os.path.exists(PENDING):  # 새 버전이 정상적으로 연결됨 → 업데이트 확정
                 os.remove(PENDING)
@@ -4165,7 +4197,7 @@ def main():
             for c in hb.get("commands") or []:
                 handle_command(c)
             if not paused:
-                tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=sorted(TASKS), p_platform=PLATFORM)
+                tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=sorted(k for k in TASKS if k not in PHOTO_KINDS), p_platform=PLATFORM)
                 if tk and tk.get("id"):
                     busy = True
                     with Beat(info, tk) as beat:
@@ -4179,8 +4211,8 @@ def main():
                         busy = True
                         run_job(j)
         except Restart:
-            for _ in range(60):   # 짧은 일 줄이 하던 일을 마칠 때까지 잠깐(최대 2분) 기다린다
-                if not QUICK.get("busy"):
+            for _ in range(300):   # 다른 줄이 하던 일을 마칠 때까지 기다린다(최대 10분)
+                if not lanes_busy():
                     break
                 time.sleep(2)
             log("재시작")
@@ -4192,15 +4224,20 @@ def main():
                 log("토큰이 맞지 않습니다. 대시보드에서 토큰을 다시 발급하고 설치 명령을 다시 실행하세요.")
                 time.sleep(300)
                 continue
-        if not busy and not QUICK.get("busy"):
-            try:
-                if check_update():
-                    log("새 버전으로 재시작")
-                    sys.exit(0)
-            except SystemExit:
-                raise
-            except Exception as e:
-                log(f"업데이트 확인 실패(다음에 다시 시도): {e}")
+        # 업데이트 확인은 일이 계속 있어도 일 사이마다(10분 간격) 한다 — 바쁘면 영영 옛 버전에 머물던 문제
+        try:
+            if check_update():
+                for _ in range(300):
+                    if not lanes_busy():
+                        break
+                    time.sleep(2)
+                log("새 버전으로 재시작")
+                sys.exit(0)
+        except SystemExit:
+            raise
+        except Exception as e:
+            log(f"업데이트 확인 실패(다음에 다시 시도): {e}")
+        if not busy:
             time.sleep(BEAT_SECONDS)
 
 
@@ -5755,18 +5792,131 @@ document.addEventListener('click', ev => {
   if (f) { ev.preventDefault(); document.querySelector(`[data-bedit="${f.dataset.bfixreq}"]`)?.click(); }
 });
 // 바이블 '지금 하는 일' 목록(예상 소요 시간). live=true면 끝난 일은 '끝남'으로 바꾸고 새로 보기 버튼
+const DASH_AGENT_VER = (document.getElementById('f-agent.py')?.textContent.match(/VERSION = "([\d.]+)"/) || [])[1] || '';
+const verLt = (a, b) => { const x = String(a || '0').split('.').map(Number), y = String(b || '0').split('.').map(Number);
+  for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); } return false; };
+// 멈춘 것 같은 일의 이유: 에이전트가 꺼짐 / 옛 버전이라 이 일을 모름 / 예상보다 훨씬 오래
+function stuckWhy(t) {
+  const on = (S.agentsNow || []).filter(a => a.last_seen_at && Date.now() - new Date(a.last_seen_at) < 120e3 && a.state !== 'removed');
+  if (!on.length) return { why: '켜져 있는 에이전트가 없습니다(컴퓨터 꺼짐·잠자기·인터넷 끊김)', act: 'agents' };
+  if (t.status === 'queued' && !on.some(a => (a.info?.tasks || []).includes(t.kind)))
+    return { why: `켜져 있는 에이전트(${on.map(a => `${a.devices?.name || '?'} v${a.version || '?'}`).join(', ')})가 옛 버전이라 이 일(${TASK_LABEL[t.kind] || t.kind})을 할 줄 모릅니다`, act: 'update' };
+  if (on.some(a => verLt(a.version, DASH_AGENT_VER)) && t.status === 'queued' && Date.now() - new Date(t.created_at) > 5 * 60e3)
+    return { why: `에이전트가 옛 버전(v${on.map(a => a.version).join(', ')} · 최신 v${DASH_AGENT_VER})입니다. 새 버전은 이 일을 따로 줄 세워 바로 합니다`, act: 'update' };
+  const e = (S.eta || {})[t.kind], d = ETA_DEFAULT[t.kind];
+  const hi = e ? e.p80 : d ? d[1] : 600;
+  if (t.status === 'running' && t.started_at && (Date.now() - new Date(t.started_at)) / 1000 > Math.max(hi * 2.5, 600))
+    return { why: `예상(${mins(hi)})보다 훨씬 오래 걸리고 있습니다(${mins((Date.now() - new Date(t.started_at)) / 1000)} 지남)`, act: 'retry' };
+  return null;
+}
 function liveList(live) {
   const list = S.bibleOpen || [];
   if (!list.length) return '';
   const done = list.filter(t => !['queued', 'running'].includes(t.status));
+  const stuck = list.filter(t => ['queued', 'running'].includes(t.status)).map(t => ({ t, s: stuckWhy(t) })).filter(x => x.s);
+  const why = stuck.length ? `<div class="msg warn" style="margin:6px 0 0"><b>멈춘 것 같은 이유:</b> ${esc(stuck[0].s.why)}
+    <div class="row" style="margin-top:6px">${stuck.some(x => x.s.act === 'update') ? '<button class="btn small primary" data-agupdate="1">에이전트 지금 업데이트</button>' : ''}
+    ${stuck.some(x => x.s.act === 'retry') ? `<button class="btn small" data-stuckretry="${esc(stuck.filter(x => x.s.act === 'retry').map(x => x.t.id).join(','))}">오래 걸리는 일 다시 맡기기</button>` : ''}
+    ${stuck.some(x => x.s.act === 'agents') ? '<button class="btn small" data-goagents="1">에이전트 탭 열기</button>' : ''}</div></div>` : '';
   return `<div style="margin-top:8px"><div class="row"><b style="font-size:13px">지금 하는 일 · 예상 소요 시간</b>
-    ${live && done.length ? `<button class="btn small primary" data-blrefresh="1" style="margin-left:auto">끝난 일 ${done.length}건 · 새로 보기</button>` : ''}</div>
+    ${live && done.length ? `<button class="btn small primary" data-blrefresh="1" style="margin-left:auto">끝난 일 ${done.length}건 · 새로 보기</button>` : ''}</div>${why}
     ${list.map(t => `<div class="row" style="gap:6px;margin-top:4px;font-size:13px">
     ${t.status === 'running' ? '<span class="spin"></span>' : ['queued'].includes(t.status) ? pill('대기') : pill(t.status === 'done' ? '끝남' : t.status === 'failed' ? '실패' : '취소', t.status === 'done' ? 'good' : 'bad')}
     <b>${esc(t.ent?.name || '시리즈')}</b><span>${esc(TASK_LABEL[t.kind] || t.kind)}${['photo_design', 'photo_set'].includes(t.kind) ? ' (Higgsfield)' : ''}</span>
     ${['queued', 'running'].includes(t.status) ? `<span class="quiet">⏱ ${esc(t.status === 'queued' && t.not_before && new Date(t.not_before) > Date.now() ? `${Math.ceil((new Date(t.not_before) - Date.now()) / 60000)}분 뒤 시작 · ` : '')}${esc(etaText(t.kind, t.started_at, t.status))}${t.status === 'running' && t.progress ? ' · ' + esc(t.progress) : ''}</span>` : ''}</div>`).join('')}</div>`;
 }
-document.addEventListener('click', ev => { if (ev.target.closest('[data-blrefresh]')) { ev.preventDefault(); go('bible'); } });
+document.addEventListener('click', ev => {
+  if (ev.target.closest('[data-blrefresh]')) { ev.preventDefault(); go('bible'); return; }
+  if (ev.target.closest('[data-goagents]')) { ev.preventDefault(); go('agents'); return; }
+  const up = ev.target.closest('[data-agupdate]');
+  if (up) { ev.preventDefault(); up.disabled = true;
+    const on = (S.agentsNow || []).filter(a => a.last_seen_at && Date.now() - new Date(a.last_seen_at) < 120e3);
+    q(S.sb.from('agent_commands').insert(on.map(a => ({ device_id: a.device_id, command: 'update' }))))
+      .then(() => toast('업데이트를 보냈습니다. 지금 하던 일이 끝나면 새 버전으로 다시 켜집니다(보통 몇 분)')).catch(e => toast('오류: ' + errText(e))); return; }
+  const sr = ev.target.closest('[data-stuckretry]');
+  if (sr) { ev.preventDefault(); sr.disabled = true;
+    const ids = sr.dataset.stuckretry.split(',');
+    q(S.sb.from('pipeline_tasks').select('*').in('id', ids)).then(ts => Promise.all(ts.map(retryTask)))
+      .then(() => { toast('다시 맡겼습니다'); go('bible'); }).catch(e => toast('오류: ' + errText(e))); }
+});
+// 사진 디자인 → 바이블 (한꺼번에 적용·코디네이터 추천으로 진행에서도 쓰는 공용 함수)
+async function designToBible(entryId, list) {
+  const out = [];
+  for (const x of list) {
+    if ((x.bucket || 'takes') === 'bible') { out.push(x.path); continue; }
+    const { data, error } = await S.sb.storage.from('takes').download(x.path);
+    if (error) throw error;
+    out.push(await uploadBibleFile(entryId, new File([data], 'photo.jpg', { type: 'image/jpeg' })));
+  }
+  return out;
+}
+async function designApply(entry, cur, d, paths, soulId, reason) {
+  const v = await q(S.sb.from('bible_versions').insert({
+    entry_id: entry.id, description: cur?.description || d.prompt, details: cur?.details || null, voice_id: cur?.voice_id || null,
+    voice_path: cur?.voice_path || null, image_paths: paths, soul_id: soulId || cur?.soul_id || null, change_reason: reason, status: 'proposed' }).select('id').single());
+  await q(S.sb.rpc('activate_bible_version', { p_id: v.id }));
+  await q(S.sb.from('photo_designs').update({ status: 'linked' }).eq('id', d.id));
+}
+// 코디네이터가 ⚠로 표시한 사진은 바이블에 넣지 않는다(확인 결과가 있을 때)
+function okOnly(d, list) {
+  const items = d.review?.items; if (!items?.length) return list;
+  const bad = new Set(items.filter(r => !r.ok).map(r => r.path));
+  return list.filter(x => !bad.has(x.path));
+}
+// 코디네이터 추천 사진: 확인 결과의 best(1부터) 중 문제없는 것, 없으면 문제없는 사진 전부
+function designPicks(d) {
+  const items = d.previews || [], rv = d.review || {};
+  const okp = new Set((rv.items || []).filter(r => r.ok).map(r => r.path));
+  let pick = (rv.best || []).map(n => items[n - 1]).filter(x => x && (!rv.items || okp.has(x.path)));
+  if (!pick.length) pick = items.filter(x => okp.has(x.path));
+  return pick.slice(0, 4);
+}
+async function designTrain(d, chosen) {
+  await q(S.sb.from('photo_designs').update({ chosen, status: 'training' }).eq('id', d.id));
+  await q(S.sb.from('pipeline_tasks').insert({ kind: 'photo_set', payload: { design_id: d.id } }));
+}
+document.addEventListener('click', ev => {
+  const b = ev.target.closest('[data-bulkapply], [data-bulktrain], [data-recgo]'); if (!b) return;
+  ev.preventDefault();
+  const ents = S.bibleEntries || [], curOf = id => (S.bibleCur || {})[id];
+  const run = async () => {
+    if (b.dataset.recgo) {   // 한 항목: 코디네이터 추천 사진으로 진행
+      const e = ents.find(x => x.id === b.dataset.recgo), d = (S.designs || {})[b.dataset.recgo];
+      const pick = d ? designPicks(d) : [];
+      if (!e || !pick.length) return toast('코디네이터가 추천한 사진이 없습니다. "새로 만들기"를 눌러 주세요');
+      if (e.category === 'character') {
+        if (!confirm(`${e.name}: 코디네이터 추천 사진 ${pick.length}장으로 얼굴 학습 + 기준 사진을 만듭니다(Higgsfield 비용).`)) return;
+        await designTrain(d, pick); toast('얼굴 학습을 시작했습니다');
+      } else { await designApply(e, curOf(e.id), d, await designToBible(e.id, pick), null, '코디네이터 추천 사진으로 기준 사진'); toast(`${e.name} 적용`); }
+      return go('bible');
+    }
+    if (b.dataset.bulkapply) {   // 준비된 기준 사진 모두 바이블에 적용
+      const list = ents.map(e => ({ e, d: (S.designs || {})[e.id] })).filter(x => x.d && (x.d.status === 'set_ready' || (x.d.status === 'ready' && x.e.category !== 'character' && designPicks(x.d).length)));
+      if (!list.length) return toast('적용할 준비된 사진이 없습니다');
+      if (!confirm(`${list.map(x => x.e.name).join(', ')} — ${list.length}개 항목의 사진을 바이블에 적용합니다.${list.some(x => x.d.status === 'ready') ? '\n(사진을 고르지 않은 항목은 코디네이터 추천 사진으로)' : ''}`)) return;
+      b.disabled = true; let n = 0;
+      for (const { e, d } of list) {
+        b.textContent = `적용 중… ${++n}/${list.length}`;
+        if (d.status === 'set_ready') {
+          const keep = okOnly(d, [...(d.chosen || []), ...(d.ref_set || [])]);
+          if (!keep.length) { toast(`${e.name}: 기준 사진이 모두 ⚠라 건너뜀 — 새로 만들기를 권합니다`); continue; }
+          await designApply(e, curOf(e.id), d, await designToBible(e.id, keep), d.soul_id, `Soul 2 실사 사진 + Soul ID 얼굴 고정(한꺼번에 적용${keep.length < (d.chosen || []).length + (d.ref_set || []).length ? ', ⚠ 사진 제외' : ''})`);
+        }
+        else await designApply(e, curOf(e.id), d, await designToBible(e.id, designPicks(d)), null, '코디네이터 추천 사진으로 기준 사진(한꺼번에 적용)');
+      }
+      toast(`${list.length}개 항목을 바이블에 적용했습니다`); return go('bible');
+    }
+    if (b.dataset.bulktrain) {   // 사진을 고르지 않은 인물: 코디네이터 추천으로 얼굴 학습 시작
+      const list = ents.filter(e => e.category === 'character').map(e => ({ e, d: (S.designs || {})[e.id] })).filter(x => x.d?.status === 'ready' && designPicks(x.d).length);
+      if (!list.length) return toast('추천 사진이 있는 후보가 없습니다(코디네이터 확인이 끝난 뒤 가능)');
+      if (!confirm(`${list.map(x => `${x.e.name}(${designPicks(x.d).length}장)`).join(', ')} — 코디네이터 추천 사진으로 얼굴 학습 + 기준 사진을 만듭니다(Higgsfield 비용, 인물마다 얼굴 학습 1회 + 기준 사진 4장).`)) return;
+      b.disabled = true;
+      for (const { d } of list) await designTrain(d, designPicks(d));
+      toast(`${list.length}명 얼굴 학습을 시작했습니다. 끝나면 "기준 사진 모두 바이블에 적용"을 누르세요`); return go('bible');
+    }
+  };
+  run().catch(e => { b.disabled = false; toast('오류: ' + errText(e)); });
+});
 // 동일인: 이 카드가 누구와 같은지, 누가 이 사람과 같은지
 function sameAsLine(e, entries) {
   const to = e.same_as && entries.find(x => x.id === e.same_as);
@@ -5814,7 +5964,9 @@ async function viewBible(main) {
   S.bpAhead = ahead;
   // 바이블 쪽 진행 중인 일(사진 받기·얼굴 학습·반영·감수)과 예상 소요 시간
   await loadEta();
-  const myDesigns = entries.length ? await q(S.sb.from('photo_designs').select('id,entry_id').in('entry_id', entries.map(e => e.id)).in('status', ['queued', 'training', 'ready', 'set_ready'])).catch(() => []) : [];
+  const myDesigns = entries.length ? await q(S.sb.from('photo_designs').select('id,entry_id,status,review,previews,chosen,ref_set,soul_id,prompt,created_at').in('entry_id', entries.map(e => e.id)).in('status', ['queued', 'training', 'ready', 'set_ready']).order('created_at', { ascending: false })).catch(() => []) : [];
+  S.designs = {}; myDesigns.forEach(d => { if (!S.designs[d.entry_id]) S.designs[d.entry_id] = d; });   // 항목마다 가장 최근 사진 디자인
+  S.agentsNow = await q(S.sb.from('agent_status').select('device_id,version,info,last_seen_at,state,current_job,devices(name)')).catch(() => []);
   const bOpen = await q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,payload,series_id,started_at,created_at,not_before')
     .in('kind', ['photo_design', 'photo_set', 'bible_prompt', 'coord_review', 'photo_describe', 'voice_design', 'voice_cast', 'bible_extract', 'bible_suggest', 'bible_place'])
     .in('status', ['queued', 'running']).order('created_at')).catch(() => []);
@@ -5909,6 +6061,11 @@ async function viewBible(main) {
     return entries.length ? `<div class="card" data-fold="cv-panel" data-fold-min="200" data-fold-default="1" style="border-color:${bad.length ? 'var(--bad)' : 'var(--line)'}"><div class="row"><b>코디네이터 감수 결과</b>
       ${open ? pill(`감수 중·대기 ${open}`, 'warn') : ''}${bad.length ? pill(`이상 ${bad.length}건`, 'bad') : pill('이상 없음', 'good')}
       <span style="margin-left:auto" class="row">${bad.length ? `<button class="btn small" data-rvbad="${esc(bad.map(x => x.e.id).join(','))}" title="이상 항목만 다시 감수해 한 번 더 걸러냅니다">이상 항목 다시 감수</button>` : ''}
+      ${(() => { const ds = entries.map(e => ({ e, d: (S.designs || {})[e.id] })).filter(x => x.d);
+        const ap = ds.filter(x => x.d.status === 'set_ready' || (x.d.status === 'ready' && x.e.category !== 'character' && designPicks(x.d).length)).length;
+        const tr = ds.filter(x => x.e.category === 'character' && x.d.status === 'ready' && designPicks(x.d).length).length;
+        return `${tr ? `<button class="btn small" data-bulktrain="1" title="사진을 고르지 않은 인물은 코디네이터가 추천한 사진으로 얼굴 학습을 시작합니다">코디네이터 추천으로 학습 시작 (${tr})</button>` : ''}
+          ${ap ? `<button class="btn small primary" data-bulkapply="1" title="얼굴 학습이 끝난 기준 사진 세트(와 고르지 않은 장소·소품의 추천 사진)를 한 번에 바이블에 적용합니다">기준 사진 모두 바이블에 적용 (${ap})</button>` : ''}`; })()}
       <button class="btn small primary" data-rvall="1" title="적용 중인 모든 항목을 묘사·영어 프롬프트·대본·기준 사진(사진과 프롬프트 일치, 글자·이름표)까지 다시 감수합니다">전체 감수하기</button></span></div>
       <p class="quiet" style="margin:4px 0 0">감수: 대표 요청 반영 · 묘사↔영어 프롬프트 · 대본 · 기준 사진이 프롬프트와 맞는지(사원증·이름표 같은 글자, 다른 사람). 사진 후보를 만들면 장마다 ✓/⚠도 표시합니다.</p>
       <div id="bLive">${liveList(false)}</div>
@@ -6303,6 +6460,7 @@ async function openPhotoDesign(entry, cur, fresh) {
   await loadEta();
   const [pl, pk] = PD_STATUS[d.status] || [d.status, ''];
   // 코디네이터 사진 확인(프롬프트와 일치·글자/이름표·다른 사람): 장마다 표시
+  S.designs = S.designs || {}; S.designs[entry.id] = d;
   const rvOf = path => (d.review?.items || []).find(r => r.path === path);
   const rvBadge = x => { const r = rvOf(x.path); if (!r) return '';
     return r.ok ? `<span class="pdrv ok" title="프롬프트와 일치">✓ 일치</span>` : `<span class="pdrv bad" title="${esc((r.issues || []).join(' / '))}">⚠ ${esc(r.text ? `글자 '${r.text}'` : (r.issues || [])[0] || '문제')}</span>`; };
@@ -6312,6 +6470,8 @@ async function openPhotoDesign(entry, cur, fresh) {
   const rvLine = ['ready', 'set_ready'].includes(d.status) ? (d.review ? `<div class="msg ${(d.review.items || []).some(r => !r.ok) ? 'warn' : ''}" style="margin:6px 0">코디네이터 확인: ${esc(d.review.summary || '')}
       ${(d.review.items || []).filter(r => !r.ok).map(r => `<div class="quiet">사진 ${(d.review.items || []).indexOf(r) + 1}: ${esc((r.issues || []).join(' / '))}${r.text ? ` (글자: ${esc(r.text)})` : ''}</div>`).join('')}
       ${(d.review.items || []).some(r => !r.ok) ? '<div class="quiet">⚠ 표시된 사진은 고르지 마세요. 쓸 만한 사진이 없으면 "새로 만들기".</div>' : ''}
+      ${d.review.prompt_improved || (d.review.avoid || []).length ? `<div style="margin-top:4px"><b>다음 "새로 만들기"에 반영:</b> ${esc(d.review.improve_note || '코디네이터가 프롬프트를 고침')}${(d.review.avoid || []).length ? ` · 금지: ${esc(d.review.avoid.join(', '))}` : ''}${d.review.bible_fixed ? ' · 바이블 영어 프롬프트도 고침' : ''}
+        ${d.review.prompt_improved ? `<details><summary class="quiet">고친 프롬프트 보기</summary><div class="quiet">${esc(d.review.prompt_improved)}</div></details>` : ''}</div>` : ''}
       <button class="btn small" data-pdrecheck="${esc(d.id)}" style="margin-top:4px">다시 확인</button></div>`
       : `<div class="row quiet" style="margin:6px 0">${pdCheck[0] && ['queued', 'running'].includes(pdCheck[0].status) ? '<span class="spin"></span> 코디네이터가 사진이 프롬프트와 맞는지 확인하는 중…' : `아직 코디네이터 확인 전입니다. <button class="btn small" data-pdrecheck="${esc(d.id)}">확인 맡기기</button>`}</div>`) : '';
   box.innerHTML = `<div class="vdbox"><div class="row"><b>${isChar ? '실사 사진·얼굴 고정' : '사진 디자인'}</b>${pill(pl, pk)}
@@ -6322,11 +6482,12 @@ async function openPhotoDesign(entry, cur, fresh) {
     ${d.status === 'ready' ? `<p class="quiet" style="margin:4px 0">${isChar ? '같은 사람으로 쓸 사진을 1~4장 고르세요(여러 장이면 얼굴이 더 안정적). 사진을 누르면 크게 보고, 크게 본 채로 고를 수 있습니다. 고르기는 체크칸.' : '바이블에 넣을 사진을 고르세요.'}</p>
       ${rvLine}<div class="pdgrid">${(d.previews || []).map(x => img(x, true)).join('')}</div>
       <div class="row" style="margin-top:8px"><button class="btn small primary" id="pdPick-${entry.id}">${isChar ? '이 얼굴로 학습 + 기준 사진 만들기' : '바이블에 적용'}</button>
+        ${designPicks(d).length ? `<button class="btn small" data-recgo="${esc(entry.id)}" title="고르지 않아도 코디네이터가 확인해 추천한 사진으로 진행합니다">코디네이터 추천(${designPicks(d).map(x => (d.previews || []).indexOf(x) + 1).join('·')}번)으로 ${isChar ? '학습' : '적용'}</button>` : ''}
         ${isChar ? '<span class="quiet">얼굴 학습 1회 + 기준 사진 4장</span>' : ''}</div>` : ''}
     ${d.status === 'set_ready' ? `<p class="quiet" style="margin:4px 0">같은 얼굴로 만든 기준 사진입니다. 적용하면 바이블 기준 사진이 이 세트로 바뀌고 Soul ID가 함께 저장됩니다.</p>
       ${rvLine}<div class="pdgrid">${[...(d.chosen || []), ...(d.ref_set || [])].map(x => img(x, false)).join('')}</div>
-      <div class="row" style="margin-top:8px"><button class="btn small primary" id="pdLink-${entry.id}">바이블에 적용</button>
-        <span class="quiet">얼굴이 다르면 "새로 만들기"</span></div>` : ''}</div>`;
+      <div class="row" style="margin-top:8px"><button class="btn small primary" id="pdLink-${entry.id}">바이블에 적용${(() => { const all = [...(d.chosen || []), ...(d.ref_set || [])], k = okOnly(d, all).length; return k < all.length ? ` (⚠ ${all.length - k}장 빼고 ${k}장)` : ''; })()}</button>
+        <span class="quiet">⚠ 사진은 자동으로 빼고 적용합니다. 쓸 만한 사진이 너무 적거나 얼굴이 다르면 "새로 만들기"(코디네이터가 고친 프롬프트로)</span></div>` : ''}</div>`;
   document.getElementById('pdNew-' + entry.id).onclick = () => openPhotoDesign(entry, cur, true);
   const toBible = async list => {
     const out = [];
@@ -6350,6 +6511,10 @@ async function openPhotoDesign(entry, cur, fresh) {
   if (pick) pick.onclick = guard(async () => {
     const chosen = [...box.querySelectorAll('[data-pdc]:checked')].map(c => ({ bucket: c.dataset.b, path: c.dataset.pdc }));
     if (!chosen.length) return toast('사진을 하나 이상 골라 주세요');
+    const badPicked = chosen.length - okOnly(d, chosen).length;
+    if (badPicked && !confirm(`고른 사진 중 ${badPicked}장은 코디네이터가 ⚠로 표시한 사진입니다(글자·다른 사람 등). 그래도 쓸까요?\n[취소]를 누르면 ⚠ 사진은 빼고 진행합니다.`)) {
+      chosen.splice(0, chosen.length, ...okOnly(d, chosen)); if (!chosen.length) return toast('남은 사진이 없습니다. 다른 사진을 고르거나 "새로 만들기"');
+    }
     if (!isChar) return apply(await toBible(chosen), null, '사진 디자인으로 기준 사진');
     await q(S.sb.from('photo_designs').update({ chosen, status: 'training' }).eq('id', d.id));
     await q(S.sb.from('pipeline_tasks').insert({ kind: 'photo_set', payload: { design_id: d.id } }));
@@ -6358,7 +6523,9 @@ async function openPhotoDesign(entry, cur, fresh) {
   const link = document.getElementById('pdLink-' + entry.id);
   if (link) link.onclick = guard(async () => {
     link.disabled = true; link.textContent = '바이블로 옮기는 중…';
-    apply(await toBible([...(d.chosen || []), ...(d.ref_set || [])]), d.soul_id, 'Soul 2 실사 사진 + Soul ID 얼굴 고정');
+    const all = [...(d.chosen || []), ...(d.ref_set || [])], keep = okOnly(d, all);
+    if (!keep.length) { link.disabled = false; link.textContent = '바이블에 적용'; return toast('기준 사진이 모두 코디네이터 확인에서 ⚠입니다. "새로 만들기"로 다시 만들어 주세요'); }
+    apply(await toBible(keep), d.soul_id, `Soul 2 실사 사진 + Soul ID 얼굴 고정${keep.length < all.length ? ` (⚠ ${all.length - keep.length}장 제외)` : ''}`);
   });
   if (busy) setTimeout(() => { if (S.tab === 'bible' && document.getElementById('pd-' + entry.id)) openPhotoDesign(entry, cur, false).catch(() => {}); }, 10000);
 }
@@ -7500,7 +7667,10 @@ document.addEventListener('click', ev => {
   const rb = ev.target.closest('[data-bpretry]');
   if (rb) { ev.preventDefault(); const t = Object.values(S.bpTask || {}).find(x => x.id === rb.dataset.bpretry);
     if (t) retryTask({ ...t, kind: 'bible_prompt', series_id: S.seriesId }).then(() => { toast('다시 맡겼습니다'); go('bible'); }).catch(e => toast('오류: ' + errText(e))); return; }
-  const im = ev.target.closest('img'); if (!im || !im.closest(ZOOM_SCOPE) || im.closest('#zoomBox')) return;
+  if (ev.target.closest('#zoomBox') || ev.target.matches('input, button, select, textarea')) return;
+  // 사진 위 표시(✓ 일치·⚠ 글자)나 사진 칸 여백을 눌러도 그 칸의 사진을 크게
+  const cell = ev.target.closest(ZOOM_SCOPE.split(',').map(s => s.trim() + ' img').join(', ')) ? null : ev.target.closest('.pdimg, .kf, .tmpimg');
+  const im = ev.target.closest('img') || cell?.querySelector('img'); if (!im || !im.closest(ZOOM_SCOPE)) return;
   ev.preventDefault(); ev.stopPropagation();   // 체크박스가 바뀌거나 새 창이 열리지 않게: 크게 보기만
   const group = im.closest('.pdgrid, .thumbs, .bimgs, .kfs, .card, .vdbox') || im.parentElement;
   const imgs = [...group.querySelectorAll('img')].filter(x => x.closest(ZOOM_SCOPE));
@@ -9426,6 +9596,8 @@ const HELP = {
 <li>코디네이터는 <b>기준 사진</b>도 봅니다: 묘사와 맞는지, 사진에 글자·이름표·자막(예: 다른 사람 이름)이 찍혀 있지 않은지, 같은 사람인지. 문제가 있으면 카드가 빨갛게 표시되고 <b>다시 적용해서 사진 만들기 (추천)</b> 버튼이 나옵니다. 바이블 위 "코디네이터 감수 결과"에 이상 항목이 모입니다.<span class="ex">예: 도윤 — 사진 2에 '김윤호' 이름표 글자, 사진 3은 다른 사람 → [다시 적용해서 사진 만들기]</span></li>
 <li><b>다시 감수</b>(카드), <b>전체 감수 다시 하기</b>(위 "한꺼번에" 줄)으로 언제든 다시 확인할 수 있습니다. 지난 감수는 "이전 감수"에 쌓입니다.</li>
 <li><b>사진을 직접 넣으면</b> 코디네이터가 바로(짧은 일 줄) 사진을 보고 한글 묘사·세부 사항·영어 프롬프트를 꼼꼼히 쓰고, 이어서 감수까지 합니다. 사진을 안 넣으면 대본에서 가져온 추천 묘사로 작가실이 영어 프롬프트를 씁니다.<span class="ex">예: 도윤 사진 3장 업로드 → "20대 후반 한국 남성, 쌍꺼풀 없는 가는 눈, 짧은 흑발 투블럭…" + 영어 프롬프트 → 감수: 반영 확인</span></li>
+<li><b>사진 후보 확인 → 다음 후보 개선</b>: 코디네이터가 후보에서 찾은 문제(사원증 글자·나이·다른 사람 등)는 고친 프롬프트와 금지 사항("no ID badge" 등)으로 정리돼 <b>다음 "새로 만들기"에 자동 반영</b>됩니다. 프롬프트가 부족했던 탓이면 바이블 영어 프롬프트도 고치고 감수 기록에 남깁니다.</li>
+<li><b>고르지 않아도 진행</b>: 후보 칸의 "코디네이터 추천(2·3번)으로 학습", 감수 결과 칸의 <b>코디네이터 추천으로 학습 시작</b>(인물 여럿 한꺼번에), 얼굴 학습이 끝나면 <b>기준 사진 모두 바이블에 적용</b>(한 번에).</li>
 <li>사진 <b>새로 만들기</b>는 그 항목의 반영·감수가 진행 중이면 <b>그게 끝난 뒤</b> 반영된 프롬프트로 만듭니다.</li>
 </ul>
 <h4>⑥ 실사 사진·얼굴 고정 (캐릭터)</h4>
