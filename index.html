@@ -5838,13 +5838,16 @@ async function openPhotoDesign(entry, cur, fresh) {
   const isChar = entry.category === 'character';
   const [d] = await q(S.sb.from('photo_designs').select('*').eq('entry_id', entry.id).order('created_at', { ascending: false }).limit(1));
   if (fresh || !d || d.status === 'linked') {
-    const prompt = d?.prompt || [entry.summary, cur?.description].filter(Boolean).join('. ');
+    // 늘 지금 바이블(최신 적용본)에서 채운다: 예전 요청의 프롬프트를 다시 쓰면 바이블을 고쳐도 같은 사진이 나옴
+    const prompt = cur?.prompt_en || [entry.summary, cur?.description].filter(Boolean).join('. ') || d?.prompt || '';
+    const pending = !cur?.prompt_en && /[가-힣]/.test(cur?.description || '');
     const has = (cur?.image_paths || []).length;
     box.innerHTML = `<div class="vdbox"><b>${isChar ? '실사 사진·얼굴 고정' : '사진 디자인'}</b>
       <p class="quiet" style="margin:4px 0">${isChar ? '인물 묘사를 적으면 Higgsfield <b>Soul 2</b>(실사 인물 전용)가 후보 4장을 만듭니다. 마음에 드는 사진을 고르면 그 얼굴로 <b>Soul ID</b>를 학습하고, 같은 얼굴의 기준 사진(정면·3/4·전신·감정 표정)을 만들어 바이블에 넣습니다. 컷 설계의 장면 사진은 이 기준 사진들을 참고로 그립니다.'
         : `${BIBLE_CAT[entry.category] || ''} 묘사를 적으면 후보 2장을 만듭니다. 고르면 바이블 기준 사진이 됩니다.`}</p>
       <label>묘사 (영어로 적으면 더 정확: 나이·국적·얼굴형·머리·체형·분위기${isChar ? '' : '·시간대·빛'})</label>
       <textarea id="pdP-${entry.id}" style="min-height:90px;font-family:inherit">${esc(prompt)}</textarea>
+      <p class="quiet" style="margin:2px 0 0">${cur?.prompt_en ? '바이블의 최신 영어 프롬프트로 채웠습니다. 바이블을 고친 뒤 만들면 고친 내용으로 나옵니다.' : pending ? '작가실이 바이블 최신 묘사를 영어 프롬프트로 옮기는 중입니다. 지금 눌러도 영어 프롬프트가 나온 뒤에 만듭니다.' : ''}</p>
       <div class="row" style="margin-top:8px"><button class="btn primary small" id="pdGo-${entry.id}">${isChar ? '후보 4장 만들기' : '후보 2장 만들기'}</button>
         ${isChar && has ? `<button class="btn small" id="pdOwn-${entry.id}">지금 바이블 사진 ${has}장으로 얼굴 학습</button>` : ''}
         <button class="btn small" id="pdX-${entry.id}" style="margin-left:auto">닫기</button></div></div>`;
