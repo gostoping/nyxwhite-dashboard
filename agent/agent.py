@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.19.0"
+VERSION = "1.19.1"
 
 import base64
 import glob
@@ -632,7 +632,7 @@ def bible_text(ctx, limit=60):
                     + (f" / ★이 화에서는 '{b.get('variant')}' 모습으로 나온다(같은 사람): {b.get('change_note') or ''} — 묘사·사진·얼굴은 이 모습을 따른다" if b.get("variant") else "")
                     + (f" / 변화: {b.get('change_note')}" if b.get("change_note") and not b.get("variant") else "")
                     + (f" / 나오는 화: {', '.join(map(str, b.get('apply_eps')))}화" if b.get("apply_eps") else "")
-                    + (" (필수 아님: 첫 등장 장면 사진을 참고로 씀)" if b.get("essential") is False else "")
+                    + (f" (필수 아님: 사진 없이 묘사로 · 앞서 만든 장면 사진 {len(b.get('refs') or [])}장을 참고)" if b.get("essential") is False else "")
                     + (" (사진 있음)" if b.get("images") else ""))
     return "\n".join(rows) or "(바이블이 비어 있음)"
 
@@ -1910,7 +1910,9 @@ def ensure_temp_refs(ctx, names, gen, ep=None):
 def bible_ref_urls(ctx, names, limit=4, per=1):
     bl = ctx.get("bible") or []
     imgs = {b["name"]: [("bible", p) for p in (b.get("images") or [])] for b in bl}
-    for b in bl:   # 대표 사진이 없으면 임시 기준 사진(자동), 그것도 없으면 동일인의 사진
+    for b in bl:   # 대표 사진이 없으면 쌓인 참고 사진(장면 사진) → 임시 기준 사진(자동) → 동일인의 사진
+        if not imgs.get(b["name"]) and b.get("refs"):
+            imgs[b["name"]] = [("takes", r["path"]) for r in b["refs"] if r.get("path")]
         if not imgs.get(b["name"]) and (b.get("temp_image") or {}).get("path"):
             imgs[b["name"]] = [("takes", b["temp_image"]["path"])]
     for b in bl:
@@ -2035,14 +2037,16 @@ def t_prep_cut(t):
                 fr.update({"prompt": fprompt, "path": storage_upload(f"{base}_{key}.jpg", jpg, "image/jpeg"), "status": "ready", "error": None})
                 frames[key] = jpg
                 os.remove(local)
-                if key == "frame_first":   # 필수가 아닌 항목이 처음 나온 컷: 이 장면 사진을 그 항목의 참고 사진으로 저장(다음 컷·다음 화가 같은 모습을 씀)
+                if key == "frame_first":   # 필수가 아닌 장소·소품·배경: 이 장면 사진을 그 항목의 참고 사진으로 바이블에 쌓는다(최근 6장)
                     for n in dict.fromkeys(c.get("reference_names") or []):
                         b = bible_entry(ctx, n)
-                        if b and b.get("essential") is False and b.get("category") in PHOTO_CATS and not b.get("images") and not b.get("temp_image") and b.get("entry_id"):
+                        if b and b.get("essential") is False and b.get("category") in PHOTO_CATS and not b.get("images") and b.get("entry_id"):
                             try:
-                                b["temp_image"] = rpc("agent_bible_set_temp_photo", p_token=TOKEN, p_entry=b["entry_id"], p_path=fr["path"],
-                                                      p_model=f"{code} 첫 장면 사진(자동 참고)") or {"path": fr["path"]}
-                                log(f"'{n}' 참고 사진: {code} 첫 장면 사진으로 자동 저장")
+                                rpc("agent_bible_add_ref", p_token=TOKEN, p_entry=b["entry_id"], p_path=fr["path"], p_cut=code,
+                                    p_ep=int((ctx.get("episode") or {}).get("number") or 0) or None)
+                                b["refs"] = [{"path": fr["path"], "cut": code}] + [r for r in (b.get("refs") or []) if r.get("path") != fr["path"]][:5]
+                                b["temp_image"] = b.get("temp_image") or {"path": fr["path"]}
+                                log(f"'{n}' 참고 사진 쌓음: {code} 장면 사진")
                             except Exception as ex:
                                 log(f"'{n}' 참고 사진 저장 실패: {ex}")
                 log_cost("keyframe", "higgsfield", "nano-banana-pro" if "nano-banana-pro" in imodel else imodel, {"images": 1}, episode_id=ep, scene_no=c["scene_no"],
@@ -2687,9 +2691,8 @@ def t_bible_extract(t):
 - details: 한국어. 화별 의상·바뀌면 안 되는 특징·금지 사항.
 - summary: 한국어 한 줄(대본 속 역할).
 - appears: 이 항목이 나오는 씬 [{"ep": 화 번호, "scene": 씬 번호}]. 씬 번호는 대본의 씬 순서(1부터).
-- essential: 소품·장소·배경만 판단(인물은 늘 true). 여러 화·여러 씬에 반복해 나오거나, 이야기에서 중요하거나(복선·상징·갈등의 중심), 모습이 매번 같아야 하는 것이면 true.
-  한 번 스쳐 지나가는 소품·장소, 흔한 배경(길거리·카페 일반 등)은 false — false 항목은 사진을 미리 만들지 않고 처음 나오는 장면 사진을 참고로 쓴다.
-답 형식: <json>{"items": [{"category": "", "name": "", "summary": "", "description": "", "details": "", "essential": true, "appears": [{"ep": 1, "scene": 1}]}]}</json>"""
+- 장소·소품·배경은 사진을 따로 만들지 않고 이 묘사로 바로 바이블에 적용된다. 그러니 description을 모습이 늘 같게 나올 만큼 구체적으로(구조·재질·색·크기·빛).
+답 형식: <json>{"items": [{"category": "", "name": "", "summary": "", "description": "", "details": "", "appears": [{"ep": 1, "scene": 1}]}]}</json>"""
     total = {"new_entries": 0, "proposals": 0}
     for e in eps:
         progress(f"작가실이 {e['number']}화에서 필요한 인물·장소·소품을 찾는 중")
