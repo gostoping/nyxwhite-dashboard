@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.26.0"
+VERSION = "1.27.0"
 
 import base64
 import glob
@@ -789,10 +789,13 @@ def writers_split(t, p):
             raise RuntimeError(f"{epno}화 확정 대본에 씬 구분이 없어 화 전체가 씬 하나로 읽혔습니다. 이렇게 하세요: 대본 탭에서 씬마다 '00:12–00:48 | 장소' 줄을 넣고 확정하세요")
         rpc("agent_add_task", p_token=TOKEN, p={"kind": "director", "episode_id": ep, "payload": {"script_version_id": src["id"]}})
         return f"{epno}화는 이제 씬 {len(real)}개로 읽힙니다(대본의 '시간 | 장소' 줄). 화 전체를 나눌 필요 없이 감독이 씬별로 다시 설계합니다"
-    system = (guide(ctx, "작가실") or "너는 드라마 작가실이다.") + """
+    prep = bool(p.get("prep"))   # 컷 설계 전 제작용 나누기(작가실이 먼저 끝내고 감독은 나누기를 요청하지 않음)
+    why_line = (f"컷 설계 전에 제작용으로 씬을 나눈다. 한 부분은 {SCENE_MAX_SEC}초 이하(영상 컷 15초 2개 이내)가 되게 한다."
+                if prep else "감독이 아래 씬을 영상 컷으로 설계하지 못했다(씬이 너무 길어 한 번에 설계할 수 없음).")
+    system = (guide(ctx, "작가실") or "너는 드라마 작가실이다.") + f"""
 
-[이번 일 — 감독의 요청: 긴 씬 나누기]
-감독이 아래 씬을 영상 컷으로 설계하지 못했다(씬이 너무 길어 한 번에 설계할 수 없음). 이 씬을 자연스러운 전환점에서 2~3개 부분으로 나눈다.
+[이번 일 — 제작용 씬 나누기]
+{why_line} 이 씬을 자연스러운 전환점(장소·시간이 바뀌는 곳 우선)에서 2~4개 부분으로 나눈다.""" + """
 - 절대 바꾸지 않는 것: 대사(한 글자도), 사건 순서, 감정선, 등장인물, 복선. 새 대사·새 사건을 만들지 않는다.
 - 나누는 곳: 장소·시간이 바뀌는 곳, 감정이 크게 꺾이는 곳, 인물이 들고 나는 곳, 긴 침묵·행동 전환.
 - 반복되는 지문·늘어지는 동작 묘사는 짧게 다듬어도 된다(뜻은 그대로).
@@ -808,7 +811,7 @@ def writers_split(t, p):
         orig_of[n] = orig   # 이미 나뉜 씬(S#7-1·7-2)이면 그중 이 부분만 바꾼다(다른 부분을 덮어써 대사가 사라지던 문제)
         kept = 0
         for attempt in range(2):
-            progress(f"작가실이 감독 요청으로 {epno}화 S#{n}을(를) 나누는 중{' (다시)' if attempt else ''}")
+            progress(f"작가실이 {'컷 설계 전에' if prep else '감독 요청으로'} {epno}화 S#{n}을(를) 나누는 중{' (다시)' if attempt else ''}")
             text, _ = claude(model, system, f"{epno}화 「{e.get('title') or ''}」\n[감독 피드백]\n{p.get('why') or ''}\n" + "\n".join(p.get("detail") or [])
                              + (f"\n[대표 요청]\n{p.get('note')}" if p.get("note") else "")
                              + f"\n\n[나눌 씬]\n{orig}" + ("\n\n[중요] 지난번 답에서 대사가 바뀌거나 빠졌다. 대사는 한 글자도 바꾸지 말 것." if attempt else ""),
@@ -828,14 +831,31 @@ def writers_split(t, p):
     for r in parallel([(lambda n=n: split_one(n)) for n in targets], workers=3):   # 여러 씬을 동시에
         if isinstance(r, Exception):
             notes.append(f"나누기 실패: {str(r)[:120]}")
+    if not new_body and prep:   # 나누지 못해도 제작은 멈추지 않는다: 감독이 그 씬을 그대로(컷 여러 개로) 설계
+        rpc("agent_add_task", p_token=TOKEN, p={"kind": "director", "episode_id": ep,
+            "payload": {"script_version_id": src["id"], "prepped": True}})
+        return f"작가실이 긴 씬을 대사 그대로 나누지 못해 그대로 둡니다({' / '.join(notes)}) · 감독이 이어서 컷을 설계합니다"
     if not new_body:
         raise RuntimeError(f"작가실이 {epno}화 긴 씬을 나누지 못했습니다. " + " / ".join(notes)
                            + ". 이렇게 하세요: 대본 탭에서 그 씬 중간에 'S#번호-2 | 시간 | 장소 | 낮·밤' 머리를 직접 넣어 나누고 확정하면 감독이 이어서 설계합니다.")
     content = normalize_scene_heads(src["content"])   # 나눈 씬 본문과 같은 모양(S# 머리 붙인 대본)에서 바꿔 넣는다
     for sn, body in new_body.items():
         content = content.replace(orig_of[sn], body, 1)
-    note = f"작가실: 감독 요청으로 긴 씬 나눔 — " + " / ".join(notes)
+    content = normalize_scene_heads(content)   # S#3-1·3-2 → S#3·S#4…: 씬 번호를 화 처음부터 순서대로
+    note = f"작가실: {'컷 설계 전 제작용 씬 나누기' if prep else '감독 요청으로 긴 씬 나눔'}(대사 그대로) — " + " / ".join(notes)
     vid = rpc("agent_save_script_draft", p_token=TOKEN, p_episode=ep, p_content=content, p_note=note[:480])
+    if prep:   # 대사·사건은 그대로(95% 이상 확인)라 대표 확정 없이 바로 확정 → 감독이 화 전체를 설계
+        rpc("agent_set_script_followup", p_token=TOKEN, p_id=vid, p={"kind": "director", "payload": {"prepped": True}})
+        try:
+            rpc("agent_confirm_split", p_token=TOKEN, p_id=vid, p_summary=note[:480])
+        except Exception as ex:   # DB 반영 전이면 예전 방식(정리본 자동 확정 설정)으로
+            log(f"씬 나누기 확정 실패, 일반 확정 시도: {ex}")
+            try:
+                rpc("agent_confirm_script", p_token=TOKEN, p_id=vid, p_summary=note[:480])
+            except Exception:
+                notify(f"{epno}화 씬 나누기 정리본: 확정을 기다립니다", note[:300] + "\n대사는 그대로입니다. 대본 탭에서 확정하면 감독이 컷을 설계합니다.")
+                return note + " · 확정 대기"
+        return note + " · 자동 확정 → 감독이 컷 설계"
     # 나눈 씬부터 뒤 씬들은 번호가 한 칸씩 밀린다(씬 순서대로 다시 매김) → 나눈 씬부터 끝까지 다시 설계해야 번호가 맞는다
     redo = [s for s, _, _ in split_scenes(content) if s >= min(new_body)]
     rpc("agent_set_script_followup", p_token=TOKEN, p_id=vid, p={"kind": "director", "payload": {"scenes": redo, "fix_round": 1}})
@@ -869,6 +889,12 @@ def t_writers_room(t):
 <draft>
 (제작용 정리본 전체. 원고의 모든 씬을 순서대로. 씬 머리 형식: S#번호 | 시간 구간 | 장소 | 낮·밤 / 등장: 인물)
 </draft>
+
+[제작용 씬 나누기 — 감독이 바로 컷 설계를 할 수 있게, 작가실이 여기서 끝낸다]
+- 장소(배경)나 시간이 바뀌면 새 씬이다. 한 씬 안에 장소가 둘이면 둘로 나눈다.
+- 한 씬은 {SCENE_MAX_SEC}초 이하. 넘으면 감정이 꺾이는 곳·인물이 들고 나는 곳에서 나눈다(대사 한 줄을 중간에 끊지 않는다). 시간 구간도 나눠 적는다.
+- 씬 번호는 화 처음부터 S#1, S#2, S#3…으로 순서대로. 'S#2-1' 같은 가지 번호는 쓰지 않는다.
+- 나누기만 하는 곳에서는 대사·사건·순서를 바꾸지 않는다.
 <json>
 {{"emotion_curve": "시작 감정 → 전환점 → 끝 감정",
   "changes": [{{"scene_no": 1, "before": "원문 일부", "after": "바꾼 것", "reason": "감정선 근거"}}],
@@ -1059,6 +1085,31 @@ def split_scenes(content):
     return out
 
 
+SCENE_MAX_SEC = 30   # 작가실이 나눠 두는 씬 길이 상한(컷 15초 × 2)
+
+
+def _secs(t):
+    p = [int(x) for x in t.split(":")]
+    return p[0] * 60 + p[1] if len(p) == 2 else p[0] * 3600 + p[1] * 60 + p[2]
+
+
+def scene_seconds(head, body):
+    """씬 머리의 시간 구간(00:12–00:48)으로 길이(초). 없으면 글자 수로 어림(한국어 대사·지문 약 12자/초)."""
+    m = re.search(r"(\d{1,2}:\d{2}(?::\d{2})?)\s*[–—\-~]\s*(\d{1,2}:\d{2}(?::\d{2})?)", head or "")
+    if m:
+        d = _secs(m.group(2)) - _secs(m.group(1))
+        if d > 0:
+            return d
+    return len(body or "") // 12
+
+
+def long_scenes(all_sc, limit=SCENE_MAX_SEC):
+    """컷 설계 전에 작가실이 먼저 나눠야 할 씬 번호(씬 구분이 없으면 [0])."""
+    if all_sc and all_sc[0][0] == 0 and len(all_sc) == 1:
+        return [0]
+    return [n for n, h, b in all_sc if n > 0 and scene_seconds(h, b) > limit + 3]   # 2~3초 넘는 정도는 그대로
+
+
 def scene_groups(scenes, max_n=3, max_chars=5000):
     groups, cur, size = [], [], 0
     for s in scenes:
@@ -1095,6 +1146,17 @@ def t_director(t):
     rmodel = setting(ctx, "generation", "claude_reviewer", "claude-sonnet-5-5")
     all_sc = split_scenes(script["content"])
     want_set = set(int(x) for x in (p.get("scenes") or []))
+    # 씬 나누기는 작가실 일: 감독이 설계하다 실패한 뒤가 아니라, 설계 전에 긴 씬(30초 넘음)·씬 구분 없는 대본을 작가실이 먼저 나눈다
+    longs = long_scenes(all_sc)
+    if longs == [0]:
+        raise RuntimeError(f"{epno}화 확정 대본에 씬 구분이 없어 화 전체가 씬 하나로 읽혔습니다. "
+                           "이렇게 하세요: 대본 탭에서 씬마다 '00:12–00:48 | 장소' 줄을 넣고 확정하거나, '작가실 정리 실행'으로 씬을 나눈 정리본을 받아 확정하세요.")
+    if longs and not p.get("prepped") and not want_set:
+        rpc("agent_add_task", p_token=TOKEN, p={"kind": "writers_room", "episode_id": ep, "payload": {
+            "mode": "split_scenes", "prep": True, "scenes": longs, "source_version_id": script["id"],
+            "why": f"컷 설계 전 제작용 씬 나누기: {SCENE_MAX_SEC}초가 넘는 씬은 컷 2개 이내가 되게 나눔"}})
+        return (f"{epno}화 씬 {len(all_sc)}개 중 {len(longs)}개(S#{', S#'.join(map(str, longs))})가 {SCENE_MAX_SEC}초를 넘어 "
+                "작가실이 먼저 나눕니다(대사 그대로). 끝나면 감독이 이어서 컷을 설계합니다")
     todo = [s for s in all_sc if not want_set or s[0] in want_set or s[0] == 0]
     if not todo:
         raise RuntimeError(f"{epno}화 확정 대본에 요청한 씬 {sorted(want_set)}이(가) 없습니다. 대본 탭에서 씬 번호(S#)를 확인해 주세요")
@@ -1182,30 +1244,23 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
                 failed.append((n, False, f"{epno}화 S#{n} — 원인: 감독 요청 오류: {r}"))
             continue
         cuts += r[0]; end_state += r[1]; failed += r[2]
-    # 실패 처리: 너무 긴 씬은 작가실에 "대사·흐름 그대로 나눠 달라"고 피드백, 다른 원인은 감독이 그 씬만 한 번 더
-    long_nos = sorted({n for n, is_long, _ in failed if is_long})
-    other_nos = sorted({n for n, is_long, _ in failed if not is_long} - set(long_nos))
+    # 실패 처리: 씬 나누기는 설계 전에 작가실이 끝냈다(긴 씬은 먼저 나눔) → 감독은 작가실에 나누기를 요청하지 않고, 실패한 씬만 한 번 더(짧게) 시도한다
+    other_nos = sorted({n for n, _, _ in failed})
     lines = [x for _, _, x in failed]
     asked = []
-    if 0 in long_nos:   # 씬 구분이 아예 없는 대본: 화 전체를 '나눠 달라'고 하면 실패만 한다 → 정확한 원인과 할 일을 알린다
+    if 0 in other_nos:   # 씬 구분이 아예 없는 대본(설계 전 점검을 지나친 경우)
         raise RuntimeError(f"{epno}화 확정 대본에 씬 구분이 없어 화 전체가 씬 하나로 읽혔습니다(감독이 한 번에 설계할 수 없는 길이). "
-                           "이렇게 하세요: 대본 탭에서 씬마다 '00:12–00:48 | 장소' 또는 'S#2 | 00:12–00:48 | 장소 | 낮' 머리줄을 넣고 확정하거나, "
-                           "'작가실 정리 실행'으로 씬 머리를 붙인 정리본을 받아 확정하세요.")
-    if long_nos and not p.get("fix_round"):
-        rpc("agent_add_task", p_token=TOKEN, p={"kind": "writers_room", "episode_id": ep, "payload": {
-            "mode": "split_scenes", "scenes": long_nos, "source_version_id": script["id"],
-            "why": "감독이 컷으로 설계하지 못함(씬이 길어 답이 길이 제한에 걸림)", "detail": lines[:8]}})
-        asked.append(f"작가실에 S#{', S#'.join(map(str, long_nos))} 나누기를 요청했습니다(대사·흐름은 그대로). 수정본이 확정되면 감독이 그 씬만 다시 설계합니다")
+                           "이렇게 하세요: 대본 탭에서 씬마다 '00:12–00:48 | 장소' 줄을 넣고 확정하거나, '작가실 정리 실행'으로 씬을 나눈 정리본을 받아 확정하세요.")
     if other_nos and not p.get("retry_scenes"):
         rpc("agent_add_task", p_token=TOKEN, p={"kind": "director", "episode_id": ep,
-            "payload": {"script_version_id": script["id"], "scenes": other_nos, "retry_scenes": True, "fix_round": p.get("fix_round")}})
+            "payload": {"script_version_id": script["id"], "scenes": other_nos, "retry_scenes": True, "prepped": True}})
         asked.append(f"감독이 S#{', S#'.join(map(str, other_nos))}을(를) 한 번 더 시도합니다")
-    left = [x for n, is_long, x in failed if (is_long and p.get("fix_round")) or (not is_long and n not in long_nos and p.get("retry_scenes"))]
+    left = [x for _, _, x in failed] if p.get("retry_scenes") else []
     if not cuts and not asked:
         raise RuntimeError("씬별 결과 — 감독이 한 씬도 설계하지 못했습니다.\n" + "\n".join(lines[:8])
-                           + "\n이렇게 하세요: '작가실에 요청'으로 그 씬을 나눠 달라고 하거나 다시 시도하세요.")
+                           + "\n이렇게 하세요: 다시 시도하세요. 대본 자체를 고쳐야 하면 '작가실에 요청'에 무엇을 바꿀지 적어 보내세요.")
     if not cuts:
-        notify(f"{epno}화 컷 설계: 실패한 씬을 작가실·감독에게 다시 맡겼습니다", "\n".join(asked + lines[:5]), "warning")
+        notify(f"{epno}화 컷 설계: 실패한 씬을 감독이 한 번 더 시도합니다", "\n".join(asked + lines[:5]), "warning")
         return "설계된 씬 없음 · " + " / ".join(asked)
     failed = lines
     seq = {}
@@ -1290,14 +1345,14 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
             rpc("agent_add_task", p_token=TOKEN, p={"kind": "prep_cut", "episode_id": ep, "scene_no": sc, "payload": {}})
     if failed:
         if left:
-            raise RuntimeError(f"씬별 결과 — 씬 {len(by_scene)}개는 설계·저장했고, 아래 씬은 작가실 수정·자동 재시도 뒤에도 실패했습니다.\n" + "\n".join(left[:8])
+            raise RuntimeError(f"씬별 결과 — 씬 {len(by_scene)}개는 설계·저장했고, 아래 씬은 감독이 한 번 더 시도한 뒤에도 실패했습니다.\n" + "\n".join(left[:8])
                                + ("\n" + "\n".join(asked) if asked else "")
                                + "\n이렇게 하세요: '작가실에 요청'에 무엇을 바꿀지 적어 보내거나, 다시 시도(실패한 씬만 다시 합니다).")
-        notify(f"{epno}화 컷 설계: 씬 {len(by_scene)}개 완료, {len(failed)}개는 다시 맡김", "\n".join(asked + failed[:5]), "warning")
+        notify(f"{epno}화 컷 설계: 씬 {len(by_scene)}개 완료, {len(failed)}개는 감독이 다시 시도", "\n".join(asked + failed[:5]), "warning")
     if not failed:
         notify(f"{epno}화 컷 설계 완료", f"씬 {len(by_scene)}개 · 컷 {n}개 · 감수 수정 {len(fixes)}건\n"
                f"영상 생성 예상 ${total:.2f}. 제작 탭에서 확인하고 생성 승인을 눌러 주세요.")
-    return f"씬 {len(by_scene)}개 · 컷 {n}개 설계 (감수 수정 {len(fixes)}건) · 생성 예상 ${total:.2f}" + (f" · 실패 씬 {len(failed)}개는 작가실·감독에게 다시 맡김" if failed else "")
+    return f"씬 {len(by_scene)}개 · 컷 {n}개 설계 (감수 수정 {len(fixes)}건) · 생성 예상 ${total:.2f}" + (f" · 실패 씬 {len(failed)}개는 감독이 한 번 더 시도" if failed else "")
 
 
 def director_revise(t, cut_id):
