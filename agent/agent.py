@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.10.0"
+VERSION = "1.10.1"
 
 import base64
 import glob
@@ -1873,8 +1873,10 @@ def t_photo_design(t):
             progress(f"{name} 사진 후보를 만드는 중")
             urls = []
             for _ in range(2):
-                st = hf_submit_wait(model, {"prompt": d["prompt"] + " Photorealistic location photograph, natural light, no people, no text.",
-                                            "aspect_ratio": "9:16"}, "장소 사진")
+                look = {"prop": " Photorealistic product photograph of the object alone, true-to-life materials and scale, soft studio light, plain neutral background, no people, no text.",
+                        "background": " Photorealistic wide background plate photograph, real camera, natural light and atmosphere, no people, no text."}.get(
+                    d["category"], " Photorealistic location photograph, natural light, no people, no text.")
+                st = hf_submit_wait(model, {"prompt": d["prompt"] + look, "aspect_ratio": "9:16"}, "사진")
                 urls += find_image_urls(st.get("images") or st)[:1]
         previews = [{"path": upload_from_url(u, f"photos/{did}/{i}_{uuid.uuid4().hex[:6]}.jpg")} for i, u in enumerate(urls, 1)]
     except Exception as e:
@@ -1975,10 +1977,11 @@ def t_bible_extract(t):
         return "읽을 대본이 없습니다"
     system = """너는 드라마 작가실의 미술·캐스팅 담당이다. 대본을 읽고 씬마다 화면에 나와야 하는 것을 빠짐없이 뽑아 시리즈 바이블 항목으로 만든다.
 - category: character(대사가 있거나 얼굴이 보이는 인물. 단역도 얼굴이 나오면 포함, '군중'처럼 얼굴이 중요하지 않으면 제외),
-  location(씬이 벌어지는 장소. 같은 장소는 하나로), prop(줄거리·연속성에 중요한 물건: 반복 등장, 클로즈업, 인물의 상징).
+  location(씬이 벌어지는 장소. 같은 장소는 하나로), background(장소와 별도로 화면 뒤에 보이는 배경: 창밖 풍경, 도시 야경, 하늘, 무대 뒤 스크린 등. 반복되거나 분위기에 중요한 것만),
+  prop(줄거리·연속성에 중요한 물건: 반복 등장, 클로즈업, 인물의 상징).
 - 이미 바이블에 있는 항목은 이름을 그대로 쓰고 appears만 채운다(description은 비워도 됨).
 - 새 항목의 description: 영상·사진 모델에 그대로 넣을 영어 고정 묘사 1~3문장. 인물은 나이·국적·성별·얼굴형·머리 모양과 색·체형·분위기,
-  장소는 공간 구조·재질·색·시간대·빛, 소품은 모양·재질·색·크기. 실존 인물·배우 이름 금지.
+  장소는 공간 구조·재질·색·시간대·빛, 배경은 풍경·거리감·날씨·시간대·빛, 소품은 모양·재질·색·크기. 실존 인물·배우 이름 금지.
 - details: 한국어. 화별 의상·바뀌면 안 되는 특징·금지 사항.
 - summary: 한국어 한 줄(대본 속 역할).
 - appears: 이 항목이 나오는 씬 [{"ep": 화 번호, "scene": 씬 번호}]. 씬 번호는 대본의 씬 순서(1부터).
@@ -2048,6 +2051,7 @@ def t_photo_describe(t):
         "character": "인물: 추정 나이대, 국적·인종 인상, 성별, 얼굴형, 이마·눈썹·눈(모양·쌍꺼풀·눈꼬리)·코·입술·턱선, 피부 톤과 질감, 점·흉터 같은 특징, "
                      "머리 길이·모양·가르마·앞머리·색·질감, 키 인상·체형·어깨·자세, 표정 습관과 분위기, 사진 속 의상(종류·색·재질·핏)·액세서리·메이크업",
         "location": "장소: 실내/실외, 공간의 크기와 구조, 바닥·벽·천장 재질과 색, 가구·소품 배치, 창·문 위치, 빛의 방향·색온도·시간대, 분위기, 눈에 띄는 고유한 물건",
+        "background": "배경: 무엇이 보이는 풍경인가(도시·자연·하늘·무대 등), 거리감과 원근, 주요 형태와 색, 날씨·시간대·빛의 방향과 색온도, 분위기, 눈에 띄는 고유한 요소",
         "prop": "소품: 종류, 모양과 비율, 크기(손·몸 대비), 재질과 표면 질감, 색(주색·보조색), 로고·글자·무늬(실제 상표 이름은 쓰지 말 것), 낡음·흠집, 쓰는 방식",
     }.get(cat, "사진 속 대상의 생김새를 빠짐없이")
     system = f"""너는 드라마 제작팀의 미술·캐스팅 담당이다. 대표가 올린 기준 사진을 보고 시리즈 바이블의 고정 묘사를 쓴다.
