@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.12.0"
+VERSION = "1.13.0"
 
 import base64
 import glob
@@ -740,8 +740,11 @@ def review_cuts(ctx, ep, cuts, model):
 
 def est_cut_usd(ctx, seconds, refs):
     res = setting(ctx, "generation", "resolution", "480p")
-    model = f"seedance-2.5-i2v-{res}"   # 컷 설계에서 첫 장면 사진을 만들어 사진→영상으로 만든다
-    u = price("higgsfield", model, "per_second") or price("higgsfield", f"seedance-2.5-{'ref' if refs else 't2v'}-{res}", "per_second")
+    vm = VIDEO_MODELS.get(setting(ctx, "generation", "video_model", "seedance-2.5") or "seedance-2.5", VIDEO_MODELS["seedance-2.5"])
+    if res not in vm["res"]:
+        res = vm["res"][0]
+    model = f"{vm['key']}-i2v-{res}"   # 컷 설계에서 첫 장면 사진을 만들어 사진→영상으로 만든다
+    u = price("higgsfield", model, "per_second") or price("higgsfield", f"{vm['key']}-{'ref' if refs else 't2v'}-{res}", "per_second")
     return round(u * seconds, 4) if u else None
 
 
@@ -1193,6 +1196,104 @@ def el_music(prompt, seconds, model="music_v1"):
         raise RuntimeError(f"배경음악 만들기 실패 {e.code}: {e.read()[:300]!r}") from None
 
 
+def el_sts(path, voice_id, model="eleven_multilingual_sts_v2"):
+    """ElevenLabs 목소리 바꾸기(speech-to-speech): 타이밍·감정은 그대로 두고 음색만 바이블 인물 목소리로."""
+    boundary = "----nyx" + uuid.uuid4().hex
+    with open(path, "rb") as f:
+        data = f.read()
+    body = (f'--{boundary}\r\nContent-Disposition: form-data; name="model_id"\r\n\r\n{model}\r\n').encode() + \
+        (f'--{boundary}\r\nContent-Disposition: form-data; name="audio"; filename="a.wav"\r\nContent-Type: audio/wav\r\n\r\n').encode() + data + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(f"https://api.elevenlabs.io/v1/speech-to-speech/{voice_id}?output_format=mp3_44100_128", data=body, method="POST",
+                                 headers={"xi-api-key": el_key(), "Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"목소리 바꾸기 실패 {e.code}: {e.read()[:200]!r}") from None
+
+
+def apply_dialogue_tool(ctx, gen, cut, files, tmp, ep):
+    """설정 '대사 도구'가 ElevenLabs면 영상의 대사를 바이블 인물 목소리로 바꿔 입힌다.
+    - 영상에 소리가 있고 화자가 한 명: 목소리 바꾸기(타이밍·감정 유지, 음색만 교체)
+    - 영상에 소리가 없거나(예: Kling) 화자가 여럿: 대사 미리 듣기(TTS)를 순서대로 이어 붙인다(입 모양과 어긋날 수 있음)
+    원래 영상 소리는 씬 폴더에 '_원음.wav'로 남기고, 대사 줄과 미리보기·감수용 영상은 바꾼 소리로 만든다."""
+    if (gen.get("dialogue_tool") or "higgsfield") != "elevenlabs":
+        return tmp
+    lines = [ln for ln in (cut.get("voice_lines") or parse_dialogue(cut.get("dialogue"))) if (ln.get("text") or "").strip()]
+    if not lines:
+        return tmp
+    speakers = {}
+    for ln in lines:
+        vid, _ = voice_for(ctx, ln.get("speaker") or "")
+        if vid:
+            speakers[ln.get("speaker")] = vid
+    if not speakers:
+        log(f"{cut['code']} 바이블에 목소리가 정해진 인물이 없어 영상 소리 그대로 둡니다")
+        return tmp
+    secs = float(cut.get("seconds") or 6)
+    work = os.path.join(HOME, "work", f"dlg_{uuid.uuid4().hex[:6]}")
+    os.makedirs(work, exist_ok=True)
+    out_wav = os.path.join(work, "voice.wav")
+    try:
+        if files.get("voice") and len(speakers) == 1 and len({ln.get("speaker") for ln in lines}) == 1:
+            progress(f"{cut['code']} 대사를 바이블 목소리로 바꾸는 중(ElevenLabs 목소리 바꾸기)")
+            mp3 = os.path.join(work, "sts.mp3")
+            with open(mp3, "wb") as f:
+                f.write(el_sts(files["voice"], list(speakers.values())[0]))
+            ff("-i", mp3, "-ac", "2", "-ar", "48000", "-af", f"apad,atrim=0:{secs}", "-c:a", "pcm_s16le", out_wav)
+            how = "목소리 바꾸기"
+            log_cost("audio", "elevenlabs", "speech-to-speech", {"seconds": secs}, episode_id=ep, scene_no=cut.get("scene_no"), cut_id=cut.get("code"),
+                     outcome="success", note="대사 목소리 바꾸기")
+        else:
+            progress(f"{cut['code']} 대사를 바이블 목소리로 읽혀 이어 붙이는 중(ElevenLabs)")
+            parts, t0 = [], 0.3
+            for i, ln in enumerate(lines):
+                vid = speakers.get(ln.get("speaker"))
+                if not vid:
+                    continue
+                p = os.path.join(work, f"l{i}.mp3")
+                got = False
+                if ln.get("path"):
+                    try:
+                        fetch_to(storage_signed_url("takes", ln["path"], 3600), p)
+                        got = True
+                    except Exception:
+                        got = False
+                if not got:
+                    with open(p, "wb") as f:
+                        f.write(tts_line(vid, ln["text"], ln.get("tags") or "", gen.get("tts_model") or "eleven_v3"))
+                parts.append((p, t0))
+                t0 += max(0.6, len(audio_curve(p)) * 0.25) + 0.25
+            if not parts:
+                return tmp
+            inputs, filt = [], []
+            for k, (p, st) in enumerate(parts):
+                inputs += ["-i", p]
+                filt.append(f"[{k}:a]adelay={int(st * 1000)}|{int(st * 1000)},aformat=channel_layouts=stereo[a{k}]")
+            mix = "".join(f"[a{k}]" for k in range(len(parts))) + f"amix=inputs={len(parts)}:normalize=0,apad,atrim=0:{secs}[out]"
+            ff(*inputs, "-filter_complex", ";".join(filt) + ";" + mix, "-map", "[out]", "-ar", "48000", "-c:a", "pcm_s16le", out_wav)
+            how = "대사 읽기 이어 붙이기"
+        if files.get("voice"):
+            keep = files["voice"].replace(".wav", "_원음.wav")
+            shutil.copyfile(files["voice"], keep)
+            shutil.copyfile(out_wav, files["voice"])
+        else:
+            dst = os.path.join(files["folder"], SUB["voice"], os.path.basename(files["video"]).replace(".mp4", ".wav"))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copyfile(out_wav, dst)
+            files["voice"] = dst
+        mixed = tmp.replace(".mp4", "_el.mp4")
+        ff("-i", files["video"], "-i", out_wav, "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-shortest", mixed)
+        files["dialogue_tool"] = f"ElevenLabs({how})"
+        log(f"{cut['code']} 대사 ElevenLabs로 교체: {how}")
+        return mixed
+    except Exception as ex:
+        log(f"{cut['code']} 대사 바꾸기 실패(영상 소리 그대로): {ex}")
+        return tmp
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def stt_words(path, model="scribe_v1"):
     """ElevenLabs 받아쓰기: 단어와 시간. 영상 소리 감수에 쓴다."""
     key = el_key()
@@ -1221,6 +1322,13 @@ def stt_words(path, model="scribe_v1"):
 
 
 GROK_IMAGE = "xai/grok-imagine-image-2.0"
+# 영상 모델(Higgsfield 안에서 고름). 경로·입력값은 Higgsfield 공개 문서 기준(2026-11)
+VIDEO_MODELS = {
+    "seedance-2.5": {"key": "seedance-2.5", "name": "Seedance 2.5", "base": "bytedance/seedance-2.5", "audio": True,
+                     "res": ["480p", "720p", "1080p"], "routes": {"i2v": "image-to-video", "ref": "reference-to-video", "t2v": "text-to-video"}},
+    "kling-4.0": {"key": "kling-4.0", "name": "Kling 4.0", "base": "kling-video/v4.0", "audio": False,
+                  "res": ["720p", "1080p"], "routes": {"i2v": "image-to-video", "t2v": "text-to-video"}},
+}
 SOUL2 = "higgsfield-ai/soul/v2/standard"
 # Nano Banana Pro의 Higgsfield API 경로는 공개 문서에 없어서, 내 키로 후보 경로를 직접 두드려 찾는다.
 # 프롬프트 없이 보내면 실제 생성은 되지 않고(필수값 누락) 경로가 있으면 400/422, 없으면 404가 온다.
@@ -1693,21 +1801,32 @@ def t_generate(t):
                 except Exception as ex:
                     log(f"참고 사진 주소 실패({n}): {ex}")
         refs = refs[:4]
-    route = "image-to-video" if first_url else "reference-to-video" if refs else "text-to-video"
-    body = {"prompt": cut["prompt"], "duration": int(cut["seconds"]), "resolution": res,
-            "output_format": "mp4", "generate_audio": bool(gen.get("audio", True))}
-    if route != "image-to-video":
-        body["aspect_ratio"] = gen.get("aspect_ratio", "9:16")
+    vm = VIDEO_MODELS.get(gen.get("video_model") or "seedance-2.5", VIDEO_MODELS["seedance-2.5"])
+    if res not in vm["res"]:
+        res = vm["res"][0]
+    if not first_url and refs and "ref" not in vm["routes"]:
+        refs = []   # 참고 사진 방식이 없는 모델(예: Kling)은 글로만
+    kind = "i2v" if first_url else "ref" if refs else "t2v"
+    route = vm["routes"][kind]
+    if vm["key"] == "kling-4.0":
+        body = {"prompt": cut["prompt"], "duration": int(cut["seconds"]), "resolution": res}
+        if kind == "t2v":
+            body["aspect_ratio"] = gen.get("aspect_ratio", "9:16")
+    else:
+        body = {"prompt": cut["prompt"], "duration": int(cut["seconds"]), "resolution": res,
+                "output_format": "mp4", "generate_audio": bool(gen.get("audio", True))}
+        if route != "image-to-video":
+            body["aspect_ratio"] = gen.get("aspect_ratio", "9:16")
     if first_url:
         body["image_url"] = first_url
         if last_url:
             body["end_image_url"] = last_url
     elif refs:
         body["image_urls"] = refs
-    pmodel = f"seedance-2.5-{'i2v' if first_url else 'ref' if refs else 't2v'}-{res}"
+    pmodel = f"{vm['key']}-{kind}-{res}"
     rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "generating"})
-    progress(f"{cut['code']} Seedance 2.5 {res} {cut['seconds']}초 생성 요청 · " + ("첫 장면 사진" + (" + 끝 장면" if last_url else "") if first_url else f"참고 사진 {len(refs)}장" if refs else "글로만"))
-    code, data = http_json(f"https://api.higgsfield.ai/bytedance/seedance-2.5/{route}",
+    progress(f"{cut['code']} {vm['name']} {res} {cut['seconds']}초 생성 요청 · " + ("첫 장면 사진" + (" + 끝 장면" if last_url else "") if first_url else f"참고 사진 {len(refs)}장" if refs else "글로만"))
+    code, data = http_json(f"https://api.higgsfield.ai/{vm['base']}/{route}",
                            {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json"}, "POST", body, timeout=120)
     if code not in (200, 201, 202) or not isinstance(data, dict):
         rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "failed"})
@@ -1716,8 +1835,8 @@ def t_generate(t):
     status_url = data.get("status_url") or f"https://api.higgsfield.ai/requests/{rid}/status"
     cost_id = log_cost("video", "higgsfield", pmodel, {"seconds": int(cut["seconds"])}, episode_id=ep, scene_no=cut["scene_no"],
                        cut_id=cut["code"], attempt_no=len(cut.get("takes") or []) + 1, outcome="pending", job_id=t["id"],
-                       note=f"Seedance 2.5 {route} {res}")
-    take_id = rpc("agent_save_take", p_token=TOKEN, p={"cut_id": cut["id"], "model": f"bytedance/seedance-2.5/{route}", "resolution": res,
+                       note=f"{vm['name']} {route} {res}")
+    take_id = rpc("agent_save_take", p_token=TOKEN, p={"cut_id": cut["id"], "model": f"{vm['base']}/{route}", "resolution": res,
                                                         "seconds": int(cut["seconds"]), "request_id": rid, "status": "submitted",
                                                         "cost_event_id": cost_id, "usd": estimate_usd("higgsfield", pmodel, {"seconds": int(cut["seconds"])})})
     deadline, last, st = time.time() + 40 * 60, None, {}
@@ -1753,6 +1872,8 @@ def t_generate(t):
     tmp = os.path.join(HOME, "work", f"{take_id}.mp4")
     fetch_to(url, tmp)
     files = save_local_package(take, tmp)
+    tmp_raw = tmp
+    tmp = apply_dialogue_tool(ctx, gen, cut, files, tmp, ep)
     # 대시보드에서 보는 미리보기: 원본(소리 포함)·포스터
     sid = ((take.get("episode") or {}).get("series_id")) or "series"
     base = f"{sid}/E{int(take['episode']['number']):02d}/S{int(cut['scene_no']):02d}/C{int(cut['cut_no']):02d}_t{take['take_no']}_{uuid.uuid4().hex[:6]}"
@@ -1785,6 +1906,11 @@ def t_generate(t):
         log(f"영상 감수 실패(대기열로 다시): {ex}")
         rpc("agent_add_task", p_token=TOKEN, p={"kind": "video_review", "episode_id": ep, "cut_id": cut["id"], "take_id": take_id})
     queue_store(take_id, ep, cut)
+    if tmp != tmp_raw:
+        try:
+            os.remove(tmp_raw)
+        except OSError:
+            pass
     try:
         os.remove(tmp)
     except OSError:
