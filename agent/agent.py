@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.19.6"
+VERSION = "1.19.7"
 
 import base64
 import glob
@@ -2562,6 +2562,33 @@ def upload_from_url(url, path):
     return p
 
 
+def _photo_generate(d, name):
+    """사진 디자인 한 번 만들기 → (사진 주소들, 모델)."""
+    cm = (d.get("model") or (d.get("generation") or {}).get("char_photo_model") or "soul2")
+    if d["category"] == "character" and cm == "soul2":
+        progress(f"{name} 실사 인물 사진 후보를 만드는 중 (Soul 2)")
+        urls = soul_images(d["prompt"] + " " + PHOTO_LOOK, n=4, aspect="3:4")
+        model = SOUL2
+    elif d["category"] == "character":   # 다른 모델(나노바나나 프로·Grok)로 후보 4장을 동시에 — 고른 사진으로 얼굴 학습(Soul ID)은 그대로
+        model = resolve_image_model({"image_model": cm}) if cm not in ("nano", "grok") else (resolve_image_model({"image_model": "auto"}) if cm == "nano" else GROK_IMAGE)
+        progress(f"{name} 실사 인물 사진 후보 4장을 동시에 만드는 중 ({'나노바나나 프로' if cm == 'nano' else 'Grok Imagine' if cm == 'grok' else model})")
+        res = parallel([(lambda: hf_image(d["prompt"] + " Head-and-shoulders portrait, plain light grey background. " + PHOTO_LOOK, [], "3:4", model)) for _ in range(4)], workers=4)
+        urls = [u for u in res if isinstance(u, str) and u]
+        if not urls:
+            raise RuntimeError(f"인물 사진 후보 실패({model}): {res[0]}")
+    else:
+        model = resolve_image_model(d.get("generation") or {})
+        progress(f"{name} 사진 후보를 만드는 중")
+        urls = []
+        for _ in range(2):
+            look = {"prop": " Photorealistic product photograph of the object alone, true-to-life materials and scale, soft studio light, plain neutral background, no people, no text.",
+                    "background": " Photorealistic wide background plate photograph, real camera, natural light and atmosphere, no people, no text."}.get(
+                d["category"], " Photorealistic location photograph, natural light, no people, no text.")
+            st = hf_submit_wait(model, {"prompt": d["prompt"] + look, "aspect_ratio": "9:16"}, "사진")
+            urls += find_image_urls(st.get("images") or st)[:1]
+    return urls, model
+
+
 @task("photo_design")
 def t_photo_design(t):
     did = (t.get("payload") or {}).get("design_id")
@@ -2591,29 +2618,23 @@ def t_photo_design(t):
             en = clean_en(txt)
             if en:
                 d["prompt"] = en
+    REJECT = re.compile(r"nsfw|safety|moderation|content.?filter|inappropriate|prohibited|sensitive|\b403\b|Forbidden", re.I)
+    def gen_once():
+        return _photo_generate(d, name)
     try:
-        cm = (d.get("model") or (d.get("generation") or {}).get("char_photo_model") or "soul2")
-        if d["category"] == "character" and cm == "soul2":
-            progress(f"{name} 실사 인물 사진 후보를 만드는 중 (Soul 2)")
-            urls = soul_images(d["prompt"] + " " + PHOTO_LOOK, n=4, aspect="3:4")
-            model = SOUL2
-        elif d["category"] == "character":   # 다른 모델(나노바나나 프로·Grok)로 후보 4장을 동시에 — 고른 사진으로 얼굴 학습(Soul ID)은 그대로
-            model = resolve_image_model({"image_model": cm}) if cm not in ("nano", "grok") else (resolve_image_model({"image_model": "auto"}) if cm == "nano" else GROK_IMAGE)
-            progress(f"{name} 실사 인물 사진 후보 4장을 동시에 만드는 중 ({'나노바나나 프로' if cm == 'nano' else 'Grok Imagine' if cm == 'grok' else model})")
-            res = parallel([(lambda: hf_image(d["prompt"] + " Head-and-shoulders portrait, plain light grey background. " + PHOTO_LOOK, [], "3:4", model)) for _ in range(4)], workers=4)
-            urls = [u for u in res if isinstance(u, str) and u]
-            if not urls:
-                raise RuntimeError(f"인물 사진 후보 실패({model}): {res[0]}")
-        else:
-            model = resolve_image_model(d.get("generation") or {})
-            progress(f"{name} 사진 후보를 만드는 중")
-            urls = []
-            for _ in range(2):
-                look = {"prop": " Photorealistic product photograph of the object alone, true-to-life materials and scale, soft studio light, plain neutral background, no people, no text.",
-                        "background": " Photorealistic wide background plate photograph, real camera, natural light and atmosphere, no people, no text."}.get(
-                    d["category"], " Photorealistic location photograph, natural light, no people, no text.")
-                st = hf_submit_wait(model, {"prompt": d["prompt"] + look, "aspect_ratio": "9:16"}, "사진")
-                urls += find_image_urls(st.get("images") or st)[:1]
+        try:
+            urls, model = gen_once()
+        except Exception as ex1:
+            if not REJECT.search(str(ex1)) or d.get("_safe_done"):
+                raise
+            progress(f"{name}: 생성 서비스가 내용을 거절해 코디네이터가 표현을 완곡하게 고쳐 다시 만드는 중")
+            fixed, changed = safe_prompt(d["prompt"], name)
+            if not fixed:
+                raise
+            d["prompt"], d["_safe_done"] = fixed, True
+            rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"review": {"items": [], "summary": f"내용 거절 → 코디네이터가 표현을 완곡하게 고쳐 다시 만듦: {changed}",
+                                                                                 "prompt_improved": fixed, "improve_note": changed}})
+            urls, model = gen_once()
         previews = [{"path": upload_from_url(u, f"photos/{did}/{i}_{uuid.uuid4().hex[:6]}.jpg")} for i, u in enumerate(urls, 1)]
     except Exception as e:
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
@@ -3123,7 +3144,8 @@ def t_bible_prompt(t):
         applied = str(d.get("changed") or "요청 반영")[:120]
     rules = f"""- 눈에 보이는 고정 특징만. 이 분류({cat})에서 담을 것: {PROMPT_NEEDS.get(cat, '눈에 보이는 특징')}.
 - 세부 사항에 '바뀌면 안 되는 특징'이 있으면 반드시 포함한다. 화마다 바뀌는 상황·줄거리·성격·대사는 넣지 않는다.
-- 4~8문장, 현재형, 쉼표로 이어진 묘사 위주. 이름·실존 인물·배우·브랜드는 쓰지 않는다. 한글은 한 글자도 쓰지 않는다."""
+- 4~8문장, 현재형, 쉼표로 이어진 묘사 위주. 이름·실존 인물·배우·브랜드는 쓰지 않는다. 한글은 한 글자도 쓰지 않는다.
+- 실존 인물(배우·가수 등)을 닮았다는 표현은 이름을 빼고 그 인상을 이목구비 특징으로 바꿔 쓴다. 신체 부위를 성적으로 강조하는 표현(가슴골·노출 등)은 생성 서비스가 거절하므로 '균형 잡힌 글래머러스한 체형'처럼 전체 체형 인상으로 완곡하게 쓴다."""
     system = f"""너는 드라마 작가실의 프롬프트 담당이다. 시리즈 바이블 항목의 묘사(한국어가 섞여 있음)를 영상·사진 생성 모델에 그대로 넣을 영어 고정 프롬프트로 옮긴다.
 {rules}
 - 한국어 원문의 내용을 하나도 빠뜨리지 말고 꼼꼼하게 옮긴다(색·재질·수치·금지 사항까지). 원문에 없는 것을 지어내지 않는다.
@@ -3164,6 +3186,14 @@ def t_bible_prompt(t):
                            f"바이블 '{name}' 카드에서 한글 묘사를 자세히 적어 주세요(담을 것: {need}). {PROMPT_EXAMPLE.get(cat, '')}")
     rpc("agent_bible_set_prompt", p_token=TOKEN, p_version=info["version_id"], p_prompt=en)
     return f"{name} 영어 프롬프트 {len(en)}자 ({how})" + (f" · 요청 반영: {applied}" if p.get("apply_reason") and reason else "")
+
+
+def safe_prompt(prompt, name=""):
+    """코디네이터: 생성 서비스가 거절할 표현(실존 인물 닮음·성적인 신체 강조)을 뜻은 살리고 완곡하게 고친 영어 프롬프트."""
+    txt, _ = claude("claude-sonnet-5-5", "너는 드라마 제작팀의 코디네이터다. 사진 생성 서비스가 안전 규정으로 거절한 영어 프롬프트를 고친다. "
+                    + "실존 인물(배우·가수 등)을 닮았다는 표현은 이름을 빼고 그 인상을 이목구비 특징으로 바꿔 쓴다. 신체 부위를 성적으로 강조하는 표현(가슴골·노출 등)은 생성 서비스가 거절하므로 '균형 잡힌 글래머러스한 체형'처럼 전체 체형 인상으로 완곡하게 쓴다." + " 그 밖의 외모 특징(나이 인상·얼굴·체형·머리)은 최대한 그대로 살린다. 답은 <json>{\"prompt_en\": \"\", \"changed\": \"무엇을 바꿨는지 한국어 한 줄\"}</json>",
+                    prompt, max_tokens=1500, stage="other", note=f"코디네이터: 안전 규정용 프롬프트 다듬기 {name}")
+    return clean_en(txt), str(safe_json(txt).get("changed") or "")[:200]
 
 
 def design_check(did):
@@ -3227,7 +3257,17 @@ avoid에 생성 모델에 넣을 금지 사항(영어 짧은 구, 예: "no ID ba
                                                                          "prompt": prompt[:600], "checked_at": datetime.now().isoformat(timespec="seconds"),
                                                                          "stage": d.get("status"), "prompt_improved": improved or None, "avoid": avoid,
                                                                          "improve_note": str(r.get("improve_note") or "")[:200], "bible_fixed": bible_fixed}})
-    return f"{name} 사진 {len(out)}장 확인: 문제 {bad}장" + (" · 다음 후보용 프롬프트 개선" if improved or avoid else "")
+    # 쓸 만한 후보가 하나도 없으면: 대표에게 넘기지 않고 코디네이터가 고친 프롬프트로 한 번 다시 만든다(같은 사슬에서 1번만)
+    redo = None
+    if d.get("status") == "ready" and bad == len(out) and (improved or avoid):
+        np = (improved or prompt).rstrip(". ") + (". Avoid: " + ", ".join(avoid) + "." if avoid else "")
+        try:
+            redo = rpc("agent_photo_redesign", p_token=TOKEN, p_from=did, p_prompt=np)
+        except Exception as ex:
+            log(f"자동 다시 만들기 실패: {ex}")
+        if redo:
+            notify(f"코디네이터: {name} 후보를 고친 프롬프트로 다시 만드는 중", str(r.get("improve_note") or r.get("summary") or "")[:200])
+    return f"{name} 사진 {len(out)}장 확인: 문제 {bad}장" + (" · 고친 프롬프트로 자동 다시 만드는 중" if redo else " · 다음 후보용 프롬프트 개선" if improved or avoid else "")
 
 
 @task("coord_review")
@@ -3258,6 +3298,7 @@ def t_coord_review(t):
 확인할 것:
 1) 대표 요청(있으면)이 한글 묘사와 영어 프롬프트에 정확히 들어갔는가 — 요청을 항목별로 쪼개 하나씩.
 2) 영어 프롬프트가 한글 묘사·세부 사항의 눈에 보이는 고정 특징({PROMPT_NEEDS.get(cat, '눈에 보이는 특징')})을 빠짐없이, 어긋나지 않게 담았는가. 한글·이름·브랜드가 섞이지 않았는가.
+   생성 서비스 안전 규정에 걸릴 표현이 없는가: 실존 인물(배우·가수 등)을 닮았다는 표현은 이름을 빼고 그 인상을 이목구비 특징으로 바꿔 쓴다. 신체 부위를 성적으로 강조하는 표현(가슴골·노출 등)은 생성 서비스가 거절하므로 '균형 잡힌 글래머러스한 체형'처럼 전체 체형 인상으로 완곡하게 쓴다. 걸릴 표현이 있으면 verdict "fix"로 영어 프롬프트를 완곡하게 고친다(한글 묘사는 그대로 두고 summary에 무엇을 바꿨는지 적는다).
 3) 대본 발췌(있으면)와 어긋나는 것(나이·성별·머리·옷·장소 구조 등)이 없는가.
 처리:
 - 영어 프롬프트만 틀리거나 빠졌으면 verdict "fix"와 fixed_prompt_en(고친 영어 프롬프트 전체, 4~8문장)을 준다. 묘사는 고치지 않는다.
