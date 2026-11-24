@@ -369,7 +369,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.24.0"
+VERSION = "1.25.0"
 
 import base64
 import glob
@@ -1184,7 +1184,7 @@ def writers_split(t, p):
     if not new_body:
         raise RuntimeError(f"작가실이 {epno}화 긴 씬을 나누지 못했습니다. " + " / ".join(notes)
                            + ". 이렇게 하세요: 대본 탭에서 그 씬 중간에 'S#번호-2 | 시간 | 장소 | 낮·밤' 머리를 직접 넣어 나누고 확정하면 감독이 이어서 설계합니다.")
-    content = src["content"]
+    content = normalize_scene_heads(src["content"])   # 나눈 씬 본문과 같은 모양(S# 머리 붙인 대본)에서 바꿔 넣는다
     for sn, body in new_body.items():
         content = content.replace(orig_of[sn], body, 1)
     note = f"작가실: 감독 요청으로 긴 씬 나눔 — " + " / ".join(notes)
@@ -1364,8 +1364,27 @@ def has_images(ctx, names):
 SCENE_HEAD = re.compile(r"^[ \t]*[*#>\[]*[ \t]*S[ \t]*#[ \t]*(\d+)(?:[ \t]*-[ \t]*(\d+))?", re.M)
 
 
+# 대표 원고의 씬 구분: "00:12–00:48 | 태국 오디션장" (시간 구간 | 장소). S#가 없어도 이 줄을 씬 머리로 본다.
+TIME_HEAD = re.compile(r"^([ \t]*[*#>\[]*[ \t]*)(\d{1,2}:\d{2}(?::\d{2})?[ \t]*[–—\-~][ \t]*\d{1,2}:\d{2}(?::\d{2})?[ \t]*\|)", re.M)
+
+
+def normalize_scene_heads(content):
+    """S# 씬 머리가 하나도 없고 '시간 구간 | 장소' 줄이 있으면 그 줄마다 순서대로 'S#1 | ' 을 붙인다(내용은 그대로).
+    예전엔 이 형식을 못 알아봐 화 전체가 씬 하나(S#0)가 되고, 작가실에 화 전체를 나눠 달라고 했다가 실패했다."""
+    content = content or ""
+    if SCENE_HEAD.search(content) or not TIME_HEAD.search(content):
+        return content
+    n = [0]
+
+    def add(m):
+        n[0] += 1
+        return f"{m.group(1)}S#{n[0]} | {m.group(2)}"
+    return TIME_HEAD.sub(add, content)
+
+
 def split_scenes(content):
     """정리본을 씬(S#번호) 단위로 나눈다. [(번호, 머리줄, 본문)] — 씬 표시가 없으면 통째로 하나."""
+    content = normalize_scene_heads(content)
     marks = list(SCENE_HEAD.finditer(content or ""))
     if not marks:
         return [(0, "", content or "")]
@@ -1505,6 +1524,10 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
     other_nos = sorted({n for n, is_long, _ in failed if not is_long} - set(long_nos))
     lines = [x for _, _, x in failed]
     asked = []
+    if 0 in long_nos:   # 씬 구분이 아예 없는 대본: 화 전체를 '나눠 달라'고 하면 실패만 한다 → 정확한 원인과 할 일을 알린다
+        raise RuntimeError(f"{epno}화 확정 대본에 씬 구분이 없어 화 전체가 씬 하나로 읽혔습니다(감독이 한 번에 설계할 수 없는 길이). "
+                           "이렇게 하세요: 대본 탭에서 씬마다 '00:12–00:48 | 장소' 또는 'S#2 | 00:12–00:48 | 장소 | 낮' 머리줄을 넣고 확정하거나, "
+                           "'작가실 정리 실행'으로 씬 머리를 붙인 정리본을 받아 확정하세요.")
     if long_nos and not p.get("fix_round"):
         rpc("agent_add_task", p_token=TOKEN, p={"kind": "writers_room", "episode_id": ep, "payload": {
             "mode": "split_scenes", "scenes": long_nos, "source_version_id": script["id"],
@@ -8412,6 +8435,11 @@ function explainFail(kind, err) {
   if (/대표님이 쓴 묘사로는/.test(e)) return R('대표님이 바이블에 쓴 묘사가 짧거나 모호해서, 두 번 시도했지만 영어 프롬프트를 만들지 못했습니다.', (e.match(/빠진 것:[^.]*\./) || [''])[0] + ' 바이블에서 그 항목 카드 → 내용 고치기로 한글로 자세히 적어 주세요. 고치면 자동으로 다시 돕니다. ' + (e.match(/예: .*/) || [''])[0], ['bible']);
   if (/묘사와 대본 모두에서/.test(e)) return R('묘사도 짧고 대본에도 이 항목의 생김새가 거의 없어 영어 프롬프트를 만들지 못했습니다(세 번 시도).', '바이블에서 그 항목 묘사를 한글로 자세히 적어 주세요. ' + (e.match(/\(담을 것:[^)]*\)/) || [''])[0], ['bible', 'retry']);
   if (/묘사|프롬프트/.test(e)) return R('바이블 묘사를 영어 프롬프트로 옮기지 못했습니다(예전 방식에서 난 실패).', '다시 시도하면 새 방식으로 돕니다: 한 번 더 시도 → 그래도 안 되면 대본에서 그 항목이 나오는 부분을 읽고 채움. 대표님이 직접 쓴 묘사면 빠진 것을 알려 드립니다.', ['retry', 'bible']);
+  if (/씬 구분이 없어|S#0/.test(e)) return R('대본에 씬 구분이 없어 화 전체가 씬 하나로 읽혔습니다. 감독은 한 번에 화 전체를 컷으로 설계할 수 없고, 작가실도 화 전체를 대사 그대로 나누지 못해 실패했습니다(글 내용의 문제가 아니라 씬 표시 형식 문제).',
+    '대본 탭에서 씬마다 "00:12–00:48 | 장소" 줄이 있는지 확인하세요(지금은 이 형식도 씬으로 알아봅니다). 그다음 "감독: 컷 설계"를 다시 누르세요. 씬 줄이 아예 없으면 "작가실 정리 실행"으로 씬 머리를 붙인 정리본을 받으세요.', ['scripts', 'production']);
+  if (/긴 씬을 나누지 못했/.test(e)) { const k = (e.match(/대사 보존 (\d+)%/) || [])[1];
+    return R(`작가실이 감독 요청대로 긴 씬을 나누다가 대사가 바뀌거나 빠져서(대사 보존 ${k || '?'}%, 기준 95%) 저장하지 않았습니다. 대사를 지키려는 안전장치가 막은 것입니다.`,
+      '작가실에 다시 요청하면서 "어디서 나눌지"를 적어 주세요(예: "린이 문을 닫는 장면에서 나눠 줘"). 또는 대본 탭에서 그 씬 중간에 "00:30–00:48 | 장소" 줄을 직접 넣고 확정하세요.', ['writers', 'scripts']); }
   if (/확정된 대본이 없/.test(e)) return R('이 화에 확정된 대본이 없어 감독이 읽을 대본이 없습니다.', '대본 탭에서 정리본(또는 원고)을 확정한 뒤 다시 시도하세요. 또는 "작가실 정리 실행"을 누르면 정리 → 확정 → 컷 설계까지 이어집니다.', ['scripts', 'retry']);
   if (/읽을 원고가 없/.test(e)) return R('이 화에 원고가 없습니다.', '대본 탭에서 원고를 넣으세요.', ['scripts']);
   if (/nsfw|safety|policy|moderation|content.?filter|inappropriate|prohibited|sensitive/i.test(e)) return /사진|photo|Soul|인물/i.test(kind + e)
@@ -8794,10 +8822,14 @@ async function scriptTextOf(id) {
 }
 // 대본에서 씬 목록: { 번호: { time, place, cast, summary } } — "S#3 | 01:08–01:50 | 대기실 | 낮 / 등장: 서윤" 머리 + 첫 문장
 function parseSceneList(text) {
-  const out = {}; let cur = null;
-  for (const raw of String(text || '').split(/\r?\n/)) {
+  const out = {}; let cur = null, tn = 0;
+  const lines = String(text || '').split(/\r?\n/);
+  // S# 머리가 없으면 대표 원고 형식 "00:12–00:48 | 장소" 줄을 순서대로 S#1, S#2…로 본다(에이전트와 같은 규칙)
+  const timeOnly = !lines.some(l => /^[*#>\[\s]*S#\s*\d+/.test(l.trim()));
+  for (const raw of lines) {
     const line = raw.trim(); if (!line) continue;
-    const m = line.match(/^[*#>\[\s]*S#\s*(\d+)\s*(.*)$/);
+    const tm = timeOnly && line.match(/^[*#>\[\s]*(\d{1,2}:\d{2}(?::\d{2})?\s*[–—\-~]\s*\d{1,2}:\d{2}(?::\d{2})?\s*\|.*)$/);
+    const m = tm ? [null, String(++tn), '| ' + tm[1]] : line.match(/^[*#>\[\s]*S#\s*(\d+)\s*(.*)$/);
     if (m) {
       const parts = m[2].replace(/[*\]]+/g, '').split('|').map(s => s.trim()).filter(Boolean);
       const tail = parts.slice(2).join(' | ');
@@ -8807,7 +8839,7 @@ function parseSceneList(text) {
     }
     const who = line.match(/^등장\s*[:：]\s*(.+)$/);
     if (cur && who) { if (!cur.cast) cur.cast = who[1].trim(); continue; }
-    if (cur && !cur.summary) cur.summary = line.replace(/^[*>\-\s]+/, '').replace(/\*\*/g, '').slice(0, 90) + (line.length > 90 ? '…' : '');
+    if (cur && !cur.summary) { const s = line.replace(/^[*>\-\s\[]+/, '').replace(/\]\s*$/, '').replace(/\*\*/g, ''); cur.summary = s.slice(0, 90) + (s.length > 90 ? '…' : ''); }
   }
   return out;
 }

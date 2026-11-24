@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.24.0"
+VERSION = "1.25.0"
 
 import base64
 import glob
@@ -825,7 +825,7 @@ def writers_split(t, p):
     if not new_body:
         raise RuntimeError(f"작가실이 {epno}화 긴 씬을 나누지 못했습니다. " + " / ".join(notes)
                            + ". 이렇게 하세요: 대본 탭에서 그 씬 중간에 'S#번호-2 | 시간 | 장소 | 낮·밤' 머리를 직접 넣어 나누고 확정하면 감독이 이어서 설계합니다.")
-    content = src["content"]
+    content = normalize_scene_heads(src["content"])   # 나눈 씬 본문과 같은 모양(S# 머리 붙인 대본)에서 바꿔 넣는다
     for sn, body in new_body.items():
         content = content.replace(orig_of[sn], body, 1)
     note = f"작가실: 감독 요청으로 긴 씬 나눔 — " + " / ".join(notes)
@@ -1005,8 +1005,27 @@ def has_images(ctx, names):
 SCENE_HEAD = re.compile(r"^[ \t]*[*#>\[]*[ \t]*S[ \t]*#[ \t]*(\d+)(?:[ \t]*-[ \t]*(\d+))?", re.M)
 
 
+# 대표 원고의 씬 구분: "00:12–00:48 | 태국 오디션장" (시간 구간 | 장소). S#가 없어도 이 줄을 씬 머리로 본다.
+TIME_HEAD = re.compile(r"^([ \t]*[*#>\[]*[ \t]*)(\d{1,2}:\d{2}(?::\d{2})?[ \t]*[–—\-~][ \t]*\d{1,2}:\d{2}(?::\d{2})?[ \t]*\|)", re.M)
+
+
+def normalize_scene_heads(content):
+    """S# 씬 머리가 하나도 없고 '시간 구간 | 장소' 줄이 있으면 그 줄마다 순서대로 'S#1 | ' 을 붙인다(내용은 그대로).
+    예전엔 이 형식을 못 알아봐 화 전체가 씬 하나(S#0)가 되고, 작가실에 화 전체를 나눠 달라고 했다가 실패했다."""
+    content = content or ""
+    if SCENE_HEAD.search(content) or not TIME_HEAD.search(content):
+        return content
+    n = [0]
+
+    def add(m):
+        n[0] += 1
+        return f"{m.group(1)}S#{n[0]} | {m.group(2)}"
+    return TIME_HEAD.sub(add, content)
+
+
 def split_scenes(content):
     """정리본을 씬(S#번호) 단위로 나눈다. [(번호, 머리줄, 본문)] — 씬 표시가 없으면 통째로 하나."""
+    content = normalize_scene_heads(content)
     marks = list(SCENE_HEAD.finditer(content or ""))
     if not marks:
         return [(0, "", content or "")]
@@ -1146,6 +1165,10 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
     other_nos = sorted({n for n, is_long, _ in failed if not is_long} - set(long_nos))
     lines = [x for _, _, x in failed]
     asked = []
+    if 0 in long_nos:   # 씬 구분이 아예 없는 대본: 화 전체를 '나눠 달라'고 하면 실패만 한다 → 정확한 원인과 할 일을 알린다
+        raise RuntimeError(f"{epno}화 확정 대본에 씬 구분이 없어 화 전체가 씬 하나로 읽혔습니다(감독이 한 번에 설계할 수 없는 길이). "
+                           "이렇게 하세요: 대본 탭에서 씬마다 '00:12–00:48 | 장소' 또는 'S#2 | 00:12–00:48 | 장소 | 낮' 머리줄을 넣고 확정하거나, "
+                           "'작가실 정리 실행'으로 씬 머리를 붙인 정리본을 받아 확정하세요.")
     if long_nos and not p.get("fix_round"):
         rpc("agent_add_task", p_token=TOKEN, p={"kind": "writers_room", "episode_id": ep, "payload": {
             "mode": "split_scenes", "scenes": long_nos, "source_version_id": script["id"],
