@@ -214,6 +214,11 @@
   .rvchk { margin: 4px 0 2px; padding-left: 4px; list-style: none; } .rvchk li { margin: 2px 0; } .rvchk li.missing, .rvchk li.conflict { color: var(--bad); }
   .pdimg { position: relative; } .pdrv { position: absolute; left: 4px; top: 4px; font-size: 11px; padding: 1px 6px; border-radius: 6px; color: #fff; background: rgba(47,133,90,.9); max-width: 90%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .pdrv.bad { background: rgba(197,48,48,.92); } .pdimg.rvbad img { outline: 3px solid var(--bad); outline-offset: -3px; }
+  .folded { max-height: var(--fold-h, 520px); overflow: hidden; position: relative; padding-bottom: 34px !important; }
+  .folded::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 70px; background: linear-gradient(transparent, var(--panel) 75%); pointer-events: none; }
+  .foldbar { display: block; margin: 8px auto 0; border: 1px solid var(--line); background: var(--panel); color: var(--accent); border-radius: 999px; padding: 3px 14px; font-size: 12.5px; cursor: pointer; position: relative; z-index: 2; }
+  .folded > .foldbar { position: absolute; left: 50%; transform: translateX(-50%); bottom: 6px; margin: 0; }
+  .rvbox.folded::after { background: linear-gradient(transparent, var(--panel) 75%); }
   /* 편집실 */
   .ed-empty { text-align: center; padding: 30px 16px; } .ed-empty .row { justify-content: center; }
   .ed-top { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; }
@@ -5678,7 +5683,7 @@ function reviewBox(e, c) {
       <span class="quiet">지금 바이블 묘사·영어 프롬프트로 후보를 새로 만듭니다. 고른 뒤 바이블에 적용하면 기준 사진이 바뀝니다.</span></div></div>` : ''}
     ${mine.prompt_after ? `<details><summary class="quiet">영어 프롬프트 보정 전·후</summary><div class="quiet" style="margin-top:4px">전: ${esc(mine.prompt_before || '-')}</div><div style="margin-top:4px">후: ${esc(mine.prompt_after)}</div></details>` : ''}` : '';
   const older = list.filter(r => r !== mine);
-  return `<div class="rvbox"><div class="row" style="gap:6px"><b>감수·반영 기록</b><span class="quiet">코디네이터</span>
+  return `<div class="rvbox" data-fold="rv-${esc(e.id)}" data-fold-min="150" data-fold-default="1"><div class="row" style="gap:6px"><b>감수·반영 기록</b><span class="quiet">코디네이터</span>
       <button class="btn small" data-revagain="${esc(e.id)}" data-rv="${esc(c.id)}" style="margin-left:auto" ${cvOpen ? 'disabled' : ''}>다시 감수</button></div>
     ${reflect ? `<div class="row" style="gap:6px;margin-top:4px">${reflect}</div>` : ''}
     <div class="row" style="gap:6px;margin-top:4px">${review}</div>${body}
@@ -5841,7 +5846,7 @@ async function viewBible(main) {
       <span class="quiet">${S.bibleCat === 'music' ? '화별로 원하는 음악 톤(적용 화 지정). 편집실 "🎵 이 화 음악 톤"에서 ElevenLabs로 바로 만들거나 Suno용 프롬프트를 복사합니다.' : '모든 화에 공통으로 붙는 화면 규칙(색감·조명·렌즈·질감·금지).'}</span>
       <button class="btn small" id="bsugRe" style="margin-left:auto">내 제안 넣어 추천 다시 받기</button></div>
     <span class="ex">${S.bibleCat === 'music' ? '예: "1화 — 저음 피아노 단음, 느린 템포, 후반 현악 상승" · 적용 화 1' : '예: "따뜻한 시네마틱 색감, 얕은 심도, 손떨림 적은 핸드헬드, 화면 글자 금지"'}</span></div>` : ''}
-  ${isSpon ? `<div class="card sponbox">
+  ${isSpon ? `<div class="card sponbox" data-fold="spon-help" data-fold-min="160" data-fold-default="1">
     <div class="row"><b style="font-size:15px">협찬 씬 (PPL)</b><span class="quiet">위 '설정' 줄의 + 협찬 소품 / + 협찬 장소로 추가합니다</span></div>
     <ol style="margin:8px 0 0;padding-left:18px;line-height:1.7">
       <li><b>사진을 꼭 넣으세요.</b> 협찬 제품·매장 사진이 바이블 기준 사진이 되고, 장면 사진·영상이 그 모습 그대로 그려집니다. <span class="ex">예: 협찬 텀블러 정면·측면 사진 2장 → 모든 컷에서 같은 색·로고 위치</span></li>
@@ -5852,7 +5857,7 @@ async function viewBible(main) {
   <div id="bxBox"></div>
   ${(() => { const bad = entries.map(e => ({ e, r: ((S.reviews || {})[e.id] || []).find(r => r.version_id === cur(e.id)?.id) })).filter(x => x.r && (x.r.verdict === 'owner' || x.r.photo_redo));
     const open = Object.values(S.cvTask || {}).filter(t => ['queued', 'running'].includes(t.status)).length;
-    return entries.length ? `<div class="card" style="border-color:${bad.length ? 'var(--bad)' : 'var(--line)'}"><div class="row"><b>코디네이터 감수 결과</b>
+    return entries.length ? `<div class="card" data-fold="cv-panel" data-fold-min="200" data-fold-default="1" style="border-color:${bad.length ? 'var(--bad)' : 'var(--line)'}"><div class="row"><b>코디네이터 감수 결과</b>
       ${open ? pill(`감수 중·대기 ${open}`, 'warn') : ''}${bad.length ? pill(`이상 ${bad.length}건`, 'bad') : pill('이상 없음', 'good')}
       <span style="margin-left:auto" class="row">${bad.length ? `<button class="btn small" data-rvbad="${esc(bad.map(x => x.e.id).join(','))}" title="이상 항목만 다시 감수해 한 번 더 걸러냅니다">이상 항목 다시 감수</button>` : ''}
       <button class="btn small primary" data-rvall="1" title="적용 중인 모든 항목을 묘사·영어 프롬프트·대본·기준 사진(사진과 프롬프트 일치, 글자·이름표)까지 다시 감수합니다">전체 감수하기</button></span></div>
@@ -7481,6 +7486,37 @@ function etaText(kind, startedAt, status) {
   const left = el < mid ? mid - el : el < hi ? hi - el : null;
   return `${typ} · ${left != null ? `약 ${mins(left)} 남음` : `예상보다 오래 걸리는 중(${mins(el)} 지남)`}`;
 }
+
+// ------------------------------------------------------------------
+// 긴 칸 접기: 내용이 길면 칸 아래에 "펼치기 ▾ / 접기 ▴"가 생긴다. 고른 상태는 이 브라우저에 기억.
+// data-fold="열쇠"가 있으면 그 열쇠로, 없으면 탭·칸 제목으로 기억. data-fold-default="1"이면 처음엔 접힌 채로.
+// ------------------------------------------------------------------
+const FOLD_KEY = 'nyx.fold';
+const foldState = () => { try { return JSON.parse(localStorage.getItem(FOLD_KEY) || '{}'); } catch { return {}; } };
+const foldSave = (k, v) => { try { const s = foldState(); s[k] = v; localStorage.setItem(FOLD_KEY, JSON.stringify(s)); } catch {} };
+function autoFold() {
+  const main = document.getElementById('main'); if (!main) return;
+  main.querySelectorAll('.card, .rvbox').forEach(el => {
+    if (el.dataset.foldInit || el.closest('#zoomBox') || el.id === 'invoice') return;
+    const min = +(el.dataset.foldMin || 520);
+    const full = el.scrollHeight;
+    if (full < min + 120) return;   // 짧으면 그대로
+    el.dataset.foldInit = '1';
+    const key = el.dataset.fold || `${S.tab}:${(el.querySelector('h3, b')?.textContent || '').trim().slice(0, 40)}`;
+    const st = foldState();
+    const folded = key in st ? st[key] : el.dataset.foldDefault === '1';
+    el.style.setProperty('--fold-h', min + 'px');
+    const bar = document.createElement('button');
+    bar.type = 'button'; bar.className = 'foldbar';
+    const paint = f => { el.classList.toggle('folded', f); bar.textContent = f ? '펼치기 ▾' : '접기 ▴'; };
+    bar.onclick = ev => { ev.preventDefault(); ev.stopPropagation(); const f = !el.classList.contains('folded'); paint(f); foldSave(key, f);
+      if (f) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); };
+    el.appendChild(bar); paint(folded);
+  });
+}
+let foldTimer = null;
+new MutationObserver(() => { clearTimeout(foldTimer); foldTimer = setTimeout(autoFold, 120); })
+  .observe(document.body, { childList: true, subtree: true });
 
 // ------------------------------------------------------------------
 // 실패 설명: 원인 문구를 보고 "무슨 뜻인지"와 "대표가 할 일"을 알려 준다(버튼: 다시 시도·설정·대본·바이블)
@@ -9195,6 +9231,7 @@ const HELP = {
 <ul>
 <li><b>제작 현황(모든 시리즈)</b> — 작가실·감독실·영상 생성·감수·사진·목소리·편집·보관별로 지금 <b>어느 시리즈 몇 화</b>의 무엇을 진행·대기하는지. 같은 일이 두 번 걸려 있으면 <b>중복</b> 표시와 "중복 정리" 버튼.<span class="ex">예: 작가실 — 한국 갔더니 아이돌 · 3화 · 작가실 정리(진행) / 시리즈B · 1화(대기) · 감독실 — 아이돌 2화 컷 설계</span></li>
 <li><b>제작할 화 고르기</b> — 대본에 올린 화를 다 만들지 않아도 됩니다. 원하는 화만 체크(또는 전체 선택) → <b>선택한 화: 작가실 정리부터</b>(정리 → 확정 → 컷 설계) 또는 <b>감독 컷 설계만</b>. 이미 진행 중인 화는 건너뜁니다.<span class="ex">예: 1~3화만 체크 → 작가실 정리부터 → 3개 화만 진행, 4~10화는 그대로</span></li>
+<li><b>긴 칸 접기</b> — 내용이 긴 칸은 아래에 <b>펼치기 ▾ / 접기 ▴</b>가 생깁니다. 코디네이터 감수 결과·카드의 감수·반영 기록·협찬 안내는 처음부터 접혀 있고, 펼치거나 접은 상태는 이 브라우저에 기억됩니다.</li>
 <li><b>예상 소요 시간(⏱)</b> — 현황판·진행 중인 일·사진 만들기·컷 "생성 중"에 "보통 N분 · 약 M분 남음"이 나옵니다. 최근 14일 같은 일이 실제로 걸린 시간으로 계산하고, 기록이 적으면 평소 속도(Higgsfield 영상 3~8분, 사진 후보 1~3분, 얼굴 학습 5~20분)를 씁니다. "예상보다 오래 걸리는 중"이 오래 계속되면 에이전트 탭을 확인하세요.</li>
 <li><b>제작 현황은 지금 고른 시리즈만</b> 보여 줍니다. 다른 시리즈 일은 "다른 시리즈에서도 일하는 중: … 2건"으로 한 줄만, 전부 보려면 "모든 시리즈 보기". "15분 뒤 시작 예정"은 일부러 늦춰 둔 일입니다.</li>
 <li><b>보류</b> — 만들다 멈출 시리즈는 시리즈 옆 "이 시리즈 보류", 화는 화 카드의 "보류". 대본·바이블·컷·영상은 그대로 두고 대기 중인 일만 취소하며, 보류 중에는 새 일이 시작되지 않습니다. 보류한 것은 <b>기록 탭 → 보류함</b>에 모이고 "꺼내기"로 멈춘 곳부터 이어서 만듭니다.<span class="ex">예: 동구밭 4·5화 보류(이유: 결말 수정 예정) → 다음 달 기록 탭 보류함에서 꺼내기</span></li>
