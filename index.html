@@ -337,7 +337,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.19.3"
+VERSION = "1.19.4"
 
 import base64
 import glob
@@ -4191,6 +4191,17 @@ def run_task(tk):
         rpc("agent_task_update", p_token=TOKEN, p_id=tk["id"], p_status="queued", p_progress=r.why[:200], p_retry_in=int(r.seconds))
     except Exception as e:
         log(f"제작 작업 실패: {kind}: {e}\n{traceback.format_exc()}")
+        # 일시적인 문제(인터넷 끊김·서비스 붐빔·5xx·시간 초과·재시작)는 실패로 띄우지 않고 조용히 다시 한다(최대 3번)
+        if kind != "generate" and is_transient(str(e)) and (tk.get("attempts") or 1) < 4:
+            wait = 30 * (tk.get("attempts") or 1)
+            if kind in ("photo_design", "photo_set"):
+                did = (tk.get("payload") or {}).get("design_id")
+                try:
+                    rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "training" if kind == "photo_set" else "queued"})
+                except Exception:
+                    pass
+            rpc("agent_task_update", p_token=TOKEN, p_id=tk["id"], p_status="queued", p_progress=f"일시적인 문제로 {wait}초 뒤 자동으로 다시 합니다({str(e)[:80]})", p_retry_in=wait)
+            return
         retry = 120 if (tk.get("attempts") or 1) < 2 and kind in ("store", "video_review") else None
         rpc("agent_task_update", p_token=TOKEN, p_id=tk["id"], p_status="failed", p_error=str(e)[:1500], p_retry_in=retry)
         # 바이블 보조 작업은 하나하나 알림을 울리지 않는다: 지시 탭 적용 대기함 '실패'에 원인과 함께 모이고 거기서 다시 시도
@@ -4198,6 +4209,13 @@ def run_task(tk):
             notify(f"작업 실패: {TASK_NAME.get(kind, kind)}", f"원인: {str(e)[:260]}\n이렇게 하세요: {fail_hint(str(e))}\n(제작 탭 빨간 상자·지시 탭 '실패'에서 바로 다시 시도할 수 있습니다)", "warning")
     finally:
         CURRENT["task"] = None
+
+
+def is_transient(e):
+    """다시 하면 대부분 되는 오류인가(인터넷·서비스 붐빔·서버 오류·시간 초과)."""
+    return bool(re.search(r"(URLError|Connection|connection|reset|refused|Temporary failure|Name or service|timed out|timeout|시간 초과|"
+                          r"\b(429|500|502|503|504|520|522|524|529)\b|overloaded|rate.?limit|SSL|EOF occurred|RemoteDisconnected|IncompleteRead|"
+                          r"Remote end closed|BrokenPipe|주소를 찾지 못함|후보가 만들어지지 않았습니다)", e))
 
 
 def fail_hint(e):
