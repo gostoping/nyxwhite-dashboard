@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.21.0"
+VERSION = "1.22.0"
 
 import base64
 import glob
@@ -1805,10 +1805,38 @@ VIDEO_MODELS = {
                   "res": ["720p", "1080p"], "routes": {"i2v": "image-to-video", "t2v": "text-to-video"}},
 }
 SOUL2 = "higgsfield-ai/soul/v2/standard"
-# Nano Banana Pro의 Higgsfield API 경로는 공개 문서에 없어서, 내 키로 후보 경로를 직접 두드려 찾는다.
-# 프롬프트 없이 보내면 실제 생성은 되지 않고(필수값 누락) 경로가 있으면 400/422, 없으면 404가 온다.
-NANO_PRO_CANDIDATES = ["google/nano-banana-pro/edit", "google/nano-banana-pro", "nano-banana-pro/edit", "nano-banana-pro",
-                       "google/nano-banana-pro/image-to-image", "google/gemini-3-pro-image/edit", "google/gemini-3-pro-image"]
+# 사진 모델 (Higgsfield 공개 API 기준, 2026-11 내 키로 확인)
+# - Seedream 5.0 Pro: 기본. 참고 사진이 있으면 /edit(image_urls 1~10장), 없으면 /text-to-image
+# - Nano Banana Pro: 주소(nano-banana-pro, nano-banana-pro/edit)는 있으나 2026-11 현재 "model_disabled"(꺼져 있음).
+#   'auto'·'nano'는 켜져 있으면 나노바나나 프로, 꺼져 있으면 Seedream 5.0 Pro로 만든다(예전처럼 몰래 Grok으로 바꾸지 않음).
+SEEDREAM5 = "bytedance/seedream/v5.0/pro"
+KLING_IMG4 = "kling-image/v4.0"
+NANO_PRO = "nano-banana-pro"
+IMAGE_ROUTES = {SEEDREAM5: ("/edit", "/text-to-image"), KLING_IMG4: ("/edit", "/text-to-image"), NANO_PRO: ("/edit", "")}
+IMAGE_EXTRA = {SEEDREAM5: {"resolution": "2k"}, KLING_IMG4: {"resolution": "2k"}}
+IMAGE_ALIAS = {"seedream": SEEDREAM5, "kling": KLING_IMG4, "grok": GROK_IMAGE}
+MODEL_LABEL = {SEEDREAM5: "Seedream 5.0 Pro", KLING_IMG4: "Kling Image 4.0", NANO_PRO: "나노바나나 프로", GROK_IMAGE: "Grok Imagine 2.0", SOUL2: "Soul 2"}
+
+
+def model_label(m):
+    base = image_base(m)
+    return MODEL_LABEL.get(base, m)
+
+
+def image_base(m):
+    m = (m or "").strip().strip("/")
+    for base in IMAGE_ROUTES:
+        if m == base or m.startswith(base + "/"):
+            return base
+    return m
+
+
+def image_route(m, has_refs):
+    """모델 이름 → 실제 요청 주소(참고 사진이 있으면 편집·참고용 주소)."""
+    m = (m or "").strip().strip("/")
+    if m in IMAGE_ROUTES:
+        return m + IMAGE_ROUTES[m][0 if has_refs else 1]
+    return m
 
 
 def hf_probe(path):
@@ -1817,33 +1845,41 @@ def hf_probe(path):
     return code, data
 
 
-def resolve_image_model(gen):
-    """장면 사진 모델: 설정에 경로가 있으면 그대로, 'auto'/비어 있으면 Nano Banana Pro를 찾아 쓰고 없으면 Grok Imagine."""
-    want = (gen.get("image_model") or "auto").strip().strip("/")
-    if want and want != "auto":
-        return want
-    cache = os.path.join(HOME, "hf_models.json")
+NANO_STATE = {"ok": None, "why": "", "at": 0.0}
+
+
+def nano_available():
+    """나노바나나 프로가 지금 켜져 있나(빈 요청으로 확인, 생성·비용 없음). 켜짐은 6시간, 꺼짐은 30분 기억."""
+    if NANO_STATE["ok"] is not None and time.time() - NANO_STATE["at"] < (21600 if NANO_STATE["ok"] else 1800):
+        return NANO_STATE["ok"]
     try:
-        c = json.load(open(cache))
-        if c.get("nano_pro") or time.time() - c.get("at", 0) < 86400:
-            return c.get("nano_pro") or GROK_IMAGE
-    except Exception:
-        pass
-    found = ""
-    for p in NANO_PRO_CANDIDATES:
-        try:
-            code, data = hf_probe(p)
-        except Exception:
-            continue
-        log(f"Nano Banana Pro 경로 확인: {p} → {code}")
-        if code in (400, 422):
-            found = p
-            break
-    with open(cache, "w") as f:
-        json.dump({"nano_pro": found, "at": time.time()}, f)
-    if not found:
-        log("Nano Banana Pro 경로를 찾지 못해 Grok Imagine 2.0으로 장면 사진을 만듭니다(설정 → 제작에 경로를 넣으면 그걸 씁니다)")
-    return found or GROK_IMAGE
+        code, data = hf_probe(NANO_PRO + "/edit")
+    except Exception as ex:
+        code, data = 0, {"detail": str(ex)[:120]}
+    ok = code in (400, 422)
+    why = "" if ok else ((data or {}).get("detail") if isinstance(data, dict) else "") or f"응답 {code}"
+    NANO_STATE.update(ok=ok, why=str(why)[:120], at=time.time())
+    log(f"나노바나나 프로 확인: {code} {'' if ok else why}")
+    return ok
+
+
+def resolve_image_model(gen):
+    """사진 모델 이름. 설정에 경로가 있으면 그대로, 'seedream'·'kling'·'grok'은 그 모델,
+    'auto'·'nano'·비어 있으면 나노바나나 프로(켜져 있을 때) → 아니면 Seedream 5.0 Pro."""
+    want = (gen.get("image_model") or "auto").strip().strip("/")
+    if want in IMAGE_ALIAS:
+        return IMAGE_ALIAS[want]
+    if want not in ("auto", "nano", "") and want != NANO_PRO:
+        return want
+    if nano_available():
+        return NANO_PRO
+    log(f"나노바나나 프로를 지금 Higgsfield API에서 쓸 수 없어({NANO_STATE['why']}) Seedream 5.0 Pro로 만듭니다")
+    return SEEDREAM5
+
+
+def char_photo_model(cm):
+    """인물 사진(후보·기준 사진) 설정값 → 사진 모델 이름. soul2는 따로 처리."""
+    return resolve_image_model({"image_model": cm or "seedream"})
 
 
 def find_image_urls(d, out=None):
@@ -1864,9 +1900,11 @@ def find_image_urls(d, out=None):
 def hf_submit_wait(path, body, what="사진", timeout=900):
     """Higgsfield에 요청을 넣고 끝날 때까지 기다려 완료 응답을 돌려준다."""
     hdr = {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json"}
+    body = {**IMAGE_EXTRA.get(image_base(path), {}), **body}
+    path = image_route(path, bool(body.get("image_urls")))
     code, data = http_json(f"https://api.higgsfield.ai/{path.strip('/')}", hdr, "POST", body, timeout=120)
     if code not in (200, 201, 202) or not isinstance(data, dict):
-        raise RuntimeError(f"{what} 요청 실패 {code}: {str(data)[:300]}")
+        raise RuntimeError(f"{what} 요청 실패 {code} ({model_label(path)}): {str(data)[:300]}")
     if find_image_urls(data.get("images") or []) or data.get("status") == "completed":
         return data
     rid = data.get("request_id") or data.get("id")
@@ -1927,8 +1965,9 @@ def soul_train(name, image_urls, timeout=3600):
 
 def hf_image(prompt, refs, aspect, model_path):
     """Higgsfield 장면 사진(참고 사진으로 얼굴·의상·장소 고정)."""
-    model_path = model_path or GROK_IMAGE
-    body = {"prompt": prompt, "aspect_ratio": aspect}
+    base = image_base(model_path or SEEDREAM5)
+    model_path = image_route(base, bool(refs))
+    body = {"prompt": prompt, "aspect_ratio": aspect, **IMAGE_EXTRA.get(base, {})}
     if refs:
         body["image_urls"] = refs[:8]
     code, data = http_json(f"https://api.higgsfield.ai/{model_path.strip('/')}",
@@ -1940,7 +1979,7 @@ def hf_image(prompt, refs, aspect, model_path):
         code, data = http_json(f"https://api.higgsfield.ai/{model_path.strip('/')}",
                                {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json"}, "POST", body, timeout=120)
     if code not in (200, 201, 202) or not isinstance(data, dict):
-        raise RuntimeError(f"사진 요청 실패 {code}: {str(data)[:300]}")
+        raise RuntimeError(f"사진 요청 실패 {code} ({model_label(model_path)}): {str(data)[:300]}")
     rid = data.get("request_id") or data.get("id")
     url = find_image_url(data)
     status_url = data.get("status_url") or f"https://api.higgsfield.ai/requests/{rid}/status"
@@ -2168,10 +2207,10 @@ def t_prep_cut(t):
                 try:
                     url = hf_image(fp, refs, aspect, imodel)
                 except Exception as ex1:
-                    if imodel == GROK_IMAGE:
+                    if image_base(imodel) == SEEDREAM5:
                         raise
-                    log(f"{imodel} 실패, Grok Imagine으로 다시: {ex1}")
-                    imodel = GROK_IMAGE
+                    log(f"{model_label(imodel)} 실패, Seedream 5.0 Pro로 다시: {ex1}")
+                    imodel = SEEDREAM5
                     url = hf_image(fp, refs, aspect, imodel)
                 local = os.path.join(HOME, "work", f"kf_{c['id']}_{key}.img")
                 fetch_to(url, local)
@@ -2192,7 +2231,7 @@ def t_prep_cut(t):
                                 log(f"'{n}' 참고 사진 쌓음: {code} 장면 사진")
                             except Exception as ex:
                                 log(f"'{n}' 참고 사진 저장 실패: {ex}")
-                log_cost("keyframe", "higgsfield", "nano-banana-pro" if "nano-banana-pro" in imodel else imodel, {"images": 1}, episode_id=ep, scene_no=c["scene_no"],
+                log_cost("keyframe", "higgsfield", image_base(imodel), {"images": 1}, episode_id=ep, scene_no=c["scene_no"],
                          cut_id=code, outcome="success", note=f"{'첫' if key == 'frame_first' else '끝'} 장면 사진")
             except Exception as ex:
                 fr.update({"prompt": fprompt, "status": "failed", "error": str(ex)[:300]})
@@ -2804,14 +2843,14 @@ def upload_from_url(url, path):
 
 def _photo_generate(d, name):
     """사진 디자인 한 번 만들기 → (사진 주소들, 모델)."""
-    cm = (d.get("model") or (d.get("generation") or {}).get("char_photo_model") or "soul2")
+    cm = (d.get("model") or (d.get("generation") or {}).get("char_photo_model") or "seedream")
     if d["category"] == "character" and cm == "soul2":
         progress(f"{name} 실사 인물 사진 후보를 만드는 중 (Soul 2)")
         urls = soul_images(d["prompt"] + " " + PHOTO_LOOK, n=4, aspect="3:4")
         model = SOUL2
     elif d["category"] == "character":   # 다른 모델(나노바나나 프로·Grok)로 후보 4장을 동시에 — 고른 사진으로 얼굴 학습(Soul ID)은 그대로
-        model = resolve_image_model({"image_model": cm}) if cm not in ("nano", "grok") else (resolve_image_model({"image_model": "auto"}) if cm == "nano" else GROK_IMAGE)
-        progress(f"{name} 실사 인물 사진 후보 4장을 동시에 만드는 중 ({'나노바나나 프로' if cm == 'nano' else 'Grok Imagine' if cm == 'grok' else model})")
+        model = char_photo_model(cm)
+        progress(f"{name} 실사 인물 사진 후보 4장을 동시에 만드는 중 ({model_label(model)})")
         res = parallel([(lambda: hf_image(d["prompt"] + " Head-and-shoulders portrait, plain light grey background. " + PHOTO_LOOK, [], "3:4", model)) for _ in range(4)], workers=4)
         urls = [u for u in res if isinstance(u, str) and u]
         if not urls:
@@ -2907,11 +2946,11 @@ def t_photo_set(t):
         src = [storage_signed_url(x.get("bucket") or "takes", x["path"], 7200) for x in chosen if x.get("path")]
         if not src:
             raise RuntimeError("고른 사진이 없습니다")
-        use_nano = (d.get("model") or (d.get("generation") or {}).get("char_photo_model") or "soul2") != "soul2"
+        cm = d.get("model") or (d.get("generation") or {}).get("char_photo_model") or "seedream"
+        use_nano = cm != "soul2"   # soul2가 아니면 얼굴 학습 없이 고른 사진을 참고 사진으로(Seedream 5.0 Pro·나노바나나 프로 등)
         if use_nano:   # 나노바나나 프로: 얼굴 학습 없이, 고른 사진을 참고 사진으로 같은 얼굴의 기준 사진을 바로 만든다(빠름)
             soul_id = "nano-ref"
-            nmodel = resolve_image_model({"image_model": "auto"}) if (d.get("model") or (d.get("generation") or {}).get("char_photo_model")) in (None, "nano") else (
-                GROK_IMAGE if (d.get("model") or (d.get("generation") or {}).get("char_photo_model")) == "grok" else resolve_image_model({"image_model": "auto"}))
+            nmodel = char_photo_model(cm)
         elif d.get("soul_id") and d.get("soul_id") != "nano-ref":   # 다시 시도: 이미 끝난 얼굴 학습은 다시 사지 않는다
             soul_id = d["soul_id"]
             progress(f"{name} 이미 학습한 얼굴(Soul ID)로 기준 사진을 이어서 만듭니다")
@@ -2940,7 +2979,7 @@ def t_photo_set(t):
                 ref_set.append(r)
         if not ref_set:
             raise RuntimeError("기준 사진이 하나도 만들어지지 않았습니다: " + str(next((r for r in res if isinstance(r, Exception)), ""))[:200])
-        log_cost("keyframe", "higgsfield", "nano-banana-pro" if use_nano else SOUL2, {"images": len(ref_set)}, note=f"기준 사진 세트: {name}", outcome="success")
+        log_cost("keyframe", "higgsfield", image_base(nmodel) if use_nano else SOUL2, {"images": len(ref_set)}, note=f"기준 사진 세트: {name}", outcome="success")
     except Exception as e:
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
         raise
@@ -3279,8 +3318,9 @@ def t_api_check(t):
             os.remove(os.path.join(HOME, "hf_models.json"))
         except OSError:
             pass
+        NANO_STATE.update(ok=None, at=0.0)
         m = resolve_image_model({})
-        return m + (" (Nano Banana Pro 경로 찾음)" if m != GROK_IMAGE else " (Nano Banana Pro 경로를 못 찾아 Grok Imagine 사용)")
+        return f"{model_label(m)} ({m})" + ("" if m == NANO_PRO else f" — 나노바나나 프로는 지금 쓸 수 없음: {NANO_STATE['why']}")
     step("장면 사진 모델 경로", nano)
     def soul():
         u = soul_images("A Korean woman in her 20s, plain grey background, natural light. " + PHOTO_LOOK, n=1, aspect="3:4")[0]
@@ -3294,7 +3334,7 @@ def t_api_check(t):
         urls = find_image_urls(st.get("images") or st)
         if not urls:
             raise RuntimeError(f"사진 주소 없음: {str(st)[:150]}")
-        log_cost("keyframe", "higgsfield", "nano-banana-pro" if "nano-banana-pro" in m else m, {"images": 1}, note="실제 연결 점검", outcome="success")
+        log_cost("keyframe", "higgsfield", image_base(m), {"images": 1}, note="실제 연결 점검", outcome="success")
         return f"{m} 사진 1장 받음"
     step("장면 사진 생성", scene)
     vid = p.get("voice_id")
