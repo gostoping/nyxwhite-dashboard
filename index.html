@@ -3881,6 +3881,13 @@ async function viewBulkImport(pane, series, episodes) {
       <table><tr><th>화</th><th>제목</th><th style="text-align:right">씬</th><th style="text-align:right">글자</th><th>연출 메모</th><th>대시보드</th></tr>${parsed.episodes.map(e => `
         <tr><td><b>${e.n}화</b></td><td>${esc(e.title)}</td><td style="text-align:right">${e.scenes}</td><td style="text-align:right">${e.body.length.toLocaleString()}</td>
         <td class="quiet">${notes(e.n) ? notes(e.n) + '건' : '-'}</td><td>${exist(e.n) ? pill('있는 화에 초안 추가') : pill('새 화 만들기', 'accent')}</td></tr>`).join('')}</table>
+      ${episodes.length ? `<div class="card" style="border-color:var(--bad);margin:12px 0 0">
+        <label style="display:flex;gap:8px;align-items:center;color:var(--ink);margin:0"><input type="checkbox" id="bkReplace" style="width:auto">
+          <b>기존 대본 지우고 이 파일로 갈아끼우기</b></label>
+        <p class="quiet" style="margin:4px 0 0 26px">겹치는 화(${parsed.episodes.filter(e => exist(e.n)).map(e => e.n + '화').join(', ') || '없음'})의 예전 대본 모든 버전과 그 대본으로 만든 컷·영상·편집·연출 메모를 지우고 새 원고만 남깁니다. 제목도 파일대로 바꿉니다. 비용 기록은 남습니다. 되돌릴 수 없습니다.</p>
+        ${episodes.filter(e => !parsed.episodes.some(p => p.n === e.number)).length ? `<label style="display:flex;gap:8px;align-items:center;color:var(--ink);margin:6px 0 0 26px"><input type="checkbox" id="bkDropExtra" style="width:auto">
+          파일에 없는 화도 지우기 (${episodes.filter(e => !parsed.episodes.some(p => p.n === e.number)).map(e => e.number + '화').join(', ')})</label>` : ''}
+      </div>` : ''}
       <label style="display:flex;gap:8px;align-items:center;color:var(--ink);margin-top:12px"><input type="checkbox" id="bkDrafts" style="width:auto" checked>
         각 화에 <b>대본 초안</b> 넣기 <span class="quiet">(끄면 아래 메모·공통 기준만 가져옵니다)</span></label>
       <label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" id="bkNotes" style="width:auto" checked>
@@ -3895,7 +3902,22 @@ async function viewBulkImport(pane, series, episodes) {
       const btn = $('#bkGo'); btn.disabled = true; btn.textContent = '넣는 중…';
       const log = m => { $('#bkLog').insertAdjacentHTML('beforeend', `<div class="quiet">${esc(m)}</div>`); };
       const withNotes = $('#bkNotes').checked, withDrafts = $('#bkDrafts').checked;
+      const replace = $('#bkReplace')?.checked, dropExtra = replace && $('#bkDropExtra')?.checked;
       let made = 0, drafts = 0, skipped = 0, noteCount = 0;
+      if (replace) {
+        const hit = parsed.episodes.filter(e => exist(e.n)), extra = dropExtra ? episodes.filter(e => !parsed.episodes.some(p => p.n === e.number)) : [];
+        if (!confirm(`정말 갈아끼울까요?\n\n대본·제작 자료를 지우고 새 원고로 바꿀 화: ${hit.map(e => e.n + '화').join(', ') || '없음'}${extra.length ? `\n완전히 지울 화: ${extra.map(e => e.number + '화').join(', ')}` : ''}\n\n되돌릴 수 없습니다.`)) { btn.disabled = false; btn.textContent = `${parsed.episodes.length}개 화 넣기`; return; }
+        for (const ep of hit) {
+          const row = exist(ep.n);
+          await q(S.sb.rpc('owner_reset_episode', { p_episode: row.id, p_drop: false }));
+          await q(S.sb.from('episodes').update({ title: ep.title }).eq('id', row.id)); row.title = ep.title;
+          log(`${ep.n}화: 예전 대본·제작 자료 지움`);
+        }
+        for (const e of extra) {
+          await q(S.sb.rpc('owner_reset_episode', { p_episode: e.id, p_drop: true }));
+          episodes.splice(episodes.indexOf(e), 1); log(`${e.number}화: 화 삭제`);
+        }
+      }
       for (const ep of parsed.episodes) {
         let row = episodes.find(e => e.number === ep.n);
         if (!row) {
