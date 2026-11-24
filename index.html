@@ -179,7 +179,7 @@
   .seg button { border: 0; background: transparent; padding: 4px 10px; font-size: 12.5px; cursor: pointer; color: inherit; }
   .seg button.on { background: var(--accent); color: #fff; }
   .bcard.ps-auto .only-up, .bcard.ps-up .only-auto { display: none; }
-  #main.refreshing { opacity: .85; transition: opacity .15s; }
+  #main.refreshing { cursor: progress; }
   .ibl { max-height: 420px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
   .ibrow { display: grid; grid-template-columns: auto 58px 1fr auto auto; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); margin: 0; cursor: pointer; color: var(--ink); }
   .ibrow:last-child { border-bottom: 0; } .ibrow input { width: auto; }
@@ -4400,10 +4400,36 @@ function makeClient(cfg) {
     if (dev?.id) headers.set('x-device-id', dev.id);
     return fetch(input, { ...init, headers });
   };
-  return createClient(cfg.url, cfg.key, {
+  const sb = createClient(cfg.url, cfg.key, {
     global: { fetch: withDevice },
     auth: { persistSession: true, autoRefreshToken: true, storageKey: 'nix.auth' },
   });
+  // 사진 주소 재사용: 다시 그릴 때마다 새 서명 주소를 받으면 같은 사진을 또 내려받아 깜박인다 → 만료 10분 전까지는 같은 주소를 쓴다
+  const SIGN = new Map();
+  const from0 = sb.storage.from.bind(sb.storage);
+  sb.storage.from = bucket => {
+    const api = from0(bucket);
+    const many = api.createSignedUrls.bind(api), one = api.createSignedUrl.bind(api);
+    const ok = (p, exp) => { const c = SIGN.get(bucket + '|' + p); return c && c.until > Date.now() + 600e3 ? c : null; };
+    api.createSignedUrls = async (paths, exp, opt) => {
+      if (opt) return many(paths, exp, opt);
+      const need = [...new Set(paths.filter(p => !ok(p, exp)))];
+      if (need.length) {
+        const r = await many(need, exp);
+        if (r.error) return r;
+        (r.data || []).forEach(x => { if (x.signedUrl) SIGN.set(bucket + '|' + x.path, { url: x.signedUrl, until: Date.now() + exp * 1000 }); });
+      }
+      return { data: paths.map(p => ({ path: p, signedUrl: ok(p, exp)?.url || null, error: ok(p, exp) ? null : 'not signed' })), error: null };
+    };
+    api.createSignedUrl = async (path, exp, opt) => {
+      if (opt) return one(path, exp, opt);
+      const c = ok(path, exp); if (c) return { data: { signedUrl: c.url }, error: null };
+      const r = await one(path, exp); if (r.data?.signedUrl) SIGN.set(bucket + '|' + path, { url: r.data.signedUrl, until: Date.now() + exp * 1000 });
+      return r;
+    };
+    return api;
+  };
+  return sb;
 }
 function resetClient() { S.sb = null; }
 
@@ -5728,6 +5754,19 @@ document.addEventListener('click', ev => {
   const f = ev.target.closest('[data-bfixreq]');
   if (f) { ev.preventDefault(); document.querySelector(`[data-bedit="${f.dataset.bfixreq}"]`)?.click(); }
 });
+// 바이블 '지금 하는 일' 목록(예상 소요 시간). live=true면 끝난 일은 '끝남'으로 바꾸고 새로 보기 버튼
+function liveList(live) {
+  const list = S.bibleOpen || [];
+  if (!list.length) return '';
+  const done = list.filter(t => !['queued', 'running'].includes(t.status));
+  return `<div style="margin-top:8px"><div class="row"><b style="font-size:13px">지금 하는 일 · 예상 소요 시간</b>
+    ${live && done.length ? `<button class="btn small primary" data-blrefresh="1" style="margin-left:auto">끝난 일 ${done.length}건 · 새로 보기</button>` : ''}</div>
+    ${list.map(t => `<div class="row" style="gap:6px;margin-top:4px;font-size:13px">
+    ${t.status === 'running' ? '<span class="spin"></span>' : ['queued'].includes(t.status) ? pill('대기') : pill(t.status === 'done' ? '끝남' : t.status === 'failed' ? '실패' : '취소', t.status === 'done' ? 'good' : 'bad')}
+    <b>${esc(t.ent?.name || '시리즈')}</b><span>${esc(TASK_LABEL[t.kind] || t.kind)}${['photo_design', 'photo_set'].includes(t.kind) ? ' (Higgsfield)' : ''}</span>
+    ${['queued', 'running'].includes(t.status) ? `<span class="quiet">⏱ ${esc(t.status === 'queued' && t.not_before && new Date(t.not_before) > Date.now() ? `${Math.ceil((new Date(t.not_before) - Date.now()) / 60000)}분 뒤 시작 · ` : '')}${esc(etaText(t.kind, t.started_at, t.status))}${t.status === 'running' && t.progress ? ' · ' + esc(t.progress) : ''}</span>` : ''}</div>`).join('')}</div>`;
+}
+document.addEventListener('click', ev => { if (ev.target.closest('[data-blrefresh]')) { ev.preventDefault(); go('bible'); } });
 // 동일인: 이 카드가 누구와 같은지, 누가 이 사람과 같은지
 function sameAsLine(e, entries) {
   const to = e.same_as && entries.find(x => x.id === e.same_as);
@@ -5782,12 +5821,20 @@ async function viewBible(main) {
   S.bibleOpen = bOpen.filter(t => t.series_id === S.seriesId || entries.some(e => e.id === t.payload?.entry_id) || myDesigns.some(d => d.id === t.payload?.design_id))
     .map(t => ({ ...t, ent: entries.find(e => e.id === (t.payload?.entry_id || myDesigns.find(d => d.id === t.payload?.design_id)?.entry_id)) }));
   // 진행 중인 일이 있으면 20초마다 새로 고침(편집 중이거나 입력 중이면 건너뜀)
+  // 화면 전체를 다시 그리지 않고(사진이 다시 받아져 깜박임) '지금 하는 일' 줄만 20초마다 고친다. 끝난 일이 생기면 '새로 보기' 버튼
   if (S.bibleLive) clearInterval(S.bibleLive);
-  if (S.bibleOpen.length) S.bibleLive = setInterval(() => {
-    if (S.tab !== 'bible') { clearInterval(S.bibleLive); S.bibleLive = null; return; }
-    const busy = document.querySelector('#bEditor *, [id^="be-"] *, .vdbox textarea, .vdbox input:checked, :focus:is(input,textarea,select), #zoomBox');
-    if (!busy) go('bible');
-  }, 20000);
+  if (S.bibleOpen.length) {
+    const startIds = new Set(S.bibleOpen.map(t => t.id));
+    S.bibleLive = setInterval(async () => {
+      const box = document.getElementById('bLive');
+      if (S.tab !== 'bible' || !box) { clearInterval(S.bibleLive); S.bibleLive = null; return; }
+      const now = await q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,payload,series_id,started_at,created_at,not_before').in('id', [...startIds])).catch(() => null);
+      if (!now) return;
+      S.bibleOpen = S.bibleOpen.map(t => ({ ...t, ...(now.find(x => x.id === t.id) || {}) }));
+      box.innerHTML = liveList(true);
+      if (S.bibleOpen.every(t => !['queued', 'running'].includes(t.status))) { clearInterval(S.bibleLive); S.bibleLive = null; }
+    }, 20000);
+  }
   S.cvTask = {}; S.reviews = {}; S.bibleEntries = entries; S.bibleCur = {};
   versions.filter(v => v.status === 'active').forEach(v => { S.bibleCur[v.entry_id] = v; });
   const cvt = await q(S.sb.from('pipeline_tasks').select('id,status,progress,error,payload,created_at,not_before').eq('kind', 'coord_review').eq('series_id', S.seriesId)
@@ -5864,9 +5911,7 @@ async function viewBible(main) {
       <span style="margin-left:auto" class="row">${bad.length ? `<button class="btn small" data-rvbad="${esc(bad.map(x => x.e.id).join(','))}" title="이상 항목만 다시 감수해 한 번 더 걸러냅니다">이상 항목 다시 감수</button>` : ''}
       <button class="btn small primary" data-rvall="1" title="적용 중인 모든 항목을 묘사·영어 프롬프트·대본·기준 사진(사진과 프롬프트 일치, 글자·이름표)까지 다시 감수합니다">전체 감수하기</button></span></div>
       <p class="quiet" style="margin:4px 0 0">감수: 대표 요청 반영 · 묘사↔영어 프롬프트 · 대본 · 기준 사진이 프롬프트와 맞는지(사원증·이름표 같은 글자, 다른 사람). 사진 후보를 만들면 장마다 ✓/⚠도 표시합니다.</p>
-      ${(S.bibleOpen || []).length ? `<div style="margin-top:8px"><b style="font-size:13px">지금 하는 일 · 예상 소요 시간</b>${S.bibleOpen.map(t => `<div class="row" style="gap:6px;margin-top:4px;font-size:13px">
-        ${t.status === 'running' ? '<span class="spin"></span>' : pill('대기')}<b>${esc(t.ent?.name || '시리즈')}</b><span>${esc(TASK_LABEL[t.kind] || t.kind)}${['photo_design', 'photo_set'].includes(t.kind) ? ' (Higgsfield)' : ''}</span>
-        <span class="quiet">⏱ ${esc(t.status === 'queued' && t.not_before && new Date(t.not_before) > Date.now() ? `${Math.ceil((new Date(t.not_before) - Date.now()) / 60000)}분 뒤 시작 · ` : '')}${esc(etaText(t.kind, t.started_at, t.status))}${t.status === 'running' && t.progress ? ' · ' + esc(t.progress) : ''}</span></div>`).join('')}</div>` : ''}
+      <div id="bLive">${liveList(false)}</div>
       ${bad.map(({ e, r }) => `<div class="row" style="gap:6px;margin-top:6px"><b>${esc(e.name)}</b>${r.photo_redo ? pill('사진 다시 만들기 추천', 'bad') : ''}${r.verdict === 'owner' ? pill('묘사 확인 필요', 'warn') : ''}
         <span class="quiet">${esc((r.photo_issues || [])[0] || r.owner_note || r.summary || '')}</span>
         <button class="btn small" data-goto="${esc(e.id)}" style="margin-left:auto">카드로</button></div>`).join('')}</div>` : ''; })()}
@@ -7516,8 +7561,9 @@ function autoFold() {
     el.appendChild(bar); paint(folded);
   });
 }
-let foldTimer = null;
-new MutationObserver(() => { clearTimeout(foldTimer); foldTimer = setTimeout(autoFold, 120); })
+// 그린 직후(화면에 보이기 전에) 바로 접는다 → 펼쳐졌다 접히는 깜박임 없음
+let folding = false;
+new MutationObserver(() => { if (folding) return; folding = true; try { autoFold(); } finally { folding = false; } })
   .observe(document.body, { childList: true, subtree: true });
 
 // ------------------------------------------------------------------
