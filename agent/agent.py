@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.15.1"
+VERSION = "1.15.2"
 
 import base64
 import glob
@@ -2930,6 +2930,24 @@ def t_bible_prompt(t):
     if info.get("status") not in ("active", "proposed"):
         return "이미 다른 버전으로 바뀌었습니다"
     cat, name = info.get("category"), info.get("name")
+    reason = (info.get("change_reason") or "").strip()
+    by_owner = info.get("proposed_by") == "대표" and reason and "작가실" not in reason and "사진을 보고" not in reason
+    if p.get("apply_reason") and reason:   # 대표가 '바꾸는 이유'에 적은 요청을 한국어 묘사에 먼저 반영
+        progress(f"{name}: 대표 요청('{reason[:40]}')을 묘사에 반영하는 중")
+        text, _ = claude("claude-opus-5-5", """너는 드라마 작가실의 바이블 담당이다. 대표가 바이블 항목을 고치며 남긴 요청을 지금 묘사·세부 사항에 반영해 고쳐 쓴다.
+- 요청한 부분만 바꾸고 나머지 내용은 그대로 둔다(빠뜨리지 않는다). 요청이 기존 내용과 부딪히면 요청을 따른다.
+- 한국어로, 지금 글의 형식·길이를 비슷하게. 이름·실존 인물·브랜드는 새로 넣지 않는다.
+답 형식: <json>{"description": "고친 묘사 전체", "details": "고친 세부 사항 전체(없으면 빈 문자열)", "changed": "무엇을 어떻게 바꿨는지 한 줄"}</json>""",
+            f"분류: {cat}\n이름: {name}\n[대표 요청]\n{reason}\n\n[지금 묘사]\n{info.get('description') or '-'}\n[지금 세부 사항]\n{info.get('details') or '-'}",
+            max_tokens=3000, stage="other", note=f"바이블 묘사에 대표 요청 반영: {name}")
+        d = safe_json(text)
+        nd = (d.get("description") or "").strip()
+        if len(nd) < 10:
+            raise RuntimeError(f"대표님이 '바꾸는 이유'에 적은 요청('{reason[:60]}')을 '{name}' 묘사에 반영하지 못했습니다. "
+                               f"바이블 카드 → 내용 고치기에서 묘사 칸에 바뀐 내용을 직접 적어 주세요(예: '눈매가 더 날카롭게' → 묘사에 '눈꼬리가 올라간 날카로운 눈매').")
+        info["description"], info["details"] = nd, (d.get("details") or "").strip() or info.get("details")
+        rpc("agent_bible_set_description", p_token=TOKEN, p_version=info["version_id"], p_description=nd, p_details=info.get("details") or "",
+            p_reason=f"{reason} → 작가실이 묘사·프롬프트에 반영: {str(d.get('changed') or '')[:200]}")
     rules = f"""- 눈에 보이는 고정 특징만. 이 분류({cat})에서 담을 것: {PROMPT_NEEDS.get(cat, '눈에 보이는 특징')}.
 - 세부 사항에 '바뀌면 안 되는 특징'이 있으면 반드시 포함한다. 화마다 바뀌는 상황·줄거리·성격·대사는 넣지 않는다.
 - 4~8문장, 현재형, 쉼표로 이어진 묘사 위주. 이름·실존 인물·배우·브랜드는 쓰지 않는다. 한글은 한 글자도 쓰지 않는다."""
@@ -2939,7 +2957,8 @@ def t_bible_prompt(t):
 - 원문이 너무 짧거나 모호해 위 특징을 거의 알 수 없으면 prompt_en을 비우고, missing에 빠진 것을 한국어로 구체적으로 적는다.
 답 형식: <json>{{"prompt_en": "", "missing": ["빠진 것(한국어)"]}}</json>"""
     user = (f"분류: {cat}\n이름(참고, 프롬프트에 쓰지 말 것): {name}\n대본 속 역할: {info.get('summary') or '-'}\n"
-            f"[묘사]\n{info.get('description') or '-'}\n[세부 사항]\n{info.get('details') or '-'}")
+            f"[묘사]\n{info.get('description') or '-'}\n[세부 사항]\n{info.get('details') or '-'}"
+            + (f"\n[대표가 이번에 바꾸며 남긴 요청 — 묘사와 함께 반드시 반영]\n{reason}" if by_owner or p.get("apply_reason") else ""))
     progress(f"{name}: 작가실이 영어 프롬프트로 옮기는 중")
     text, _ = claude("claude-opus-5-5", system, user, max_tokens=3000, stage="other", note=f"바이블 영어 프롬프트: {name}")
     en, missing = clean_en(text), safe_json(text).get("missing") or []
@@ -2950,7 +2969,7 @@ def t_bible_prompt(t):
         en = clean_en(text)
         missing = safe_json(text).get("missing") or missing
     how = "묘사로 옮김"
-    owner_wrote = (info.get("proposed_by") == "대표") and "자동" not in (info.get("change_reason") or "")
+    owner_wrote = (info.get("proposed_by") == "대표") and "자동" not in reason and "작가실이 묘사" not in reason
     if not en and not owner_wrote:   # 3-a) AI가 쓴 묘사 → 대본에서 채운다
         sid = info.get("series_id") or t.get("series_id")
         found = script_mentions(sid, name, info.get("summary")) if sid else ""
