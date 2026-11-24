@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.25.0"
+VERSION = "1.26.0"
 
 import base64
 import glob
@@ -830,7 +830,9 @@ def writers_split(t, p):
         content = content.replace(orig_of[sn], body, 1)
     note = f"작가실: 감독 요청으로 긴 씬 나눔 — " + " / ".join(notes)
     vid = rpc("agent_save_script_draft", p_token=TOKEN, p_episode=ep, p_content=content, p_note=note[:480])
-    rpc("agent_set_script_followup", p_token=TOKEN, p_id=vid, p={"kind": "director", "payload": {"scenes": sorted(new_body), "fix_round": 1}})
+    # 나눈 씬부터 뒤 씬들은 번호가 한 칸씩 밀린다(씬 순서대로 다시 매김) → 나눈 씬부터 끝까지 다시 설계해야 번호가 맞는다
+    redo = [s for s, _, _ in split_scenes(content) if s >= min(new_body)]
+    rpc("agent_set_script_followup", p_token=TOKEN, p_id=vid, p={"kind": "director", "payload": {"scenes": redo, "fix_round": 1}})
     wr = rpc("agent_writers_room_context", p_token=TOKEN, p_episode=ep) or {}
     if wr.get("auto_confirm") is True:
         rpc("agent_confirm_script", p_token=TOKEN, p_id=vid, p_summary=note[:480])
@@ -1006,6 +1008,7 @@ SCENE_HEAD = re.compile(r"^[ \t]*[*#>\[]*[ \t]*S[ \t]*#[ \t]*(\d+)(?:[ \t]*-[ \t
 
 
 # 대표 원고의 씬 구분: "00:12–00:48 | 태국 오디션장" (시간 구간 | 장소). S#가 없어도 이 줄을 씬 머리로 본다.
+SUB_HEAD = re.compile(r"^([ \t]*[*#>\[]*[ \t]*)S[ \t]*#[ \t]*(\d+)((?:[ \t]*-[ \t]*\d+)*)", re.M)
 TIME_HEAD = re.compile(r"^([ \t]*[*#>\[]*[ \t]*)(\d{1,2}:\d{2}(?::\d{2})?[ \t]*[–—\-~][ \t]*\d{1,2}:\d{2}(?::\d{2})?[ \t]*\|)", re.M)
 
 
@@ -1013,7 +1016,20 @@ def normalize_scene_heads(content):
     """S# 씬 머리가 하나도 없고 '시간 구간 | 장소' 줄이 있으면 그 줄마다 순서대로 'S#1 | ' 을 붙인다(내용은 그대로).
     예전엔 이 형식을 못 알아봐 화 전체가 씬 하나(S#0)가 되고, 작가실에 화 전체를 나눠 달라고 했다가 실패했다."""
     content = content or ""
-    if SCENE_HEAD.search(content) or not TIME_HEAD.search(content):
+    if SCENE_HEAD.search(content):
+        # 작가실이 나눈 씬(S#2-1, S#2-2, S#2-1-2…)이 있거나 번호가 겹치면 씬 순서대로 S#1, S#2, S#3…으로 다시 매긴다.
+        # 예전엔 나뉜 부분이 모두 '2번 씬'이 돼 감독이 어느 컷이 어느 부분인지 헷갈려 컷을 비우고, 작가실·감독이 계속 다시 돌았다.
+        heads = [(int(m.group(2)), m.group(3) or "") for m in SUB_HEAD.finditer(content)]
+        nums = [h[0] for h in heads]
+        if any(h[1] for h in heads) or len(set(nums)) != len(nums):
+            k = [0]
+
+            def renum(m):
+                k[0] += 1
+                return f"{m.group(1)}S#{k[0]}"
+            return SUB_HEAD.sub(renum, content)
+        return content
+    if not TIME_HEAD.search(content):
         return content
     n = [0]
 
@@ -1033,7 +1049,7 @@ def split_scenes(content):
     for i, m in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(content)
         body = content[m.start():end].strip()
-        out.append((int(m.group(1)), body.splitlines()[0][:120], body))   # S#7-1·S#7-2(작가실이 나눈 긴 씬)도 씬 7로
+        out.append((int(m.group(1)), body.splitlines()[0][:120], body))   # 나뉜 씬(S#7-1·7-2)은 normalize_scene_heads가 순서대로 다시 번호를 매긴 뒤라 번호가 겹치지 않는다
     return out
 
 
