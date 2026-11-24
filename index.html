@@ -197,6 +197,12 @@
   .ytbox { position: relative; width: 100%; max-width: 420px; aspect-ratio: 9 / 16; } .ytbox iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; border-radius: 8px; }
   .upbox { border-color: var(--accent); margin: 8px 0; }
   .ibrow.ibfail { background: rgba(197,48,48,.05); } .ibrow.ibfail .ibt .quiet { white-space: normal; color: var(--bad); }
+  .failcard { border: 1px solid rgba(197,48,48,.35); background: rgba(197,48,48,.04); border-radius: 8px; padding: 8px 10px; margin-top: 8px; font-size: 13.5px; }
+  .board { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; margin-top: 8px; }
+  .desk { border: 1px solid var(--line); border-radius: 8px; padding: 8px; } .dtask { border-top: 1px dashed var(--line); padding: 4px 0; margin-top: 4px; font-size: 13px; }
+  .pkgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; margin-top: 8px; }
+  .pk { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 0; cursor: pointer; color: var(--ink); } .pk.on { border-color: var(--accent); background: var(--accent-soft); }
+  .pk input { width: auto; margin-right: 4px; }
   /* 편집실 */
   .ed-empty { text-align: center; padding: 30px 16px; } .ed-empty .row { justify-content: center; }
   .ed-top { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; }
@@ -311,7 +317,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.14.1"
+VERSION = "1.14.2"
 
 import base64
 import glob
@@ -1093,10 +1099,16 @@ JSON 최상위에 "end_state"도 함께 준다: 이 화가 끝났을 때 주요 
     text, _ = claude(dmodel, director_system(ctx), user, max_tokens=24000, stage="cut_card", episode_id=ep, note="감독 컷 설계")
     plan = pick_json(text)
     cuts = plan.get("cuts") or []
+    if not cuts:   # 답이 잘리거나 형식이 깨졌으면 한 번 더: JSON만, 더 길게
+        progress("감독 답이 형식에 맞지 않아 한 번 더 요청하는 중")
+        text, _ = claude(dmodel, director_system(ctx), user + "\n\n[중요] 설명 없이 <json>{\"cuts\": [...], \"end_state\": [...]}</json> 형식 하나만 답한다. 프롬프트는 간결하게.",
+                         max_tokens=32000, stage="cut_card", episode_id=ep, note="감독 컷 설계(다시 요청)")
+        plan = pick_json(text)
+        cuts = plan.get("cuts") or []
     if scenes:
         cuts = [c for c in cuts if int(c.get("scene_no") or 0) in set(int(s) for s in scenes)]
     if not cuts:
-        raise RuntimeError("감독이 컷을 만들지 못했습니다")
+        raise RuntimeError(f"감독이 컷을 만들지 못했습니다(답이 형식에 맞지 않음, 두 번 시도). 답 앞부분: {text[:160]!r}")
     progress(f"감정감수자가 컷 {len(cuts)}개를 감수하는 중")
     rv = review_cuts(ctx, ep, cuts, rmodel)
     verdicts = {(int(r.get("scene_no") or 0), int(r.get("cut_no") or 0)): r for r in rv.get("cuts") or []}
@@ -5888,7 +5900,7 @@ async function loadInbox() {
     const ent = entOf(p.entry_id || pds2.find(d => d.id === p.design_id)?.entry_id), ep = epOf(f.episode_id);
     const target = ent ? `${ent.name}${BIBLE_CAT[ent.category] ? ' (' + BIBLE_CAT[ent.category] + ')' : ''}` : ep ? epName(ep) + (f.scene_no ? ` S${f.scene_no}` : '') : '';
     items.push({ src: 'fail', type: 'fail', id: f.id, key: 'f' + k, at: f.finished_at || f.created_at, task: f,
-      title: `${TASK_LABEL[f.kind] || f.kind} 실패${target ? ' — ' + target : ''}`, sub: '원인: ' + (f.error || '기록 없음'),
+      title: `${TASK_LABEL[f.kind] || f.kind} 실패${target ? ' — ' + target : ''}`, sub: (() => { const x = explainFail(f.kind, f.error); return `${x.what} → ${x.how} (원인: ${(f.error || '기록 없음').slice(0, 120)})`; })(),
       tab: ['bible_prompt', 'photo_describe', 'bible_place', 'photo_design', 'photo_set', 'bible_extract', 'bible_suggest', 'voice_cast', 'voice_design'].includes(f.kind) ? 'bible'
         : f.kind === 'assemble' || f.kind === 'bgm' ? 'edit' : f.kind === 'upscale' ? 'release' : 'production', ep: f.episode_id, ser: ent?.series_id || f.series_id });
   });
@@ -6657,6 +6669,135 @@ const TASK_LABEL = { bible_prompt: '바이블 영어 프롬프트', bible_sugges
 const PROD_STEPS = [['원고', '대본 탭에서 넣기'], ['작가실', '감정선 정리본'], ['컷 설계', '컷 나누기·대사 미리 듣기·장면 사진'], ['생성 승인', '대표가 컷별로'], ['영상·감수', 'Seedance + 영상감수'], ['씬 보관', '집 PC · OneDrive']];
 const usdKrw = (usd, rate) => usd == null ? '-' : won(usd * (rate || 1340));
 
+
+// ------------------------------------------------------------------
+// 실패 설명: 원인 문구를 보고 "무슨 뜻인지"와 "대표가 할 일"을 알려 준다(버튼: 다시 시도·설정·대본·바이블)
+// ------------------------------------------------------------------
+function explainFail(kind, err) {
+  const e = String(err || '');
+  const R = (what, how, acts) => ({ what, how, acts });
+  if (/확정된 대본이 없/.test(e)) return R('이 화에 확정된 대본이 없어 감독이 읽을 대본이 없습니다.', '대본 탭에서 정리본(또는 원고)을 확정한 뒤 다시 시도하세요. 또는 "작가실 정리 실행"을 누르면 정리 → 확정 → 컷 설계까지 이어집니다.', ['scripts', 'retry']);
+  if (/읽을 원고가 없/.test(e)) return R('이 화에 원고가 없습니다.', '대본 탭에서 원고를 넣으세요.', ['scripts']);
+  if (/키가 없|API 키|401|403|Unauthorized|invalid.*key|missing_permissions/i.test(e)) return R('AI 서비스 키가 없거나 권한이 없습니다.', '설정 → API 키에서 해당 키를 다시 넣고 "연결 시험"을 누른 뒤 다시 시도하세요.', ['settings', 'retry']);
+  if (/402|잔액|credit|insufficient|quota|balance|payment/i.test(e)) return R('AI 서비스 잔액(크레딧)이 부족합니다.', 'Higgsfield·ElevenLabs·Claude 중 원인에 적힌 서비스를 충전한 뒤 다시 시도하세요.', ['retry']);
+  if (/429|rate.?limit|overloaded|529|too many/i.test(e)) return R('AI 서비스가 잠시 붐빕니다.', '몇 분 뒤 다시 시도하세요. 보통 그대로 해결됩니다.', ['retry']);
+  if (/만들지 못했|JSON|잘림|비어 있|형식/.test(e)) return R('AI가 답을 정해진 형식으로 주지 못했습니다(답이 깨졌거나 비었음).', '대부분 다시 시도하면 해결됩니다. 두 번 이상 같으면 대본이 너무 길거나 특이한 형식이 아닌지 확인하세요.', ['retry']);
+  if (/시간 초과|timeout|timed out/i.test(e)) return R('시간 안에 끝나지 않았습니다.', '다시 시도하세요. 계속되면 에이전트 탭에서 그 컴퓨터를 재시작하세요.', ['retry', 'agents']);
+  if (/nsfw|safety|policy|moderation/i.test(e)) return R('생성 서비스가 장면 내용을 안전 규정 위반으로 판단해 거절했습니다.', '컷 카드의 "감독에게 수정 요청"으로 노출·폭력 표현을 순화해 달라고 한 뒤 다시 생성하세요.', ['production']);
+  if (/ffmpeg|영상 도구/.test(e)) return R('컴퓨터의 영상 도구(ffmpeg)에 문제가 있습니다.', '에이전트 탭에서 그 컴퓨터를 재시작한 뒤 다시 시도하세요.', ['agents', 'retry']);
+  if (/폴더가 이 컴퓨터에 없|찾지 못했습니다: \/|No such file/.test(e)) return R('파일이 이 작업을 받은 컴퓨터에 없습니다.', '완성본·원본이 있는 컴퓨터(보통 집 PC)가 켜져 있는지 확인하고 다시 시도하세요.', ['agents', 'retry']);
+  if (/목소리가 없|voice/i.test(e)) return R('바이블에 이 인물의 목소리가 정해지지 않았습니다.', '바이블에서 "인물 목소리 만들기"로 목소리를 정한 뒤 다시 시도하세요.', ['bible', 'retry']);
+  if (/묘사|프롬프트/.test(e)) return R('바이블 묘사를 영어 프롬프트로 옮기지 못했습니다.', '바이블에서 그 항목 묘사를 조금 더 구체적으로 고치면 자동으로 다시 돕니다. 아니면 다시 시도.', ['bible', 'retry']);
+  return R('작업이 실패했습니다.', '먼저 다시 시도하세요. 같은 원인으로 또 실패하면 이 원인 문구를 Claude(개발)에게 알려 주세요.', ['retry']);
+}
+const FAIL_ACT = { retry: '다시 시도', scripts: '대본 탭 열기', settings: '설정 열기', bible: '바이블 열기', agents: '에이전트 열기', production: '제작 탭 열기' };
+async function retryTask(t) {
+  await q(S.sb.from('pipeline_tasks').insert({ kind: t.kind, payload: t.payload || {}, episode_id: t.episode_id, series_id: t.series_id, scene_no: t.scene_no,
+    cut_id: t.cut_id, take_id: t.take_id, platform: t.platform }));
+  await q(S.sb.from('pipeline_tasks').update({ status: 'cancelled' }).eq('id', t.id));
+}
+function failCard(t) {
+  const x = explainFail(t.kind, t.error);
+  return `<div class="failcard" data-fid="${esc(t.id)}">
+    <div class="row" style="gap:6px">${pill((TASK_LABEL[t.kind] || t.kind) + ' 실패', 'bad')}<span class="quiet">${esc(agoText(t.finished_at || t.created_at))}${t.scene_no ? ` · S${t.scene_no}` : ''}</span></div>
+    <div style="margin-top:4px"><b>무슨 일인가요?</b> ${esc(x.what)}</div>
+    <div><b>이렇게 하세요:</b> ${esc(x.how)}</div>
+    <details style="margin-top:2px"><summary class="quiet">원인 원문</summary><div class="quiet" style="white-space:pre-wrap">${esc(t.error || '기록 없음')}</div></details>
+    <div class="row" style="gap:6px;margin-top:6px">${x.acts.map(a => `<button class="btn small ${a === 'retry' ? 'primary' : ''}" data-fact="${a}">${FAIL_ACT[a]}</button>`).join('')}
+      <button class="btn small" data-fact="dismiss" style="margin-left:auto">확인했어요(지우기)</button></div></div>`;
+}
+function bindFailCards(root, tasks, after) {
+  root.querySelectorAll('.failcard').forEach(card => card.querySelectorAll('[data-fact]').forEach(b => b.onclick = guard(async () => {
+    const t = tasks.find(x => x.id === card.dataset.fid); if (!t) return;
+    const a = b.dataset.fact;
+    if (a === 'retry') { await retryTask(t); toast('다시 맡겼습니다'); return after(); }
+    if (a === 'dismiss') { await q(S.sb.from('pipeline_tasks').update({ status: 'cancelled' }).eq('id', t.id)); return after(); }
+    if (a === 'scripts' && t.episode_id) { S.episodeId = t.episode_id; S.versionId = null; }
+    go(a);
+  })));
+}
+
+// ------------------------------------------------------------------
+// 제작 현황판: 모든 시리즈의 대기·진행 중인 일을 담당별로, 같은 일이 두 번 걸려 있으면 중복 표시
+// ------------------------------------------------------------------
+const DESK = [['작가실', ['writers_room', 'bible_extract', 'bible_prompt', 'bible_suggest', 'bible_place', 'photo_describe', 'voice_cast']],
+  ['감독실', ['director', 'prep_cut']], ['영상 생성', ['generate', 'upscale']], ['감수', ['video_review']],
+  ['사진·목소리', ['photo_design', 'photo_set', 'voice_design', 'voice_save', 'api_check']], ['편집·보관', ['assemble', 'edit_command', 'bgm', 'store']]];
+async function renderBoard() {
+  const box = $('#prodBoard'); if (!box) return;
+  const [open, eps, sers] = await Promise.all([
+    q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,episode_id,series_id,scene_no,cut_id,payload,created_at,started_at,devices(name)').in('status', ['queued', 'running']).order('created_at')),
+    q(S.sb.from('episodes').select('id,number,title,series_id')), q(S.sb.from('series').select('id,title')),
+  ]);
+  const epOf = id => eps.find(e => e.id === id), serOf = id => sers.find(s => s.id === id);
+  const where = t => { const e = epOf(t.episode_id); const s = serOf(e?.series_id || t.series_id || t.payload?.series_id);
+    return `${s ? s.title : ''}${e ? ` · ${e.number}화` : ''}${t.scene_no ? ` S${t.scene_no}` : ''}`; };
+  const key = t => t.kind + '|' + (t.cut_id || t.payload?.version_id || t.payload?.design_id || t.payload?.entry_id || '') + '|' + (t.episode_id || t.series_id || t.payload?.series_id || '') + '|' + (t.cut_id ? '' : t.scene_no || '');
+  const cnt = {}; open.forEach(t => { cnt[key(t)] = (cnt[key(t)] || 0) + 1; });
+  const dups = open.filter(t => cnt[key(t)] > 1);
+  const running = open.filter(t => t.status === 'running'), queued = open.filter(t => t.status === 'queued');
+  const serNow = [...new Set(open.map(t => serOf(epOf(t.episode_id)?.series_id || t.series_id || t.payload?.series_id)?.title).filter(Boolean))];
+  box.innerHTML = `<div class="card">
+    <div class="row"><b>제작 현황 (모든 시리즈)</b>${pill(`진행 중 ${running.length}`, running.length ? 'warn' : '')}${pill(`대기 ${queued.length}`)}${dups.length ? pill(`중복 ${dups.length}`, 'bad') : ''}
+      <span class="quiet">${serNow.length ? '지금 다루는 시리즈: ' + esc(serNow.join(', ')) : '대기·진행 중인 일이 없습니다'}</span>
+      <button class="btn small" id="pbToggle" style="margin-left:auto">${S.boardOpen ? '접기' : '자세히'}</button></div>
+    ${dups.length ? `<div class="msg warn" style="margin:6px 0 0">같은 일이 두 번 이상 걸려 있습니다(같은 화·같은 작업). 하나만 남기면 비용·시간이 줄어듭니다. <button class="btn small" id="pbDedup">중복 정리(먼저 넣은 것만 남김)</button></div>` : ''}
+    ${S.boardOpen ? `<div class="board">${DESK.map(([desk, kinds]) => { const ts = open.filter(t => kinds.includes(t.kind)); return `<div class="desk"><b>${desk}</b> <span class="quiet">${ts.length ? `${ts.filter(t => t.status === 'running').length} 진행 · ${ts.filter(t => t.status === 'queued').length} 대기` : '쉬는 중'}</span>
+      ${ts.map(t => `<div class="dtask">${t.status === 'running' ? '<span class="spin"></span>' : '<span class="quiet">대기</span>'} <b>${esc(where(t) || '시리즈 공통')}</b> · ${esc(TASK_LABEL[t.kind] || t.kind)}${cnt[key(t)] > 1 ? ' ' + pill('중복', 'bad') : ''}
+        <div class="quiet">${esc(t.status === 'running' ? (t.progress || '처리 중') + (t.devices?.name ? ` · ${t.devices.name}` : '') : '요청 ' + agoText(t.created_at))}</div></div>`).join('')}</div>`; }).join('')}</div>` : ''}
+  </div>`;
+  $('#pbToggle').onclick = () => { S.boardOpen = !S.boardOpen; renderBoard(); };
+  const dd = $('#pbDedup'); if (dd) dd.onclick = guard(async () => {
+    const keep = new Set(), drop = [];
+    open.forEach(t => { const k = key(t); if (keep.has(k) && t.status === 'queued') drop.push(t.id); else keep.add(k); });
+    if (!drop.length) return toast('대기 중인 중복이 없습니다(진행 중인 것은 건드리지 않음)');
+    await q(S.sb.from('pipeline_tasks').update({ status: 'cancelled' }).in('id', drop)); toast(`중복 ${drop.length}건을 정리했습니다`); renderBoard();
+  });
+}
+
+// 제작할 화 고르기: 전체 또는 원하는 화만 골라 작가실 정리(→ 확정 → 컷 설계) 또는 컷 설계를 시작
+async function renderPicker(episodes) {
+  const box = $('#prodPick'); if (!box || !episodes.length) return;
+  const ids = episodes.map(e => e.id);
+  const [vers, cuts, open] = await Promise.all([
+    q(S.sb.from('script_versions').select('episode_id,status').in('episode_id', ids)),
+    q(S.sb.from('production_cuts').select('episode_id,status').in('episode_id', ids).neq('status', 'cancelled')),
+    q(S.sb.from('pipeline_tasks').select('episode_id,kind').in('episode_id', ids).in('status', ['queued', 'running'])),
+  ]);
+  const st = e => { const v = vers.filter(x => x.episode_id === e.id), c = cuts.filter(x => x.episode_id === e.id), o = open.filter(x => x.episode_id === e.id);
+    return { raw: v.length, conf: v.some(x => x.status === 'confirmed'), cuts: c.length, passed: c.filter(x => x.status === 'passed').length, busy: o.map(x => TASK_LABEL[x.kind] || x.kind) }; };
+  S.pick = S.pick || {};
+  box.innerHTML = `<div class="card">
+    <div class="row"><b>제작할 화 고르기</b><span class="quiet">대본에 올린 화를 모두 만들지 않아도 됩니다. 만들 화만 고르세요.</span>
+      <button class="btn small" id="pkAll" style="margin-left:auto">전체 선택</button><button class="btn small" id="pkNone">선택 해제</button></div>
+    <div class="pkgrid">${episodes.map(e => { const s = st(e); return `<label class="pk ${S.pick[e.id] ? 'on' : ''}"><input type="checkbox" data-pk="${esc(e.id)}" ${S.pick[e.id] ? 'checked' : ''}>
+      <b>${e.number}화</b> <span class="quiet">${esc((e.title || '').slice(0, 14))}</span>
+      <div class="quiet" style="font-size:12px">${s.busy.length ? `<span style="color:var(--warn)">진행 중: ${esc([...new Set(s.busy)].join(', '))}</span>` : s.cuts ? `컷 ${s.cuts} · 통과 ${s.passed}` : s.conf ? '대본 확정 · 컷 전' : s.raw ? '원고만' : '대본 없음'}</div></label>`; }).join('')}</div>
+    <div class="row" style="margin-top:8px"><button class="btn primary small" id="pkWr">선택한 화: 작가실 정리부터</button>
+      <button class="btn small" id="pkDir">선택한 화: 감독 컷 설계만(확정본 있는 화)</button><span class="quiet" id="pkN"></span></div>
+    <p class="quiet" style="margin:4px 0 0">작가실 정리부터: 정리본 → (자동 확정이 켜져 있으면) 확정 → 컷 설계까지 이어집니다. 이미 진행 중인 화는 건너뜁니다. 영상 생성은 여전히 컷마다 대표 승인으로만.</p></div>`;
+  const sel = () => episodes.filter(e => S.pick[e.id]);
+  const upd = () => { $('#pkN').textContent = sel().length ? `${sel().length}개 화 선택` : ''; };
+  box.querySelectorAll('[data-pk]').forEach(c => c.onchange = () => { S.pick[c.dataset.pk] = c.checked; c.closest('.pk').classList.toggle('on', c.checked); upd(); });
+  $('#pkAll').onclick = () => { episodes.forEach(e => { S.pick[e.id] = true; }); renderPicker(episodes); };
+  $('#pkNone').onclick = () => { S.pick = {}; renderPicker(episodes); };
+  const start = kind => guard(async () => {
+    const list = sel(); if (!list.length) return toast('화를 먼저 고르세요');
+    const skip = [], go2 = [];
+    for (const e of list) { const s = st(e);
+      if (s.busy.length) { skip.push(`${e.number}화(진행 중)`); continue; }
+      if (kind === 'writers_room' && !s.raw) { skip.push(`${e.number}화(대본 없음)`); continue; }
+      if (kind === 'director' && !s.conf) { skip.push(`${e.number}화(확정본 없음)`); continue; }
+      go2.push(e); }
+    if (!go2.length) return toast('시작할 수 있는 화가 없습니다: ' + skip.join(', '));
+    if (!confirm(`${go2.map(e => e.number + '화').join(', ')}에 ${kind === 'writers_room' ? '작가실 정리' : '감독 컷 설계'}를 맡깁니다(Claude 비용, 화당 수백 원).${skip.length ? `\n건너뜀: ${skip.join(', ')}` : ''}`)) return;
+    const conf = kind === 'director' ? await q(S.sb.from('script_versions').select('id,episode_id,version_no').in('episode_id', go2.map(e => e.id)).eq('status', 'confirmed').order('version_no', { ascending: false })) : [];
+    await q(S.sb.from('pipeline_tasks').insert(go2.map(e => ({ kind, episode_id: e.id, payload: kind === 'director' ? { script_version_id: conf.find(v => v.episode_id === e.id)?.id } : {} }))));
+    toast(`${go2.length}개 화를 맡겼습니다. 위 제작 현황에서 진행을 볼 수 있습니다`); S.boardOpen = true; renderBoard(); renderPicker(episodes);
+  });
+  $('#pkWr').onclick = start('writers_room'); $('#pkDir').onclick = start('director'); upd();
+}
+
 async function viewProduction(main) {
   const series = await q(S.sb.from('series').select('id,title').order('created_at'));
   if (!S.seriesId || !series.some(s => s.id === S.seriesId)) S.seriesId = series[0]?.id || null;
@@ -6666,9 +6807,12 @@ async function viewProduction(main) {
     <div class="row" style="margin-bottom:12px">
       <h2 style="margin:0 12px 0 0">제작</h2>
       <select id="pSer" style="width:auto">${series.map(s => `<option value="${esc(s.id)}" ${s.id === S.seriesId ? 'selected' : ''}>${esc(s.title)}</option>`).join('')}</select>
-      <div class="epchips">${episodes.map(e => `<button class="chip ${e.id === S.episodeId ? 'on' : ''}" data-pep="${esc(e.id)}">${e.number}화</button>`).join('') || '<span class="quiet">대본 탭에서 화를 먼저 만드세요</span>'}</div>
+      <span class="quiet">보고 있는 화:</span><div class="epchips">${episodes.map(e => `<button class="chip ${e.id === S.episodeId ? 'on' : ''}" data-pep="${esc(e.id)}">${e.number}화</button>`).join('') || '<span class="quiet">대본 탭에서 화를 먼저 만드세요</span>'}</div>
     </div>
+    <div id="prodBoard"></div>
+    <div id="prodPick"></div>
     <div id="prodPane"><p class="quiet">불러오는 중…</p></div>`;
+  renderBoard().catch(console.error); renderPicker(episodes).catch(console.error);
   $('#pSer').onchange = e => { S.seriesId = e.target.value; S.episodeId = null; go('production'); };
   main.querySelectorAll('[data-pep]').forEach(b => b.onclick = () => { S.episodeId = b.dataset.pep; go('production'); });
   if (S.episodeId) await renderProduction(episodes.find(e => e.id === S.episodeId));
@@ -6678,6 +6822,7 @@ async function viewProduction(main) {
     if (S.tab !== 'production' || !$('#prodPane')) { clearInterval(S.prodTimer); S.prodTimer = null; return; }
     const playing = [...document.querySelectorAll('#prodPane video, #prodPane audio')].some(m => !m.paused);
     if (S.prodBusy && !playing && !document.querySelector('#prodPane :focus')) renderProduction(episodes.find(e => e.id === S.episodeId), true).catch(() => {});
+    renderBoard().catch(() => {});
   }, 8000);
 }
 
@@ -6687,7 +6832,7 @@ async function renderProduction(ep, quietRefresh = false) {
   const [versions, cuts, tasks, pkgs, props, agents, costSet, gen] = await Promise.all([
     q(S.sb.from('script_versions').select('id,status,version_no,created_at,note').eq('episode_id', ep.id).order('created_at', { ascending: false })),
     q(S.sb.from('production_cuts').select('*').eq('episode_id', ep.id).order('scene_no').order('cut_no')),
-    q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,result,error,scene_no,cut_id,created_at,finished_at,devices(name)').eq('episode_id', ep.id).order('created_at', { ascending: false }).limit(40)),
+    q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,result,error,scene_no,cut_id,take_id,payload,platform,series_id,episode_id,created_at,finished_at,devices(name)').eq('episode_id', ep.id).order('created_at', { ascending: false }).limit(40)),
     q(S.sb.from('scene_packages').select('*').eq('episode_id', ep.id)),
     q(S.sb.from('story_proposals').select('id').eq('episode_id', ep.id).eq('status', 'proposed')),
     agentRows(),
@@ -6707,6 +6852,12 @@ async function renderProduction(ep, quietRefresh = false) {
   const confirmed = versions.find(v => v.status === 'confirmed');
   const drafts = versions.filter(v => v.status === 'draft');
   const openTasks = tasks.filter(t => ['queued', 'running'].includes(t.status));
+  // 아직 해결 안 된 실패: 같은 일이 그 뒤에 다시 성공·진행 중이면 빼고, 같은 일은 마지막 것만
+  const fseen = new Set();
+  const failedNow = tasks.filter(t => t.status === 'failed' && !tasks.some(o => o.kind === t.kind && (o.cut_id || null) === (t.cut_id || null) && (o.scene_no || null) === (t.scene_no || null)
+      && o.created_at > t.created_at && o.status !== 'failed' && o.status !== 'cancelled'))
+    .filter(t => { const k = t.kind + '|' + (t.cut_id || '') + '|' + (t.scene_no || ''); if (fseen.has(k)) return false; fseen.add(k); return true; });
+  const seriesTitle = (await q(S.sb.from('series').select('title').eq('id', S.seriesId).maybeSingle()).catch(() => null))?.title || '';
   S.prodBusy = openTasks.length > 0;
   const online = agents.filter(a => a.alive);
   const hasWin = agents.some(a => a.role === 'server');
@@ -6739,7 +6890,8 @@ async function renderProduction(ep, quietRefresh = false) {
     ${online.length ? '' : '<div class="msg err">켜져 있는 에이전트가 없습니다. 버튼을 눌러도 에이전트가 켜질 때까지 기다립니다.</div>'}
   </div>
 
-  ${openTasks.length || tasks.length ? `<div class="card"><div class="row"><b>진행 중인 일</b><span class="quiet">8초마다 새로 고침</span></div>
+  ${failedNow.length ? `<div class="card" style="border-color:var(--bad)"><div class="row"><b>${esc(seriesTitle)} ${ep.number}화 — 해결이 필요한 실패 ${failedNow.length}건</b></div>${failedNow.map(failCard).join('')}</div>` : ''}
+  ${openTasks.length || tasks.length ? `<div class="card"><div class="row"><b>${esc(seriesTitle)} ${ep.number}화 진행 중인 일</b><span class="quiet">8초마다 새로 고침</span></div>
     <table>${tasks.slice(0, openTasks.length ? Math.max(openTasks.length, 3) : 4).map(t => `<tr>
       <td style="white-space:nowrap">${pill(TASK_LABEL[t.kind] || t.kind, t.status === 'failed' ? 'bad' : t.status === 'done' ? 'good' : 'warn')}</td>
       <td>${t.status === 'running' ? '<span class="spin"></span>' : ''}${esc(t.status === 'failed' ? (t.error || '실패') : t.status === 'done' ? (t.result || '완료') : (t.progress || (t.status === 'queued' ? '에이전트 대기 중' : '처리 중')))}</td>
@@ -6749,6 +6901,7 @@ async function renderProduction(ep, quietRefresh = false) {
     : `<div class="card quiet">${confirmed ? '아직 컷이 없습니다. "감독: 컷 설계"를 누르면 감독이 씬마다 4~15초 컷으로 나누고 감정감수자가 감수합니다. (Claude 비용만, 수백 원 수준)' : '대본을 확정하면 감독이 컷을 설계합니다. 원고만 있으면 "작가실 정리 실행"부터 누르세요.'}</div>`}`;
 
   bindProduction(ep, { confirmed, cuts, tasks: openTasks, rate });
+  bindFailCards(pane, failedNow, () => renderProduction(ep));
 }
 
 function sceneCard(no, cs, takes, urls, pkg, rate, hasWin, isOpen) {
@@ -8179,6 +8332,13 @@ const HELP = {
 <li><b>씬 보관</b> — 집 PC의 OneDrive 씬 폴더에 저장.<span class="ex">예: NYX › 한국 갔더니 아이돌 › EP01_… › S02_태국 오디션장</span></li>
 <li><b>가편집 자동</b> — 한 화 모든 컷이 통과하면 가편집 미리보기가 자동으로 만들어집니다 → 편집 탭.<span class="ex">예: 알림 "가편집본 자동 생성 (24컷)"</span></li>
 </ol>
+<h4>맨 위: 제작 현황 · 제작할 화 고르기</h4>
+<ul>
+<li><b>제작 현황(모든 시리즈)</b> — 작가실·감독실·영상 생성·감수·사진·목소리·편집·보관별로 지금 <b>어느 시리즈 몇 화</b>의 무엇을 진행·대기하는지. 같은 일이 두 번 걸려 있으면 <b>중복</b> 표시와 "중복 정리" 버튼.<span class="ex">예: 작가실 — 한국 갔더니 아이돌 · 3화 · 작가실 정리(진행) / 시리즈B · 1화(대기) · 감독실 — 아이돌 2화 컷 설계</span></li>
+<li><b>제작할 화 고르기</b> — 대본에 올린 화를 다 만들지 않아도 됩니다. 원하는 화만 체크(또는 전체 선택) → <b>선택한 화: 작가실 정리부터</b>(정리 → 확정 → 컷 설계) 또는 <b>감독 컷 설계만</b>. 이미 진행 중인 화는 건너뜁니다.<span class="ex">예: 1~3화만 체크 → 작가실 정리부터 → 3개 화만 진행, 4~10화는 그대로</span></li>
+<li><b>보고 있는 화</b>(위 1화·2화… 칩) — 아래 컷 카드·진행 상황을 볼 화를 고릅니다(만들기 시작과는 별개).</li>
+<li><b>해결이 필요한 실패</b>(빨간 상자) — 실패하면 <b>무슨 일인지</b>와 <b>이렇게 하세요</b>가 쉬운 말로 나오고, 그 자리에서 다시 시도·대본 탭·설정·바이블로 이동할 수 있습니다. 해결했으면 "확인했어요".<span class="ex">예: "감독 컷 설계 실패 — 이 화에 확정된 대본이 없습니다 → 대본 탭에서 확정 후 다시 시도" [대본 탭 열기] [다시 시도]</span></li>
+</ul>
 <h4>자동으로 해 주는 것</h4>
 <ul>
 <li><b>자동 재시도</b>(설정 → 제작, 0~2번) — 불합격 컷을 감독이 고치고 → 사진·목소리 준비 → 다시 생성. 횟수를 넘으면 대표 승인.<span class="ex">예: 1번으로 두면 C04 불합격 → 자동 수정·재생성 1회 → 또 떨어지면 대표에게 알림</span></li>

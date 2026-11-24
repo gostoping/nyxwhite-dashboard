@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.14.1"
+VERSION = "1.14.2"
 
 import base64
 import glob
@@ -792,10 +792,16 @@ JSON 최상위에 "end_state"도 함께 준다: 이 화가 끝났을 때 주요 
     text, _ = claude(dmodel, director_system(ctx), user, max_tokens=24000, stage="cut_card", episode_id=ep, note="감독 컷 설계")
     plan = pick_json(text)
     cuts = plan.get("cuts") or []
+    if not cuts:   # 답이 잘리거나 형식이 깨졌으면 한 번 더: JSON만, 더 길게
+        progress("감독 답이 형식에 맞지 않아 한 번 더 요청하는 중")
+        text, _ = claude(dmodel, director_system(ctx), user + "\n\n[중요] 설명 없이 <json>{\"cuts\": [...], \"end_state\": [...]}</json> 형식 하나만 답한다. 프롬프트는 간결하게.",
+                         max_tokens=32000, stage="cut_card", episode_id=ep, note="감독 컷 설계(다시 요청)")
+        plan = pick_json(text)
+        cuts = plan.get("cuts") or []
     if scenes:
         cuts = [c for c in cuts if int(c.get("scene_no") or 0) in set(int(s) for s in scenes)]
     if not cuts:
-        raise RuntimeError("감독이 컷을 만들지 못했습니다")
+        raise RuntimeError(f"감독이 컷을 만들지 못했습니다(답이 형식에 맞지 않음, 두 번 시도). 답 앞부분: {text[:160]!r}")
     progress(f"감정감수자가 컷 {len(cuts)}개를 감수하는 중")
     rv = review_cuts(ctx, ep, cuts, rmodel)
     verdicts = {(int(r.get("scene_no") or 0), int(r.get("cut_no") or 0)): r for r in rv.get("cuts") or []}
