@@ -6716,9 +6716,11 @@ async function openVoiceDesign(entry, cur, fresh) {
 function openBibleEditor({ entry, base, urls, fromId }) {
   const isNew = !entry;
   // 새 항목은 위쪽 편집 칸, 기존 항목은 그 카드 안에서 연다(맨 아래로 내려가지 않게)
-  const host = (!isNew && document.getElementById('be-' + entry.id)) || host;
+  const host = (!isNew && document.getElementById('be-' + entry.id)) || document.getElementById('bEditor');
   document.querySelectorAll('[id^="be-"], #bEditor').forEach(x => { if (x !== host) x.innerHTML = ''; });
   const imgs = base?.image_paths || [];
+  if (!host) return toast('편집 칸을 찾지 못했습니다. 새로고침 후 다시 눌러 주세요');
+  setTimeout(() => host.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
   host.innerHTML = `<div class="card" style="border-color:var(--accent)">
     <b>${isNew ? '새 바이블 항목' : esc(entry.name) + ' 새 버전 작성'}</b>
     ${isNew ? `<div class="row"><div style="flex:2;min-width:160px"><label>이름</label><input id="bname" placeholder="예: 주인공 이름 (영문 표기)"></div>
