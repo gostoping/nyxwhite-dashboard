@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.17.0"
+VERSION = "1.17.1"
 
 import base64
 import glob
@@ -504,8 +504,11 @@ def quick_lane():
     lane(QUICK_KINDS, "busy", "짧은 일 줄")
 
 
+QUICK_WORKERS = 4   # 바이블 반영·코디네이터 감수는 4개를 동시에(병렬)
+
+
 def lanes_busy():
-    return QUICK.get("busy") or QUICK.get("photo")
+    return next((v for k, v in QUICK.items() if k not in ("paused", "started") and v), None)
 
 
 def progress(text):
@@ -3151,9 +3154,9 @@ def t_coord_review(t):
     name, cat = info.get("name"), info.get("category")
     hangul = re.search(r"[가-힣]", (info.get("description") or "") + (info.get("details") or ""))
     if (info.get("prompt_pending") or (hangul and not info.get("prompt_en"))) and (t.get("attempts") or 1) < 15:
-        raise Retry(45, f"{name}: 작가실이 영어 프롬프트를 반영하는 중이라 끝난 뒤 감수합니다")
+        raise Retry(15, f"{name}: 영어 프롬프트 반영이 끝난 뒤 바로 감수합니다")
     if (info.get("description") or "").startswith("(작가실이 사진을 보고 쓰는 중)") and (t.get("attempts") or 1) < 15:
-        raise Retry(45, f"{name}: 코디네이터가 사진을 보고 묘사를 쓰는 중이라 끝난 뒤 감수합니다")
+        raise Retry(15, f"{name}: 코디네이터가 사진을 보고 묘사를 쓰는 중이라 끝난 뒤 감수합니다")
     prev = info.get("prev") or {}
     reason = (info.get("change_reason") or "").strip()
     owner_req = reason if info.get("proposed_by") == "대표" and not re.search(r"(사진을 보고|가져옴|얼굴 고정|Soul)", reason) else ""
@@ -3864,8 +3867,11 @@ def main():
             QUICK["paused"] = paused
             if not QUICK.get("started"):   # 첫 연결이 된 뒤에 짧은 일 줄을 연다
                 QUICK["started"] = True
-                threading.Thread(target=quick_lane, daemon=True).start()
-                threading.Thread(target=lane, args=(PHOTO_KINDS, "photo", "사진 줄"), daemon=True).start()
+                for i in range(QUICK_WORKERS):
+                    threading.Thread(target=lane, args=(QUICK_KINDS, f"busy{i}", f"짧은 일 줄 {i + 1}"), daemon=True).start()
+                    time.sleep(1)
+                for i in range(2):   # 사진도 2개 동시에(서로 다른 인물 후보·얼굴 학습)
+                    threading.Thread(target=lane, args=(PHOTO_KINDS, f"photo{i}", f"사진 줄 {i + 1}"), daemon=True).start()
                 log("짧은 일 줄(바이블 반영·코디네이터 감수)·사진 줄(Higgsfield 후보·얼굴 학습) 시작")
             last_error = None
             if os.path.exists(PENDING):  # 새 버전이 정상적으로 연결됨 → 업데이트 확정
