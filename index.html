@@ -6116,12 +6116,14 @@ async function openPhotoDesign(entry, cur, fresh) {
     (data || []).forEach(x => { if (x.signedUrl) urls[x.path] = x.signedUrl; });
   }
   const busy = ['queued', 'training'].includes(d.status);
+  await loadEta();
   const [pl, pk] = PD_STATUS[d.status] || [d.status, ''];
   const img = (x, sel) => `<label class="pdimg ${sel ? 'pick' : ''}">${urls[x.path] ? `<img src="${esc(urls[x.path])}" loading="lazy">` : '<span class="ph">사진</span>'}
     ${sel ? `<input type="checkbox" data-pdc="${esc(x.path)}" data-b="${esc(x.bucket || 'takes')}">` : ''}${x.label ? `<span>${esc(x.label)}</span>` : ''}</label>`;
   box.innerHTML = `<div class="vdbox"><div class="row"><b>${isChar ? '실사 사진·얼굴 고정' : '사진 디자인'}</b>${pill(pl, pk)}
       <button class="btn small" id="pdNew-${entry.id}" style="margin-left:auto">새로 만들기</button></div>
-    ${busy ? `<p><span class="spin"></span>${d.status === 'training' ? '고른 사진으로 얼굴을 학습하고 같은 얼굴의 기준 사진을 만드는 중입니다. 5~20분 걸릴 수 있습니다.' : 'Higgsfield에서 후보를 만드는 중입니다.'} 끝나면 알림이 옵니다.</p>` : ''}
+    ${busy ? `<p><span class="spin"></span>${d.status === 'training' ? '고른 사진으로 얼굴을 학습하고 같은 얼굴의 기준 사진을 만드는 중입니다.' : 'Higgsfield에서 후보를 만드는 중입니다.'} 끝나면 알림이 옵니다.
+      <br><span class="quiet">⏱ ${esc(etaText(d.status === 'training' ? 'photo_set' : 'photo_design', d.created_at, 'running'))}</span></p>` : ''}
     ${d.status === 'failed' ? `<div class="msg err">${esc(d.error || '실패')}</div>` : ''}
     ${d.status === 'ready' ? `<p class="quiet" style="margin:4px 0">${isChar ? '같은 사람으로 쓸 사진을 1~4장 고르세요(여러 장이면 얼굴이 더 안정적). 사진을 누르면 크게 보고, 크게 본 채로 고를 수 있습니다. 고르기는 체크칸.' : '바이블에 넣을 사진을 고르세요.'}</p>
       <div class="pdgrid">${(d.previews || []).map(x => img(x, true)).join('')}</div>
@@ -7311,6 +7313,33 @@ document.addEventListener('click', ev => {
   openZoom(imgs, Math.max(0, imgs.indexOf(im)));
 }, true);
 
+// 예상 소요 시간: 최근 14일 같은 종류 작업이 실제로 걸린 시간(중앙값)으로 "보통 N분 · 약 M분 남음"을 보여 준다.
+// 기록이 적으면 기본값(Higgsfield·Claude 평소 속도)을 쓴다.
+const ETA_DEFAULT = { generate: [180, 480], photo_design: [60, 180], photo_set: [300, 1200], prep_cut: [60, 240], upscale: [600, 1800],
+  director: [120, 600], writers_room: [60, 240], bible_prompt: [20, 90], coord_review: [20, 90], photo_describe: [20, 90], video_review: [30, 120],
+  assemble: [30, 180], bgm: [30, 120], voice_design: [20, 90], voice_cast: [30, 120], bible_extract: [60, 300], bible_suggest: [30, 120], bible_place: [30, 120] };
+async function loadEta(force) {
+  if (!force && S.etaAt && Date.now() - S.etaAt < 10 * 60e3) return;
+  S.etaAt = Date.now();
+  const since = new Date(Date.now() - 14 * 864e5).toISOString();
+  const rows = await q(S.sb.from('pipeline_tasks').select('kind,started_at,finished_at').eq('status', 'done').gte('finished_at', since)
+    .not('started_at', 'is', null).order('finished_at', { ascending: false }).limit(1000)).catch(() => []);
+  const by = {};
+  rows.forEach(r => { const s = (new Date(r.finished_at) - new Date(r.started_at)) / 1000; if (s > 2 && s < 4 * 3600) (by[r.kind] = by[r.kind] || []).push(s); });
+  S.eta = {};
+  Object.entries(by).forEach(([k, xs]) => { if (xs.length >= 3) { xs.sort((a, b) => a - b); S.eta[k] = { med: xs[Math.floor(xs.length / 2)], p80: xs[Math.floor(xs.length * 0.8)], n: xs.length }; } });
+}
+const mins = s => s < 90 ? `${Math.max(1, Math.round(s / 60))}분` : `${Math.round(s / 60)}분`;
+function etaText(kind, startedAt, status) {
+  const e = (S.eta || {})[kind], d = ETA_DEFAULT[kind];
+  if (!e && !d) return '';
+  const typ = e ? `보통 ${mins(e.med)}${e.p80 > e.med * 1.3 ? `~${mins(e.p80)}` : ''} (최근 ${e.n}건)` : `보통 ${mins(d[0])}~${mins(d[1])}`;
+  if (status !== 'running' || !startedAt) return typ;
+  const el = (Date.now() - new Date(startedAt)) / 1000, hi = e ? e.p80 : d[1], mid = e ? e.med : (d[0] + d[1]) / 2;
+  const left = el < mid ? mid - el : el < hi ? hi - el : null;
+  return `${typ} · ${left != null ? `약 ${mins(left)} 남음` : `예상보다 오래 걸리는 중(${mins(el)} 지남)`}`;
+}
+
 // ------------------------------------------------------------------
 // 실패 설명: 원인 문구를 보고 "무슨 뜻인지"와 "대표가 할 일"을 알려 준다(버튼: 다시 시도·설정·대본·바이블)
 // ------------------------------------------------------------------
@@ -7378,6 +7407,7 @@ const DESK = [['코디네이터', ['coord_review']], ['작가실', ['writers_roo
   ['사진·목소리', ['photo_design', 'photo_set', 'voice_design', 'voice_save', 'api_check']], ['편집·보관', ['assemble', 'edit_command', 'bgm', 'store']]];
 async function renderBoard() {
   const box = $('#prodBoard'); if (!box) return;
+  await loadEta();
   const [all, eps, sers] = await Promise.all([
     q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,episode_id,series_id,scene_no,cut_id,payload,created_at,started_at,not_before,devices(name)').in('status', ['queued', 'running']).order('created_at')),
     q(S.sb.from('episodes').select('id,number,title,series_id')), q(S.sb.from('series').select('id,title')),
@@ -7404,7 +7434,8 @@ async function renderBoard() {
     ${dups.length ? `<div class="msg warn" style="margin:6px 0 0">같은 일이 두 번 이상 걸려 있습니다(같은 화·같은 작업). 하나만 남기면 비용·시간이 줄어듭니다. <button class="btn small" id="pbDedup">중복 정리(먼저 넣은 것만 남김)</button></div>` : ''}
     ${S.boardOpen ? `<div class="board">${DESK.map(([desk, kinds]) => { const ts = open.filter(t => kinds.includes(t.kind)); return `<div class="desk"><b>${desk}</b> <span class="quiet">${ts.length ? `${ts.filter(t => t.status === 'running').length} 진행 · ${ts.filter(t => t.status === 'queued').length} 대기` : '쉬는 중'}</span>
       ${ts.map(t => `<div class="dtask">${t.status === 'running' ? '<span class="spin"></span>' : '<span class="quiet">대기</span>'} <b>${esc(where(t))}</b> · ${esc(TASK_LABEL[t.kind] || t.kind)}${t.payload?.scenes ? ` (씬 ${esc(t.payload.scenes.join(', '))})` : ''}${cnt[key(t)] > 1 ? ' ' + pill('중복', 'bad') : ''}
-        <div class="quiet">${esc(t.status === 'running' ? (t.progress || '처리 중') + (t.devices?.name ? ` · ${t.devices.name}` : '') : later(t) ? `${Math.ceil((new Date(t.not_before) - Date.now()) / 60000)}분 뒤 시작 예정` : '요청 ' + agoText(t.created_at) + ' · 차례 기다리는 중')}</div></div>`).join('')}</div>`; }).join('')}</div>` : ''}
+        <div class="quiet">${esc(t.status === 'running' ? (t.progress || '처리 중') + (t.devices?.name ? ` · ${t.devices.name}` : '') : later(t) ? `${Math.ceil((new Date(t.not_before) - Date.now()) / 60000)}분 뒤 시작 예정` : '요청 ' + agoText(t.created_at) + ' · 차례 기다리는 중')}</div>
+        <div class="quiet" style="font-size:12px">⏱ ${esc(etaText(t.kind, t.started_at, t.status))}</div></div>`).join('')}</div>`; }).join('')}</div>` : ''}
   </div>`;
   $('#pbToggle').onclick = () => { S.boardOpen = !S.boardOpen; renderBoard(); };
   $('#pbAll').onchange = e => { S.boardAll = e.target.checked; renderBoard(); };
@@ -7518,7 +7549,7 @@ async function renderProduction(ep, quietRefresh = false) {
   const [versions, cuts, tasks, pkgs, props, agents, costSet, gen] = await Promise.all([
     q(S.sb.from('script_versions').select('id,status,version_no,created_at,note').eq('episode_id', ep.id).order('created_at', { ascending: false })),
     q(S.sb.from('production_cuts').select('*').eq('episode_id', ep.id).order('scene_no').order('cut_no')),
-    q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,result,error,scene_no,cut_id,take_id,payload,platform,series_id,episode_id,created_at,finished_at,devices(name)').eq('episode_id', ep.id).order('created_at', { ascending: false }).limit(40)),
+    q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,result,error,scene_no,cut_id,take_id,payload,platform,series_id,episode_id,created_at,started_at,finished_at,devices(name)').eq('episode_id', ep.id).order('created_at', { ascending: false }).limit(40)),
     q(S.sb.from('scene_packages').select('*').eq('episode_id', ep.id)),
     q(S.sb.from('story_proposals').select('id').eq('episode_id', ep.id).eq('status', 'proposed')),
     agentRows(),
@@ -7581,7 +7612,7 @@ async function renderProduction(ep, quietRefresh = false) {
     <table>${tasks.slice(0, openTasks.length ? Math.max(openTasks.length, 3) : 4).map(t => `<tr>
       <td style="white-space:nowrap">${pill(TASK_LABEL[t.kind] || t.kind, t.status === 'failed' ? 'bad' : t.status === 'done' ? 'good' : 'warn')}</td>
       <td>${t.status === 'running' ? '<span class="spin"></span>' : ''}${esc(t.status === 'failed' ? (t.error || '실패') : t.status === 'done' ? (t.result || '완료') : (t.progress || (t.status === 'queued' ? '에이전트 대기 중' : '처리 중')))}</td>
-      <td class="quiet hide-m" style="white-space:nowrap">${esc(t.devices?.name || '')} ${fmt(t.finished_at || t.created_at)}</td></tr>`).join('')}</table></div>` : ''}
+      <td class="quiet hide-m" style="white-space:nowrap">${esc(t.devices?.name || '')} ${fmt(t.finished_at || t.created_at)}${['queued', 'running'].includes(t.status) ? `<br>⏱ ${esc(etaText(t.kind, t.started_at, t.status))}` : ''}</td></tr>`).join('')}</table></div>` : ''}
 
   ${cuts.length ? Object.entries(scenes).map(([no, cs]) => sceneCard(no, cs, takes, urls, pkgs.find(p => p.scene_no === +no), rate, hasWin, open.has(no) || (!quietRefresh && (Object.keys(scenes).length <= 2 || no === Object.keys(scenes)[0])))).join('')
     : `<div class="card quiet">${confirmed ? '아직 컷이 없습니다. "감독: 컷 설계"를 누르면 감독이 씬마다 4~15초 컷으로 나누고 감정감수자가 감수합니다. (Claude 비용만, 수백 원 수준)' : '대본을 확정하면 감독이 컷을 설계합니다. 원고만 있으면 "작가실 정리 실행"부터 누르세요.'}</div>`}`;
@@ -7652,7 +7683,7 @@ function cutCard(c, ts, urls, rate) {
   const canApprove = ['designed', 'failed', 'hold'].includes(c.status);
   return `<div class="cut">
     <div class="media">${u ? `<video src="${esc(u)}" ${poster ? `poster="${esc(poster)}"` : ''} controls preload="none" playsinline></video>`
-      : poster ? `<img src="${esc(poster)}">` : `<div class="ph">${c.status === 'generating' ? '<span class="spin"></span> 생성 중' : `${c.seconds}초`}</div>`}</div>
+      : poster ? `<img src="${esc(poster)}">` : `<div class="ph">${c.status === 'generating' ? `<span class="spin"></span> 생성 중<br><span style="font-size:11px">⏱ ${esc(etaText('generate'))}</span>` : `${c.seconds}초`}</div>`}</div>
     <div class="body">
       <div class="row"><b>${esc(c.code || `C${c.cut_no}`)}</b>${pill(label, kind)}<span class="quiet">${c.seconds}초 · ${esc(c.resolution)}</span>
         ${shown?.score != null ? pill(shown.score + '점', shown.verdict === 'pass' ? 'good' : 'bad') : ''}</div>
@@ -9022,6 +9053,7 @@ const HELP = {
 <ul>
 <li><b>제작 현황(모든 시리즈)</b> — 작가실·감독실·영상 생성·감수·사진·목소리·편집·보관별로 지금 <b>어느 시리즈 몇 화</b>의 무엇을 진행·대기하는지. 같은 일이 두 번 걸려 있으면 <b>중복</b> 표시와 "중복 정리" 버튼.<span class="ex">예: 작가실 — 한국 갔더니 아이돌 · 3화 · 작가실 정리(진행) / 시리즈B · 1화(대기) · 감독실 — 아이돌 2화 컷 설계</span></li>
 <li><b>제작할 화 고르기</b> — 대본에 올린 화를 다 만들지 않아도 됩니다. 원하는 화만 체크(또는 전체 선택) → <b>선택한 화: 작가실 정리부터</b>(정리 → 확정 → 컷 설계) 또는 <b>감독 컷 설계만</b>. 이미 진행 중인 화는 건너뜁니다.<span class="ex">예: 1~3화만 체크 → 작가실 정리부터 → 3개 화만 진행, 4~10화는 그대로</span></li>
+<li><b>예상 소요 시간(⏱)</b> — 현황판·진행 중인 일·사진 만들기·컷 "생성 중"에 "보통 N분 · 약 M분 남음"이 나옵니다. 최근 14일 같은 일이 실제로 걸린 시간으로 계산하고, 기록이 적으면 평소 속도(Higgsfield 영상 3~8분, 사진 후보 1~3분, 얼굴 학습 5~20분)를 씁니다. "예상보다 오래 걸리는 중"이 오래 계속되면 에이전트 탭을 확인하세요.</li>
 <li><b>제작 현황은 지금 고른 시리즈만</b> 보여 줍니다. 다른 시리즈 일은 "다른 시리즈에서도 일하는 중: … 2건"으로 한 줄만, 전부 보려면 "모든 시리즈 보기". "15분 뒤 시작 예정"은 일부러 늦춰 둔 일입니다.</li>
 <li><b>보류</b> — 만들다 멈출 시리즈는 시리즈 옆 "이 시리즈 보류", 화는 화 카드의 "보류". 대본·바이블·컷·영상은 그대로 두고 대기 중인 일만 취소하며, 보류 중에는 새 일이 시작되지 않습니다. 보류한 것은 <b>기록 탭 → 보류함</b>에 모이고 "꺼내기"로 멈춘 곳부터 이어서 만듭니다.<span class="ex">예: 동구밭 4·5화 보류(이유: 결말 수정 예정) → 다음 달 기록 탭 보류함에서 꺼내기</span></li>
 <li><b>감독 → 작가실 피드백</b> — 씬이 너무 길어 감독이 컷으로 설계하지 못하면, 감독이 <b>작가실에 자동으로 요청</b>합니다: "S#7을 대사·사건·감정선 그대로 2~3개 부분(S#7-1, S#7-2)으로 나눠 달라". 작가실 수정본은 대사가 한 글자라도 바뀌면 받지 않고 다시 씁니다. 수정본을 대표가 확정하면(자동 확정이 켜져 있으면 바로) 감독이 그 씬만 다시 설계합니다. 실패 상자의 <b>작가실에 요청</b>으로 직접 보낼 수도 있습니다(전할 말 적기).<span class="ex">예: 3화 S#7 실패 → 작가실 "린이 난간으로 가는 순간에서 나눔" → 대본 탭에서 확정 → 감독이 S#7-1·7-2 컷 설계</span></li>
