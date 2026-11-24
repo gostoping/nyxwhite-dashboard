@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.20.0"
+VERSION = "1.21.0"
 
 import base64
 import glob
@@ -446,6 +446,26 @@ def run_job(j):
 TASKS = {}
 
 
+def ts_of(v):
+    """DB 시각 문자열 → 초. 소수점 자리 수가 달라도(파이썬 3.10 이하) 읽는다. 못 읽으면 None."""
+    m = re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)?", str(v or "").replace(" ", "T"))
+    if not m:
+        return None
+    tz = (m.group(3) or "+00:00").replace("Z", "+00:00")
+    if len(tz) == 5:
+        tz = tz[:3] + ":" + tz[3:]
+    try:
+        return datetime.fromisoformat(m.group(1) + tz).timestamp() + float("0." + (m.group(2) or "0"))
+    except Exception:
+        return None
+
+
+def waited(t):
+    """이 일이 대기열에 들어온 뒤 지난 초(기다림 한도용 — '잠시 뒤 다시'는 시도 횟수에 세지 않으므로). 모르면 '오래됨'으로 본다."""
+    c = ts_of(t.get("created_at"))
+    return time.time() - c if c else 10 ** 9
+
+
 class Retry(Exception):
     """지금은 할 수 없고 잠시 뒤 다시: 작업을 대기열로 돌려놓는다."""
     def __init__(self, seconds, why):
@@ -481,14 +501,20 @@ QUICK_KINDS = ["bible_prompt", "coord_review", "photo_describe"]
 # 바이블 사진(Higgsfield 후보·얼굴 학습)도 영상 생성·컷 설계 뒤에 줄 서지 않게 따로
 PHOTO_KINDS = ["photo_design", "photo_set"]
 QUICK = {"busy": None, "photo": None, **{f"busy{i}": None for i in range(8)}, **{f"photo{i}": None for i in range(4)},
-         **{f"gen{i}": None for i in range(4)}, **{f"prep{i}": None for i in range(4)}}   # 줄 이름을 미리 다 만들어 둔다(동시에 고치다 깨지지 않게)
+         **{f"gen{i}": None for i in range(4)}, **{f"prep{i}": None for i in range(4)},
+         **{f"work{i}": None for i in range(4)}, **{f"heavy{i}": None for i in range(2)}}   # 줄 이름을 미리 다 만들어 둔다(동시에 고치다 깨지지 않게)
 PULSE = {"last": 0.0, "restart": False}
 
 
+FLAGS = ("paused", "started", "draining")
+
+
 def lane(kinds, slot, label):
+    QUICK.setdefault(slot, None)
     while True:
         try:
-            if not QUICK.get("paused"):
+            # 업데이트·재시작을 기다리는 중(draining)에는 새 일을 집지 않는다 — 집었다가 재시작에 끊기면 영상 생성이 두 번 돈다
+            if not QUICK.get("paused") and not QUICK.get("draining"):
                 tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=kinds, p_platform=PLATFORM)
                 if tk and tk.get("id"):
                     QUICK[slot] = tk["kind"]
@@ -509,6 +535,12 @@ def quick_lane():
 QUICK_WORKERS = 4   # 바이블 반영·코디네이터 감수는 4개를 동시에(병렬)
 GEN_KINDS = ["generate"]   # 영상 생성은 Higgsfield를 기다리는 시간이 대부분 → 3개 동시에
 PREP_KINDS = ["prep_cut"]  # 컷 장면 사진 준비 2개 동시에
+HEAVY_KINDS = ["assemble", "upscale"]   # 컴퓨터를 많이 쓰는 ffmpeg 일은 1개씩
+WORK_WORKERS = 3   # 그 밖의 일(감독 컷 설계·작가실·감수·보관·목소리·배경음악 등)은 3개 동시에 — 예전엔 본체 혼자 하나씩 해서 밀렸음
+
+
+def work_kinds():
+    return sorted(k for k in TASKS if k not in QUICK_KINDS + PHOTO_KINDS + GEN_KINDS + PREP_KINDS + HEAVY_KINDS)
 
 
 def parallel(fns, workers=4):
@@ -535,7 +567,19 @@ def parallel(fns, workers=4):
 
 
 def lanes_busy():
-    return next((v for k, v in list(QUICK.items()) if k not in ("paused", "started") and v), None)
+    return next((v for k, v in list(QUICK.items()) if k not in FLAGS and v), None)
+
+
+def drain(max_minutes=50):
+    """재시작 전에 새 일 집기를 멈추고, 줄마다 하던 일이 끝날 때까지 기다린다.
+    영상 생성은 Higgsfield 대기(최대 40분)+받기·감수가 있어 넉넉히 기다린다. 그래도 남으면 다시 켜진 뒤 이어서 한다(t_generate 재개)."""
+    QUICK["draining"] = True
+    end = time.time() + max_minutes * 60
+    while time.time() < end and lanes_busy():
+        time.sleep(2)
+    left = lanes_busy()
+    if left:
+        log(f"재시작 대기 시간이 지나 하던 일({left})을 두고 재시작합니다(다시 켜진 뒤 이어서 합니다)")
 
 
 def pulse():
@@ -592,16 +636,17 @@ def claude(model, system, content, *, max_tokens=8000, stage="other", episode_id
             "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             "messages": [{"role": "user", "content": content}]}
     headers = {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    end = time.time() + 30 * 60   # 한 번의 Claude 호출은 다시 시도까지 합쳐 최대 30분(일이 45분 한도를 넘겨 두 번 돌지 않게)
     for attempt in range(6):
         try:
-            code, data = http_json("https://api.anthropic.com/v1/messages", headers, "POST", body, timeout=900)
+            code, data = http_json("https://api.anthropic.com/v1/messages", headers, "POST", body, timeout=max(60, min(900, end - time.time())))
         except Exception as e:
             code, data = 0, {"error": {"message": str(e)}}
         if code == 200:
             break
         msg = ((data or {}).get("error") or {}).get("message", "") if isinstance(data, dict) else ""
-        if code in (0, 408, 429, 500, 502, 503, 504, 529) and attempt < 5:
-            wait = min(120, 10 * (2 ** attempt))
+        if code in (0, 408, 429, 500, 502, 503, 504, 529) and attempt < 5 and time.time() + 70 < end:
+            wait = min(120, 10 * (2 ** attempt), max(5, end - time.time() - 65))
             progress(f"Claude 응답 지연({code}) — {wait}초 뒤 다시 시도")
             time.sleep(wait)
             continue
@@ -733,12 +778,15 @@ def writers_split(t, p):
 - 반복되는 지문·늘어지는 동작 묘사는 짧게 다듬어도 된다(뜻은 그대로).
 - 각 부분 머리: "S#{번호}-{1,2,3} | 시간 구간 | 장소 | 낮·밤 / 등장: 인물". 번호는 원래 씬 번호 그대로(예: S#7-1, S#7-2). 시간 구간은 원래 구간을 나눠서.
 답 형식: <scene>나눈 씬 전체(부분 머리 포함)</scene> 다음에 <json>{"cut_points": ["어디서 왜 나눴는지(한국어)"], "trimmed": ["다듬은 지문(있으면)"]}</json>"""
-    new_body, notes = {}, []
-    for n in targets:
+    new_body, notes, orig_of = {}, [], {}
+
+    def split_one(n):
         orig = next((b for sn, _, b in all_sc if sn == n), None)
         if not orig:
             notes.append(f"S#{n}: 대본에서 찾지 못함")
-            continue
+            return
+        orig_of[n] = orig   # 이미 나뉜 씬(S#7-1·7-2)이면 그중 이 부분만 바꾼다(다른 부분을 덮어써 대사가 사라지던 문제)
+        kept = 0
         for attempt in range(2):
             progress(f"작가실이 감독 요청으로 {epno}화 S#{n}을(를) 나누는 중{' (다시)' if attempt else ''}")
             text, _ = claude(model, system, f"{epno}화 「{e.get('title') or ''}」\n[감독 피드백]\n{p.get('why') or ''}\n" + "\n".join(p.get("detail") or [])
@@ -756,13 +804,16 @@ def writers_split(t, p):
                 break
         else:
             notes.append(f"S#{n}: 대사를 그대로 두고 나누지 못함(대사 보존 {int(kept * 100)}%)")
+
+    for r in parallel([(lambda n=n: split_one(n)) for n in targets], workers=3):   # 여러 씬을 동시에
+        if isinstance(r, Exception):
+            notes.append(f"나누기 실패: {str(r)[:120]}")
     if not new_body:
         raise RuntimeError(f"작가실이 {epno}화 긴 씬을 나누지 못했습니다. " + " / ".join(notes)
                            + ". 이렇게 하세요: 대본 탭에서 그 씬 중간에 'S#번호-2 | 시간 | 장소 | 낮·밤' 머리를 직접 넣어 나누고 확정하면 감독이 이어서 설계합니다.")
     content = src["content"]
-    for sn, _, b in all_sc:
-        if sn in new_body:
-            content = content.replace(b, new_body[sn], 1)
+    for sn, body in new_body.items():
+        content = content.replace(orig_of[sn], body, 1)
     note = f"작가실: 감독 요청으로 긴 씬 나눔 — " + " / ".join(notes)
     vid = rpc("agent_save_script_draft", p_token=TOKEN, p_episode=ep, p_content=content, p_note=note[:480])
     rpc("agent_set_script_followup", p_token=TOKEN, p_id=vid, p={"kind": "director", "payload": {"scenes": sorted(new_body), "fix_round": 1}})
@@ -1027,7 +1078,7 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
         d = safe_json(text)
         cuts = [c for c in (d.get("cuts") or []) if isinstance(c, dict)]
         if nos != [0]:
-            cuts = [c for c in cuts if int(c.get("scene_no") or 0) in nos]
+            cuts = [c for c in cuts if inum(c.get("scene_no") or 0) in nos]
         if cuts:
             return cuts, d.get("end_state") or [], None
         if CURRENT.get("last_stop") == "max_tokens":
@@ -1081,7 +1132,8 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
     failed = lines
     seq = {}
     for c in cuts:   # 같은 씬이 여러 부분(S#7-1·7-2)으로 설계됐으면 컷 번호를 이어서 다시 매긴다(감수 전에)
-        sn = int(c.get("scene_no") or 0)
+        sn = inum(c.get("scene_no") or 0)
+        c["scene_no"] = sn   # 'S#7-1' 같은 글자 번호도 숫자로 맞춰 저장(DB는 정수)
         seq[sn] = seq.get(sn, 0) + 1
         c["cut_no"] = seq[sn]
         c["code"] = f"E{epno:02d}-S{sn:02d}-C{seq[sn]:02d}"
@@ -1091,32 +1143,41 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
     except Exception as ex:   # 감수가 깨져도 설계는 살린다(감수는 생략하고 기록)
         log(f"감정감수자 감수 실패(설계는 저장): {ex}")
         rv = {}
-    verdicts = {(int(r.get("scene_no") or 0), int(r.get("cut_no") or 0)): r for r in rv.get("cuts") or [] if isinstance(r, dict)}
-    fixes = [c for c in cuts if (verdicts.get((int(c.get("scene_no") or 0), int(c.get("cut_no") or 0))) or {}).get("verdict") == "fix"]
+    verdicts = {(inum(r.get("scene_no") or 0), inum(r.get("cut_no") or 0)): r for r in rv.get("cuts") or [] if isinstance(r, dict)}
+    fixes = [c for c in cuts if (verdicts.get((inum(c.get("scene_no") or 0), inum(c.get("cut_no") or 0))) or {}).get("verdict") == "fix"]
     for l in rv.get("lessons") or []:
         try:
             rpc("agent_add_lesson", p_token=TOKEN, p_lesson={**l, "series_id": (ctx.get("series") or {}).get("id"), "sources": ["감정감수자"]})
         except Exception as ex:
             log(f"교훈 기록 실패: {ex}")
-    for i in range(0, len(fixes), 5):
-        part = fixes[i:i + 5]
-        progress(f"감독이 감수 의견을 반영해 고치는 중 ({i + len(part)}/{len(fixes)})")
-        fix_text = json.dumps([{"cut": c, "review": verdicts[(int(c['scene_no']), int(c['cut_no']))]} for c in part], ensure_ascii=False)
-        scs = {int(c["scene_no"]) for c in part}
+
+    def fix_part(part):
+        fix_text = json.dumps([{"cut": c, "review": verdicts[(inum(c['scene_no']), inum(c['cut_no']))]} for c in part], ensure_ascii=False)
+        scs = {inum(c["scene_no"]) for c in part}
         src = "\n\n".join(b for n, _, b in all_sc if n in scs or n == 0)
         text, _ = claude(dmodel, director_system(ctx), f"감정감수자 의견을 반영해 아래 컷들만 고쳐서 같은 형식으로 다시 주세요.\n{fix_text}\n\n[대본]\n{src}",
                          max_tokens=12000, stage="cut_card", episode_id=ep, note="감독 감수 반영")
-        fixed = {(int(c.get("scene_no") or 0), int(c.get("cut_no") or 0)): c for c in safe_json(text).get("cuts") or [] if isinstance(c, dict)}
-        cuts = [{**fixed[(int(c["scene_no"]), int(c["cut_no"]))], "scene_no": c["scene_no"], "cut_no": c["cut_no"], "code": c.get("code")}
-                if (int(c["scene_no"]), int(c["cut_no"])) in fixed else c for c in cuts]   # 고친 컷도 번호·코드는 그대로
+        return {(inum(c.get("scene_no") or 0), inum(c.get("cut_no") or 0)): c for c in safe_json(text).get("cuts") or [] if isinstance(c, dict)}
+
+    if fixes:   # 고칠 컷 묶음(5개씩)을 동시에 고친다. 한 묶음이 실패해도 그 컷은 원래 설계로 둔다
+        progress(f"감독이 감수 의견을 반영해 컷 {len(fixes)}개를 고치는 중")
+        parts = parallel([(lambda part=fixes[i:i + 5]: fix_part(part)) for i in range(0, len(fixes), 5)], workers=3)
+        fixed = {}
+        for r in parts:
+            if isinstance(r, Exception):
+                log(f"감독 감수 반영 일부 실패(원래 설계 유지): {r}")
+            else:
+                fixed.update(r)
+        cuts = [{**fixed[(inum(c["scene_no"]), inum(c["cut_no"]))], "scene_no": c["scene_no"], "cut_no": c["cut_no"], "code": c.get("code")}
+                if (inum(c["scene_no"]), inum(c["cut_no"])) in fixed else c for c in cuts]   # 고친 컷도 번호·코드는 그대로
     by_scene = {}
     for c in cuts:
-        k = (int(c.get("scene_no") or 0), int(c.get("cut_no") or 0))
+        k = (inum(c.get("scene_no") or 0), inum(c.get("cut_no") or 0))
         r = verdicts.get(k) or {}
         c["review"] = {"verdict": "revised" if r.get("verdict") == "fix" else (r.get("verdict") or ("pass" if verdicts else "skipped")),
                        "issues": r.get("issues") or [], "fix": r.get("fix")}
         c["reference_names"] = has_images(ctx, c.get("reference_names"))
-        c["seconds"] = max(4, min(15, int(c.get("seconds") or 10)))
+        c["seconds"] = max(4, min(15, inum(c.get("seconds"), 10) or 10))
         c["resolution"] = setting(ctx, "generation", "resolution", "480p")
         c["est_usd"] = est_cut_usd(ctx, c["seconds"], c["reference_names"])
         by_scene.setdefault(k[0], []).append(c)
@@ -1219,7 +1280,7 @@ def storage_signed_url(bucket, path, seconds=3600):
 def fetch_to(url, dest, headers=None):
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     req = urllib.request.Request(url, headers=headers or {"User-Agent": "nyx-agent"})
-    tmp = dest + ".part"
+    tmp = f"{dest}.{uuid.uuid4().hex[:6]}.part"   # 여러 줄이 같은 파일을 동시에 받아도 서로 덮어쓰지 않게
     with urllib.request.urlopen(req, timeout=600) as r, open(tmp, "wb") as f:
         shutil.copyfileobj(r, f, 1024 * 1024)
     os.replace(tmp, dest)
@@ -1228,6 +1289,7 @@ def fetch_to(url, dest, headers=None):
 
 # ---------------- ffmpeg (uv로 자동 준비, 관리자 권한 불필요)
 FFMPEG = {"path": None}
+FFMPEG_LOCK = threading.Lock()
 
 
 def uv_path():
@@ -1237,6 +1299,13 @@ def uv_path():
 
 
 def ffmpeg():
+    if FFMPEG["path"] and os.path.exists(FFMPEG["path"]):
+        return FFMPEG["path"]
+    with FFMPEG_LOCK:   # 처음 준비는 한 줄만(11개 줄이 동시에 내려받던 문제)
+        return _ffmpeg_setup()
+
+
+def _ffmpeg_setup():
     if FFMPEG["path"] and os.path.exists(FFMPEG["path"]):
         return FFMPEG["path"]
     p = shutil.which("ffmpeg")
@@ -1326,7 +1395,19 @@ def scene_dir(root, take):
     return d
 
 
+SCENE_INFO_LOCK = threading.Lock()
+
+
 def write_scene_info(d, take, files):
+    """씬정보.json 갱신. 여러 영상 줄이 같은 씬을 동시에 끝내도 서로 지우지 않게 잠그고, 임시 파일로 쓴 뒤 바꿔 넣는다."""
+    try:
+        with SCENE_INFO_LOCK:
+            _write_scene_info(d, take, files)
+    except OSError as ex:   # OneDrive가 잠깐 잡고 있는 등: 기록만 남기고 작업은 계속
+        log(f"씬정보.json 쓰기 실패(영상은 저장됨): {ex}")
+
+
+def _write_scene_info(d, take, files):
     path = os.path.join(d, "씬정보.json")
     try:
         with open(path, encoding="utf-8") as f:
@@ -1341,8 +1422,10 @@ def write_scene_info(d, take, files):
     entry.update({"cut_no": c.get("cut_no"), "seconds": c.get("seconds"), "summary": c.get("summary"), "dialogue": c.get("dialogue")})
     tk = entry.setdefault(f"take_{take.get('take_no')}", {})
     tk.update({**files, "verdict": take.get("verdict"), "score": take.get("score")})
-    with open(path, "w", encoding="utf-8") as f:
+    tmp = f"{path}.{uuid.uuid4().hex[:6]}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(info, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
 
 def save_local_package(take, src_mp4):
@@ -1363,8 +1446,13 @@ def save_local_package(take, src_mp4):
 
 
 # ---------------- Higgsfield (Seedance)
+HF_CRED = {"at": 0.0, "cred": None}
+
+
 def hf_auth_headers():
-    cred = higgsfield_cred(secrets("higgsfield_key_id", "higgsfield_key_secret"))
+    if time.time() - HF_CRED["at"] > 300 or not HF_CRED["cred"]:   # 5분마다만 키를 다시 읽는다(상태 확인마다 DB를 부르던 것)
+        HF_CRED.update(cred=higgsfield_cred(secrets("higgsfield_key_id", "higgsfield_key_secret")), at=time.time())
+    cred = HF_CRED["cred"]
     if not cred:
         raise RuntimeError("Higgsfield 키가 없습니다. 대시보드 설정 → API 키에서 넣어 주세요")
     scheme = "key"
@@ -1467,17 +1555,21 @@ def parse_dialogue(dialogue):
 
 
 def voice_for(ctx, speaker):
-    for b in ctx.get("bible") or []:
-        if b.get("category") in ("character", "voice"):
-            nm = b.get("name") or ""
-            base = re.sub(r"\s*\(.*?\)\s*", "", nm)
-            if not (speaker == nm or speaker == base or speaker.startswith(base) or base.startswith(speaker)):
-                continue
-            if b.get("voice_id"):
-                return b["voice_id"], nm
-            twin = bible_entry(ctx, b.get("same_as")) if b.get("same_as") else None   # 동일인의 목소리를 물려받음
-            if twin and twin.get("voice_id"):
-                return twin["voice_id"], nm
+    """대사의 말한 사람 → 바이블 목소리. 이름이 정확히 같은 인물을 먼저 찾고, 없을 때만 앞부분이 같은 이름을 쓴다
+    ('민지' 대사에 '민' 목소리가, 이름 없는 대사에 첫 인물 목소리가 붙던 문제)."""
+    speaker = (speaker or "").strip()
+    if not speaker:
+        return None, None
+    chars = [b for b in ctx.get("bible") or [] if b.get("category") in ("character", "voice")]
+    base_of = lambda b: re.sub(r"\s*\(.*?\)\s*", "", b.get("name") or "").strip()
+    exact = [b for b in chars if speaker in (b.get("name"), base_of(b))]
+    loose = [b for b in chars if base_of(b) and (speaker.startswith(base_of(b)) or base_of(b).startswith(speaker))]
+    for b in exact or (loose if len(loose) == 1 else []):
+        if b.get("voice_id"):
+            return b["voice_id"], b.get("name")
+        twin = bible_entry(ctx, b.get("same_as")) if b.get("same_as") else None   # 동일인의 목소리를 물려받음
+        if twin and twin.get("voice_id"):
+            return twin["voice_id"], b.get("name")
     return None, None
 
 
@@ -1897,6 +1989,10 @@ def find_image_url(d):
 PHOTO_CATS = ("character", "location", "background", "prop")
 
 
+TEMP_REF_LOCKS, TEMP_REF_DONE = {}, {}
+_TEMP_GUARD = threading.Lock()
+
+
 def ensure_temp_refs(ctx, names, gen, ep=None):
     """컷에 나오는 바이블 항목에 사진이 하나도 없으면, 작가실 묘사로 사진 1장을 만들어 '임시 기준 사진'으로 고정한다.
     그래야 임의로 정해진 모습이라도 모든 컷에서 같게 나온다. 대표가 사진을 올리면 그쪽이 우선."""
@@ -1909,29 +2005,46 @@ def ensure_temp_refs(ctx, names, gen, ep=None):
         twin = bible_entry(ctx, b.get("same_as")) if b.get("same_as") else None
         if twin and (twin.get("images") or twin.get("temp_image")):
             continue
-        prompt = (b.get("prompt_en") or b.get("description") or n).strip()
-        try:
-            progress(f"'{n}' 사진이 비어 있어 작가실 묘사로 임시 기준 사진을 만드는 중")
-            if b["category"] == "character":
-                url, model = soul_images(prompt + " Neutral expression, plain light grey background. " + PHOTO_LOOK, n=1, aspect="3:4")[0], SOUL2
-            else:
-                model = resolve_image_model(gen)
-                look = {"prop": " Photorealistic product photograph of the object alone, plain neutral background, no people, no text.",
-                        "background": " Photorealistic wide background plate photograph, no people, no text."}.get(
-                    b["category"], " Photorealistic location photograph, natural light, no people, no text.")
-                st = hf_submit_wait(model, {"prompt": prompt + look, "aspect_ratio": "9:16"}, "임시 사진")
-                url = (find_image_urls(st.get("images") or st) or [None])[0]
-                if not url:
-                    raise RuntimeError("사진 주소가 없습니다")
-            path = upload_from_url(url, f"bible_temp/{b['entry_id']}/{uuid.uuid4().hex[:8]}.jpg")
-            b["temp_image"] = rpc("agent_bible_set_temp_photo", p_token=TOKEN, p_entry=b["entry_id"], p_path=path, p_model=model) or {"path": path}
-            log_cost("keyframe", "higgsfield", model, {"images": 1}, episode_id=ep, note=f"임시 기준 사진: {n}", outcome="success")
-            log(f"'{n}' 임시 기준 사진 고정")
-        except Exception as ex:
-            log(f"'{n}' 임시 기준 사진 실패(묘사만으로 진행): {ex}")
+        with _TEMP_GUARD:
+            lk = TEMP_REF_LOCKS.setdefault(b["entry_id"], threading.Lock())
+        with lk:   # 같은 인물 임시 사진을 두 줄이 따로 사서 컷마다 얼굴이 달라지던 문제
+            if TEMP_REF_DONE.get(b["entry_id"]):
+                b["temp_image"] = TEMP_REF_DONE[b["entry_id"]]
+                continue
+            _make_temp_ref(b, n, gen, ep)
+
+
+def _make_temp_ref(b, n, gen, ep):
+    """임시 기준 사진 1장 만들기(잠금 안에서 부름)."""
+    prompt = (b.get("prompt_en") or b.get("description") or n).strip()
+    try:
+        progress(f"'{n}' 사진이 비어 있어 작가실 묘사로 임시 기준 사진을 만드는 중")
+        if b["category"] == "character":
+            url, model = soul_images(prompt + " Neutral expression, plain light grey background. " + PHOTO_LOOK, n=1, aspect="3:4")[0], SOUL2
+        else:
+            model = resolve_image_model(gen)
+            look = {"prop": " Photorealistic product photograph of the object alone, plain neutral background, no people, no text.",
+                    "background": " Photorealistic wide background plate photograph, no people, no text."}.get(
+                b["category"], " Photorealistic location photograph, natural light, no people, no text.")
+            st = hf_submit_wait(model, {"prompt": prompt + look, "aspect_ratio": "9:16"}, "임시 사진")
+            url = (find_image_urls(st.get("images") or st) or [None])[0]
+            if not url:
+                raise RuntimeError("사진 주소가 없습니다")
+        log_cost("keyframe", "higgsfield", model, {"images": 1}, episode_id=ep, note=f"임시 기준 사진: {n}", outcome="success")
+        path = upload_from_url(url, f"bible_temp/{b['entry_id']}/{uuid.uuid4().hex[:8]}.jpg")
+        b["temp_image"] = rpc("agent_bible_set_temp_photo", p_token=TOKEN, p_entry=b["entry_id"], p_path=path, p_model=model) or {"path": path}
+        TEMP_REF_DONE[b["entry_id"]] = b["temp_image"]
+        log(f"'{n}' 임시 기준 사진 고정")
+    except Exception as ex:
+        log(f"'{n}' 임시 기준 사진 실패(묘사만으로 진행): {ex}")
 
 
 def bible_ref_urls(ctx, names, limit=4, per=1):
+    return [u for _, u in bible_ref_pairs(ctx, names, limit, per)]
+
+
+def bible_ref_pairs(ctx, names, limit=4, per=1):
+    """(이름, 서명된 주소) 목록. 사진 없는 이름은 건너뛰되 이름표가 밀리지 않게 짝으로 돌려준다. 주소 만들기는 동시에."""
     bl = ctx.get("bible") or []
     imgs = {b["name"]: [("bible", p) for p in (b.get("images") or [])] for b in bl}
     for b in bl:   # 대표 사진이 없으면 쌓인 참고 사진(장면 사진) → 임시 기준 사진(자동) → 동일인의 사진
@@ -1942,23 +2055,27 @@ def bible_ref_urls(ctx, names, limit=4, per=1):
     for b in bl:
         if not imgs.get(b["name"]) and b.get("same_as"):
             imgs[b["name"]] = imgs.get(b["same_as"]) or []
-    out = []
+    want = []
     for n in names or []:
         if n not in imgs:
             b = bible_entry(ctx, n)
             n = b["name"] if b else n
-        for bucket, p in imgs.get(n, [])[:per]:
-            try:
-                out.append(storage_signed_url(bucket, p, 7200))
-            except Exception as ex:
-                log(f"참고 사진 주소 실패({n}): {ex}")
+        want += [(n, bucket, p) for bucket, p in imgs.get(n, [])[:per]]
+    want = want[:limit + 2]   # 몇 장 실패해도 limit을 채울 만큼만 서명
+    signed = parallel([(lambda b=b, p=p: storage_signed_url(b, p, 7200)) for _, b, p in want], workers=6)
+    out = []
+    for (n, _, _), u in zip(want, signed):
+        if isinstance(u, Exception) or not u:
+            log(f"참고 사진 주소 실패({n}): {u}")
+        else:
+            out.append((n, u))
     return out[:limit]
 
 
 def bible_ref_blocks(ctx, names, limit=4):
     """감수용: 바이블 기준 사진을 Claude에게 보여 준다(작게)."""
     blocks = []
-    for n, url in zip(names or [], bible_ref_urls(ctx, names, limit)):
+    for n, url in bible_ref_pairs(ctx, names, limit):
         try:
             tmp = os.path.join(HOME, "work", f"ref_{uuid.uuid4().hex[:6]}.img")
             fetch_to(url, tmp)
@@ -1990,15 +2107,17 @@ def t_prep_cut(t):
     ep = t["episode_id"]
     cuts = [rpc("agent_get_cut", p_token=TOKEN, p_id=t["cut_id"])] if t.get("cut_id") else \
         rpc("agent_list_cuts", p_token=TOKEN, p_episode=ep, p_scene=t.get("scene_no"))
-    cuts = [c for c in cuts if c and c.get("status") in ("designed", "failed", "hold") and (p.get("force") or c.get("prep_status") in ("none", "failed", "fix"))]
+    retried = (t.get("attempts") or 1) > 1   # 끊긴 뒤 다시 집힌 일: 그때 '준비 중'에 멈춘 컷도 다시 한다
+    cuts = [c for c in cuts if c and c.get("status") in ("designed", "failed", "hold")
+            and (p.get("force") or c.get("prep_status") in ("none", "failed", "fix") or (retried and c.get("prep_status") == "preparing"))]
     if not cuts:
         return "준비할 컷이 없습니다"
     ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep, p_version=cuts[0].get("script_version_id"))
     gen = (ctx.get("settings") or {}).get("generation") or {}
     sid = ((ctx.get("series") or {}).get("id")) or "series"
     enum = int((ctx.get("episode") or {}).get("number") or 0)
-    done = []
-    for c in cuts:
+
+    def prep_one(c):
         code = c.get("code") or f"S{c['scene_no']}C{c['cut_no']}"
         rpc("agent_update_cut", p_token=TOKEN, p_id=c["id"], p={"prep_status": "preparing"})
         base = f"{sid}/E{enum:02d}/S{int(c['scene_no']):02d}/prep/C{int(c['cut_no']):02d}_{uuid.uuid4().hex[:6]}"
@@ -2113,7 +2232,7 @@ def t_prep_cut(t):
         fixed = []
         if (review.get("emotion") or {}).get("verdict") == "fix" and not p.get("second_pass"):
             for ft in review["emotion"].get("fix_tags") or []:
-                i = int(ft.get("line") or 0)
+                i = inum(ft.get("line") or 0)
                 if 0 <= i < len(lines):
                     lines[i]["tags"] = ft.get("tags") or lines[i].get("tags")
                     lines[i]["direction"] = ft.get("direction") or lines[i].get("direction")
@@ -2148,15 +2267,75 @@ def t_prep_cut(t):
             except Exception as ex:
                 rpc("agent_update_cut", p_token=TOKEN, p_id=c["id"], p={"status": "designed"})
                 log(f"{code} 자동 재시도 못 함(대표 승인 필요): {ex}")
-        done.append(f"{code}:{'다시 준비' if fixed else status}")
+        return f"{code}:{'다시 준비' if fixed else status}"
+
+    def safe_one(c):
+        try:
+            return prep_one(c)
+        except Exception as ex:   # 컷 하나가 실패해도 '준비 중'에 멈춰 두지 않고 원인과 함께 '실패'로
+            log(f"컷 준비 실패 {c.get('code')}: {ex}\n{traceback.format_exc()}")
+            try:
+                rpc("agent_update_cut", p_token=TOKEN, p_id=c["id"], p={"prep_status": "failed", "prep_review": {"summary": f"준비 실패: {str(ex)[:300]}", "problems": [str(ex)[:200]]}})
+            except Exception:
+                pass
+            if is_transient(str(ex)) and len(cuts) == 1:
+                raise   # 컷 하나짜리 일은 일시적 문제면 대기열이 알아서 다시
+            return f"{c.get('code')}:failed"
+
+    # 컷마다 대사·사진·감수를 3개씩 동시에(예전엔 씬 전체를 한 컷씩 차례로 해서 45분을 넘기기도 함)
+    done = parallel([(lambda c=c: safe_one(c)) for c in cuts], workers=3)
+    err = next((d for d in done if isinstance(d, Exception)), None)
+    if err:
+        raise err
     ready = sum(1 for d in done if d.endswith(":ready"))
     if not t.get("cut_id") or p.get("second_pass"):
         notify(f"{enum}화 컷 준비 {ready}/{len(done)}", "제작 탭에서 장면 사진을 보고 대사를 들어 본 뒤 생성 승인을 눌러 주세요")
     return "컷 준비: " + ", ".join(done)
 
 
+def inflight_take(cut, max_hours=3):
+    """이 컷에서 Higgsfield에 이미 맡겼는데 결과를 아직 받지 못한 테이크(재시작·끊김으로 놓친 것)."""
+    if cut.get("status") != "generating":
+        return None
+    for k in reversed(cut.get("takes") or []):
+        if not k.get("request_id"):
+            continue
+        c = ts_of(k.get("created_at"))
+        age = time.time() - c if c else 0
+        if age > max_hours * 3600:
+            return None
+        if k.get("status") in ("submitted", "in_progress"):
+            return k
+        if k.get("status") == "completed" and k.get("remote_url") and not k.get("files") and not k.get("verdict"):
+            return k
+        return None   # 가장 최근 테이크가 이미 끝났으면(실패·보관 등) 새로 생성
+    return None
+
+
 @task("generate")
 def t_generate(t):
+    """영상 생성. 끝까지 못 가면 컷을 '생성 중'에 묶어 두지 않는다: 일시적 문제는 다시(이미 맡긴 요청을 이어서), 그 밖엔 실패로."""
+    try:
+        return _generate(t)
+    except Retry:
+        raise
+    except Exception as e:
+        if is_transient(str(e)) and (t.get("attempts") or 1) < 4:
+            raise   # run_task가 잠시 뒤 다시 맡김 → inflight_take로 이어서
+        try:
+            cut = rpc("agent_get_cut", p_token=TOKEN, p_id=t["cut_id"]) or {}
+            if cut.get("status") == "generating":
+                k = inflight_take(cut)
+                if k:
+                    rpc("agent_save_take", p_token=TOKEN, p={"id": k["id"], "status": "failed", "error": str(e)[:300]})
+                    set_cost_outcome([k.get("cost_event_id")], "failed", str(e)[:200], "tool")
+                rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "failed"})
+        except Exception as ex:
+            log(f"생성 실패 정리 실패: {ex}")
+        raise
+
+
+def _generate(t):
     cut = rpc("agent_get_cut", p_token=TOKEN, p_id=t["cut_id"])
     if not cut:
         raise RuntimeError("컷을 찾지 못했습니다")
@@ -2174,7 +2353,7 @@ def t_generate(t):
                          if x["cut_no"] == cut["cut_no"] - 1 and x.get("best_take_id")), None)
             waiting = next((x for x in rpc("agent_list_cuts", p_token=TOKEN, p_episode=ep, p_scene=cut["scene_no"]) or []
                             if x["cut_no"] == cut["cut_no"] - 1 and not x.get("best_take_id") and x.get("status") in ("approved", "generating", "reviewing")), None)
-            if waiting and (t.get("attempts") or 1) < 3:
+            if waiting and waited(t) < 30 * 60:
                 raise Retry(600, f"앞 컷 {waiting.get('code')}이 끝나면 그 마지막 장면에서 이어 시작합니다")
             if prev:
                 ptk = rpc("agent_get_take", p_token=TOKEN, p_id=prev["best_take_id"])
@@ -2215,7 +2394,9 @@ def t_generate(t):
             body["aspect_ratio"] = gen.get("aspect_ratio", "9:16")
     else:
         body = {"prompt": cut["prompt"], "duration": int(cut["seconds"]), "resolution": res,
-                "output_format": "mp4", "generate_audio": bool(gen.get("audio", True))}
+                "generate_audio": bool(gen.get("audio", True))}
+        if route == "text-to-video":   # output_format은 글→영상만 받는다(사진→영상·참고→영상은 모르는 칸이 있으면 422로 거절)
+            body["output_format"] = "mp4"
         if route != "image-to-video":
             body["aspect_ratio"] = gen.get("aspect_ratio", "9:16")
     if first_url:
@@ -2225,22 +2406,42 @@ def t_generate(t):
     elif refs:
         body["image_urls"] = refs
     pmodel = f"{vm['key']}-{kind}-{res}"
-    rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "generating"})
-    progress(f"{cut['code']} {vm['name']} {res} {cut['seconds']}초 생성 요청 · " + ("첫 장면 사진" + (" + 끝 장면" if last_url else "") if first_url else f"참고 사진 {len(refs)}장" if refs else "글로만"))
-    code, data = http_json(f"https://api.higgsfield.ai/{vm['base']}/{route}",
-                           {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json"}, "POST", body, timeout=120)
-    if code not in (200, 201, 202) or not isinstance(data, dict):
-        rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "failed"})
-        raise RuntimeError(f"생성 요청 실패 {code}: {str(data)[:300]}")
-    rid = data.get("request_id") or data.get("id")
-    status_url = data.get("status_url") or f"https://api.higgsfield.ai/requests/{rid}/status"
-    cost_id = log_cost("video", "higgsfield", pmodel, {"seconds": int(cut["seconds"])}, episode_id=ep, scene_no=cut["scene_no"],
-                       cut_id=cut["code"], attempt_no=len(cut.get("takes") or []) + 1, outcome="pending", job_id=t["id"],
-                       note=f"{vm['name']} {route} {res}")
-    take_id = rpc("agent_save_take", p_token=TOKEN, p={"cut_id": cut["id"], "model": f"{vm['base']}/{route}", "resolution": res,
-                                                        "seconds": int(cut["seconds"]), "request_id": rid, "status": "submitted",
-                                                        "cost_event_id": cost_id, "usd": estimate_usd("higgsfield", pmodel, {"seconds": int(cut["seconds"])})})
+    inflight = inflight_take(cut)
+    if inflight:
+        # 재시작·끊김 뒤 다시 집힌 일: 이미 Higgsfield에 맡긴 요청을 이어서 기다린다(같은 컷을 두 번 결제하지 않게)
+        take_id, rid, cost_id = inflight["id"], inflight["request_id"], inflight.get("cost_event_id")
+        status_url = f"https://api.higgsfield.ai/requests/{rid}/status"
+        progress(f"{cut['code']} 이미 맡긴 생성 요청을 이어서 기다립니다(새로 결제하지 않음)")
+    else:
+        rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "generating"})
+        progress(f"{cut['code']} {vm['name']} {res} {cut['seconds']}초 생성 요청 · " + ("첫 장면 사진" + (" + 끝 장면" if last_url else "") if first_url else f"참고 사진 {len(refs)}장" if refs else "글로만"))
+        # 같은 컷·같은 시도·같은 프롬프트면 같은 열쇠: 응답을 못 받고 다시 보내도 Higgsfield가 같은 요청으로 처리(두 번 결제 방지)
+        idem = f"nyx-{cut['id']}-{len(cut.get('takes') or []) + 1}-{uuid.uuid5(uuid.NAMESPACE_URL, json.dumps({k: v for k, v in body.items() if 'url' not in k}, sort_keys=True) + route).hex[:12]}"   # 서명 주소는 매번 달라 빼고
+        try:
+            code, data = http_json(f"https://api.higgsfield.ai/{vm['base']}/{route}",
+                                   {**hf_auth_headers(), "Content-Type": "application/json", "Accept": "application/json", "Idempotency-Key": idem},
+                                   "POST", body, timeout=120)
+        except Exception as ex:   # 응답이 끊김: 같은 열쇠로 잠시 뒤 다시 보낸다
+            raise Retry(60, f"생성 요청 응답이 끊겨 1분 뒤 같은 요청으로 다시 확인합니다({type(ex).__name__})")
+        if code in (429, 500, 502, 503, 504) and waited(t) < 2 * 3600:   # 대기열이 꽉 참·서버 오류: 실패로 끝내지 않고 기다렸다 다시
+            raise Retry(90 if code == 429 else 60, f"Higgsfield가 붐벼요({code}). 잠시 뒤 자동으로 다시 요청합니다")
+        if code not in (200, 201, 202) or not isinstance(data, dict):
+            rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "failed"})
+            raise RuntimeError(f"생성 요청 실패 {code}: {str(data)[:300]}")
+        rid = data.get("request_id") or data.get("id")
+        if not rid:
+            rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "failed"})
+            raise RuntimeError(f"생성 요청 번호를 받지 못했습니다: {str(data)[:300]}")
+        status_url = data.get("status_url") or f"https://api.higgsfield.ai/requests/{rid}/status"
+        cost_id = log_cost("video", "higgsfield", pmodel, {"seconds": int(cut["seconds"])}, episode_id=ep, scene_no=cut["scene_no"],
+                           cut_id=cut["code"], attempt_no=len(cut.get("takes") or []) + 1, outcome="pending", job_id=t["id"],
+                           note=f"{vm['name']} {route} {res}")
+        take_id = rpc("agent_save_take", p_token=TOKEN, p={"cut_id": cut["id"], "model": f"{vm['base']}/{route}", "resolution": res,
+                                                            "seconds": int(cut["seconds"]), "request_id": rid, "status": "submitted",
+                                                            "cost_event_id": cost_id, "usd": estimate_usd("higgsfield", pmodel, {"seconds": int(cut["seconds"])})})
     deadline, last, st = time.time() + 40 * 60, None, {}
+    if inflight and inflight.get("status") == "completed" and inflight.get("remote_url"):
+        st, deadline = {"status": "completed", "_url": inflight["remote_url"]}, 0   # 이미 끝났고 받기만 남음
     while time.time() < deadline:
         time.sleep(10)
         try:
@@ -2264,7 +2465,7 @@ def t_generate(t):
         set_cost_outcome([cost_id], "failed", f"생성 {s or '시간 초과'}", "tool")
         notify(f"{cut['code']} 생성 실패", f"상태: {s or '40분 시간 초과'}. 제작 탭에서 감독에게 수정 요청하거나 다시 승인해 주세요", "warning")
         raise RuntimeError(f"생성 {s or '시간 초과'}")
-    url = find_video_url(st)
+    url = st.get("_url") or find_video_url(st)
     if not url:
         raise RuntimeError(f"완료됐지만 영상 주소를 찾지 못했습니다: {str(st)[:300]}")
     rpc("agent_save_take", p_token=TOKEN, p={"id": take_id, "status": "completed", "remote_url": url})
@@ -2332,6 +2533,28 @@ def queue_store(take_id, ep, cut):
 # ---------------- 영상감수자(최종감수 겸) + 평가(점수는 코드로)
 WEIGHTS = {"face_consistency": 0.15, "costume_background": 0.1, "expression_changes": 0.12, "gesture_action": 0.12, "pace": 0.08, "emotion": 0.08,
            "motion_quality": 0.08, "prompt_match": 0.07, "voice_emotion": 0.12, "voice_consistency": 0.08}
+
+
+def inum(v, default=0):
+    """'7', 7, 'S#7-1', '7-2', None → 정수(첫 숫자). AI가 번호를 글자로 써도 작업이 멈추지 않게."""
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        return int(v)
+    m = re.search(r"\d+", str(v or ""))
+    return int(m.group(0)) if m else default
+
+
+def num(v):
+    """'85점', '85/100', None 같은 값을 숫자로(못 읽으면 None)."""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    m = re.search(r"-?\d+(?:\.\d+)?", str(v))
+    return float(m.group(0)) if m else None
 
 
 def review_take(take_id, local_mp4=None):
@@ -2414,12 +2637,19 @@ voice_consistency(같은 인물 목소리 높이·음색이 목표 미리 듣기
  "lessons": [{{"fingerprint": "", "category": "face|costume|location|prop|continuity|expression|emotion_tone|dialogue|camera|motion|prompt|other", "problem": "", "rule": "", "bad_example": "", "severity": "보통|치명"}}]}}</json>"""
     text, rcost = claude(model, system, content, max_tokens=4000, stage="video_review", episode_id=ep,
                          scene_no=cut.get("scene_no"), cut_code=cut.get("code"), note="영상·소리 감수")
-    rv = pick_json(text)
+    try:
+        rv = pick_json(text)
+    except Exception:   # 답이 잘리거나 형식이 깨졌을 때 한 번 더(결과만 짧게)
+        text, rcost2 = claude(model, system, content + [{"type": "text", "text": "답을 <json>…</json> 하나로만, issues·lessons는 3개 이하로 짧게 다시 써라."}],
+                              max_tokens=6000, stage="video_review", episode_id=ep, scene_no=cut.get("scene_no"), cut_code=cut.get("code"), note="영상 감수(형식 재요청)")
+        rv = pick_json(text)
     if sound:
         rv["sound"] = {"heard_text": sound["heard_text"], "curve": sound["curve"]}
-    sc = rv.get("scores") or {}
+    sc = {k: num(v) for k, v in (rv.get("scores") or {}).items()}
+    if not sound:   # 소리 분석이 없으면 소리 두 항목은 점수에서 뺀다(0점이 섞여 멀쩡한 컷이 불합격·유료 재생성되던 문제)
+        sc.pop("voice_emotion", None); sc.pop("voice_consistency", None)
     got = {k: w for k, w in WEIGHTS.items() if sc.get(k) is not None}
-    score = round(sum(float(sc[k]) * w for k, w in got.items()) / (sum(got.values()) or 1), 1)
+    score = round(sum(sc[k] * w for k, w in got.items()) / (sum(got.values()) or 1), 1)
     passed = rv.get("verdict") == "pass" and score >= 70
     verdict = "pass" if passed else "fail"
     rv["score"] = score
@@ -2471,7 +2701,7 @@ def auto_rough_cut(ep):
     if not live or any(not c.get("best_take_id") for c in live):
         return
     clips, subs = [], []
-    for i, c in enumerate(sorted(live, key=lambda x: (int(x.get("scene_no") or 0), int(x.get("cut_no") or 0)))):
+    for i, c in enumerate(sorted(live, key=lambda x: (inum(x.get("scene_no") or 0), inum(x.get("cut_no") or 0)))):
         tk = rpc("agent_get_take", p_token=TOKEN, p_id=c["best_take_id"]) or {}
         ln = float(tk.get("seconds") or c.get("seconds") or 5)
         cid = f"c{uuid.uuid4().hex[:6]}"
@@ -2488,7 +2718,17 @@ def auto_rough_cut(ep):
 
 @task("video_review")
 def t_video_review(t):
-    v, s = review_take(t["take_id"])
+    try:
+        v, s = review_take(t["take_id"])
+    except Exception as e:
+        if (t.get("attempts") or 1) >= 2 and not is_transient(str(e)):   # 마지막 시도: 컷을 '감수 중'에 묶어 두지 않는다
+            try:
+                tk = rpc("agent_get_take", p_token=TOKEN, p_id=t["take_id"]) or {}
+                if (tk.get("cut") or {}).get("status") == "reviewing":
+                    rpc("agent_update_cut", p_token=TOKEN, p_id=tk["cut"]["id"], p={"status": "failed"})
+            except Exception:
+                pass
+        raise
     return f"감수 {v} ({s}점)"
 
 
@@ -2597,7 +2837,7 @@ def t_photo_design(t):
         raise RuntimeError("사진 디자인 요청을 찾지 못했습니다")
     name = d["entry_name"]
     # 순서: 그 항목의 영어 프롬프트 반영·코디네이터 감수가 진행 중이면 그게 끝난 뒤에 만든다
-    if d.get("prompt_pending") and (t.get("attempts") or 1) < 10:   # 최대 약 3분만 기다리고, 그 뒤엔 지금 프롬프트로 만든다
+    if d.get("prompt_pending") and waited(t) < 180:   # 최대 약 3분만 기다리고, 그 뒤엔 지금 프롬프트로 만든다
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "queued"})
         raise Retry(20, "바이블 영어 프롬프트 반영이 끝나길 기다리는 중(최대 3분, 끝나면 바로 만듭니다)")
     if d.get("use_bible") and d.get("prompt_en"):   # 대표가 묘사 칸을 손대지 않았으면 만들 때의 최신 영어 프롬프트
@@ -2618,7 +2858,7 @@ def t_photo_design(t):
             en = clean_en(txt)
             if en:
                 d["prompt"] = en
-    REJECT = re.compile(r"nsfw|safety|moderation|content.?filter|inappropriate|prohibited|sensitive|\b403\b|Forbidden", re.I)
+    REJECT = re.compile(r"nsfw|safety|moderation|content.?filter|inappropriate|prohibited|sensitive", re.I)   # 403(키·권한 문제)은 내용 거절이 아니라 다시 써도 소용없음
     def gen_once():
         return _photo_generate(d, name)
     try:
@@ -2635,7 +2875,12 @@ def t_photo_design(t):
             rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"review": {"items": [], "summary": f"내용 거절 → 코디네이터가 표현을 완곡하게 고쳐 다시 만듦: {changed}",
                                                                                  "prompt_improved": fixed, "improve_note": changed}})
             urls, model = gen_once()
-        previews = [{"path": upload_from_url(u, f"photos/{did}/{i}_{uuid.uuid4().hex[:6]}.jpg")} for i, u in enumerate(urls, 1)]
+        # 동시에 올리고, 하나가 실패해도 나머지 후보는 살린다(이미 결제된 사진을 통째로 버리고 다시 사던 문제)
+        ups = parallel([(lambda i=i, u=u: upload_from_url(u, f"photos/{did}/{i}_{uuid.uuid4().hex[:6]}.jpg")) for i, u in enumerate(urls, 1)], workers=4)
+        for r in ups:
+            if isinstance(r, Exception):
+                log(f"{name}: 후보 1장 올리기 실패: {r}")
+        previews = [{"path": r} for r in ups if r and not isinstance(r, Exception)]
     except Exception as e:
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
         raise
@@ -2667,6 +2912,9 @@ def t_photo_set(t):
             soul_id = "nano-ref"
             nmodel = resolve_image_model({"image_model": "auto"}) if (d.get("model") or (d.get("generation") or {}).get("char_photo_model")) in (None, "nano") else (
                 GROK_IMAGE if (d.get("model") or (d.get("generation") or {}).get("char_photo_model")) == "grok" else resolve_image_model({"image_model": "auto"}))
+        elif d.get("soul_id") and d.get("soul_id") != "nano-ref":   # 다시 시도: 이미 끝난 얼굴 학습은 다시 사지 않는다
+            soul_id = d["soul_id"]
+            progress(f"{name} 이미 학습한 얼굴(Soul ID)로 기준 사진을 이어서 만듭니다")
         else:
             progress(f"{name} 얼굴 학습 중 (Soul ID, 수 분 걸림)")
             soul_id = soul_train(f"{d.get('series_title') or 'NYX'} · {name}", src)
@@ -2690,6 +2938,8 @@ def t_photo_set(t):
                 log(f"기준 사진 실패({label}): {r}")
             else:
                 ref_set.append(r)
+        if not ref_set:
+            raise RuntimeError("기준 사진이 하나도 만들어지지 않았습니다: " + str(next((r for r in res if isinstance(r, Exception)), ""))[:200])
         log_cost("keyframe", "higgsfield", "nano-banana-pro" if use_nano else SOUL2, {"images": len(ref_set)}, note=f"기준 사진 세트: {name}", outcome="success")
     except Exception as e:
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
@@ -2702,6 +2952,19 @@ def t_photo_set(t):
 
 @task("voice_design")
 def t_voice_design(t):
+    """목소리 후보 만들기. 어디서 실패해도 디자인이 '만드는 중'에 남지 않게(그러면 시리즈 목소리 설계가 그 인물을 영영 건너뜀)."""
+    try:
+        return _voice_design(t)
+    except Exception as e:
+        if not (is_transient(str(e)) and (t.get("attempts") or 1) < 4):
+            try:
+                rpc("agent_update_voice_design", p_token=TOKEN, p_id=(t.get("payload") or {}).get("design_id"), p={"status": "failed", "error": str(e)[:500]})
+            except Exception:
+                pass
+        raise
+
+
+def _voice_design(t):
     did = (t.get("payload") or {}).get("design_id")
     d = rpc("agent_get_voice_design", p_token=TOKEN, p_id=did)
     if not d:
@@ -2767,7 +3030,7 @@ def t_bible_extract(t):
         text, _ = claude("claude-opus-5-5", system, user, max_tokens=8000, stage="other", note=f"바이블 필요 항목 추출: {title} {e['number']}화")
         items = pick_json(text).get("items") or []
         for it in items:
-            it["appears"] = [{"ep": int(x.get("ep") or e["number"]), "scene": int(x.get("scene") or 0)} for x in (it.get("appears") or []) if isinstance(x, dict)]
+            it["appears"] = [{"ep": inum(x.get("ep") or e["number"]), "scene": inum(x.get("scene") or 0)} for x in (it.get("appears") or []) if isinstance(x, dict)]
         r = rpc("agent_bible_upsert", p_token=TOKEN, p_series=sid, p_items=items) or {}
         for k in total:
             total[k] += int(r.get(k) or 0)
@@ -2894,16 +3157,18 @@ def t_upscale(t):
                 progress(f"{rel['episode']['number']}화 AI 업스케일: 장면 나누는 중")
                 ff_long("-i", src, "-qscale:v", "1", os.path.join(fin, "f%06d.jpg"))
                 progress(f"{rel['episode']['number']}화 AI 업스케일 중(Real-ESRGAN, 수십 분 걸릴 수 있음)")
-                subprocess.run([esr, "-i", fin, "-o", fout, "-n", "realesr-animevideov3", "-s", "2", "-f", "jpg"], check=True, capture_output=True)
+                # 실사 드라마라 실사용 모델(realesrgan-x4plus). 애니 모델(animevideov3)은 피부·머리카락을 그림처럼 뭉갰다. 멈춤 방지 90분 제한
+                subprocess.run([esr, "-i", fin, "-o", fout, "-n", "realesrgan-x4plus", "-s", "4", "-f", "jpg"], check=True, capture_output=True, timeout=90 * 60)
                 fps = re.search(r"(\d+(?:\.\d+)?) fps", info)
                 ff_long("-framerate", fps.group(1) if fps else "24", "-i", os.path.join(fout, "f%06d.jpg"), "-i", src, "-map", "0:v", "-map", "1:a?",
                    "-vf", f"scale={W}:{H}:flags=lanczos", "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p",
                    "-c:a", "copy", "-movflags", "+faststart", out)
                 method = "AI 업스케일(Real-ESRGAN)"
-                shutil.rmtree(work, ignore_errors=True)
             except Exception as ex:
                 log(f"AI 업스케일 실패, ffmpeg 확대로: {ex}")
                 esr = None
+            finally:   # 실패해도 수 GB 장면 사진을 남기지 않는다
+                shutil.rmtree(work, ignore_errors=True)
         if not esr:
             progress(f"{rel['episode']['number']}화 1080p로 키우는 중(ffmpeg)")
             ff_long("-i", src, "-vf", f"scale={W}:{H}:flags=lanczos,unsharp=5:5:0.5:5:5:0.0", "-c:v", "libx264", "-preset", "slow", "-crf", "16",
@@ -3244,7 +3509,7 @@ avoid에 생성 모델에 넣을 금지 사항(영어 짧은 구, 예: "no ID ba
     text, _ = claude("claude-sonnet-5-5", system, [{"type": "text", "text": f"항목: {name} ({cat})\n[프롬프트]\n{prompt}"}] + blocks,
                      max_tokens=2500, stage="other", note=f"코디네이터 사진 확인: {name}")
     r = safe_json(text)
-    imgs = {int(x.get("no") or 0): x for x in (r.get("images") or []) if isinstance(x, dict)}
+    imgs = {inum(x.get("no") or 0): x for x in (r.get("images") or []) if isinstance(x, dict)}
     if not imgs:
         raise RuntimeError(f"코디네이터 사진 확인 답이 형식에 맞지 않았습니다. 다시 시도하면 대부분 해결됩니다. 답 앞부분: {text.strip()[:120]!r}")
     out = []
@@ -3293,9 +3558,9 @@ def t_coord_review(t):
         return "이미 다른 버전으로 바뀌어 감수하지 않음"
     name, cat = info.get("name"), info.get("category")
     hangul = re.search(r"[가-힣]", (info.get("description") or "") + (info.get("details") or ""))
-    if (info.get("prompt_pending") or (hangul and not info.get("prompt_en"))) and (t.get("attempts") or 1) < 15:
+    if (info.get("prompt_pending") or (hangul and not info.get("prompt_en"))) and waited(t) < 300:
         raise Retry(15, f"{name}: 영어 프롬프트 반영이 끝난 뒤 바로 감수합니다")
-    if (info.get("description") or "").startswith("(작가실이 사진을 보고 쓰는 중)") and (t.get("attempts") or 1) < 15:
+    if (info.get("description") or "").startswith("(작가실이 사진을 보고 쓰는 중)") and waited(t) < 300:
         raise Retry(15, f"{name}: 코디네이터가 사진을 보고 묘사를 쓰는 중이라 끝난 뒤 감수합니다")
     prev = info.get("prev") or {}
     reason = (info.get("change_reason") or "").strip()
@@ -3431,7 +3696,7 @@ def t_bible_place(t):
     items = []
     for x in d.get("placements") or []:
         try:
-            ep, sc = int(x.get("ep")), int(x.get("scene"))
+            ep, sc = inum(x.get("ep")), inum(x.get("scene"))
         except (TypeError, ValueError):
             continue
         if ep in nums and sc > 0:
@@ -3488,6 +3753,8 @@ def t_voice_save(t):
     did = (t.get("payload") or {}).get("design_id")
     d = rpc("agent_get_voice_design", p_token=TOKEN, p_id=did)
     if not d or not d.get("chosen_generated_id"):
+        if d:
+            rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": "고른 목소리가 없습니다"})
         raise RuntimeError("고른 목소리가 없습니다")
     progress(f"{d['entry_name']} 목소리를 ElevenLabs에 저장하는 중")
     desc = d["description"].split("\n[노래]")[0]
@@ -3668,22 +3935,24 @@ def t_assemble(t):
     r = rpc("agent_get_render", p_token=TOKEN, p_id=rid)
     if not r:
         raise RuntimeError("조립 요청을 찾지 못했습니다")
-    ed = rpc("agent_get_edit", p_token=TOKEN, p_project=r["project_id"])
+    upd = lambda **p: rpc("agent_update_render", p_token=TOKEN, p_id=rid, p=p)
+    ed = rpc("agent_get_edit", p_token=TOKEN, p_project=r["project_id"]) or {}
     tl, kind = r["timeline"], r["kind"]
     takes = ed.get("takes") or {}
-    upd = lambda **p: rpc("agent_update_render", p_token=TOKEN, p_id=rid, p=p)
     upd(status="running", progress="재료 모으는 중")
     try:
+        # 쓸 수 없는 컷을 먼저 빼고 위치를 계산한다(나중에 빼면 그 뒤 소리·자막이 빠진 길이만큼 어긋났음)
+        tl = {**tl, "clips": [c for c in tl.get("clips") or [] if c.get("take_id") in takes]}
         clips, total, subs = tl_layout(tl)
-        clips = [c for c in clips if c.get("take_id") in takes]
         if not clips:
             raise RuntimeError("타임라인에 쓸 수 있는 컷이 없습니다")
         work = os.path.join(HOME, "work", f"render_{rid}")
         os.makedirs(work, exist_ok=True)
-        srcs = []
-        for i, c in enumerate(clips, 1):
-            progress(f"재료 {i}/{len(clips)}: {takes[c['take_id']].get('code')}")
-            srcs.append(take_source(c["take_id"], takes[c["take_id"]]))
+        progress(f"재료 {len(clips)}개를 동시에 받는 중")
+        srcs = parallel([(lambda c=c: take_source(c["take_id"], takes[c["take_id"]])) for c in clips], workers=4)
+        bad = next((x for x in srcs if isinstance(x, Exception)), None)
+        if bad:
+            raise bad
         W, H = video_size(srcs[0])
         if kind == "preview":
             s = 640 / max(W, H)
@@ -3702,7 +3971,8 @@ def t_assemble(t):
             args += ["-i", src]
             a, b, gap = float(c["in"]), float(c["out"]), float(c.get("gap") or 0)
             pad = f",tpad=start_duration={gap:.3f}:start_mode=add:color=black" if gap > 0 else ""
-            fc.append(f"[{i}:v]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS,fps=30,"
+            # 실제 파일이 설계 길이보다 짧아도 마지막 장면을 늘려 정확히 (b-a)초로 맞춘다(아니면 컷마다 소리와 영상이 조금씩 어긋남)
+            fc.append(f"[{i}:v]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS,fps=30,tpad=stop_mode=clone:stop_duration=2,trim=duration={max(0.04, b - a):.3f},"
                       f"scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p{pad}[v{i}]")
             if has_audio(src):
                 at = max(0.0, c["start"] + float(c.get("voice_offset") or 0))
@@ -3769,7 +4039,7 @@ def t_assemble(t):
         if subs:
             write_subs(subs, srt, vtt)
         sid = e.get("series_id") or "series"
-        base = f"{sid}/E{int(e.get('number') or 0):02d}/edit/{kind}_{rid[:8]}"
+        base = f"{sid}/E{int(e.get('number') or 0):02d}/edit/{kind}_{rid[:8]}_{uuid.uuid4().hex[:4]}"   # 다시 시도해도 '이미 있음'으로 실패하지 않게
         if kind == "preview":
             files["preview"] = storage_upload(base + ".mp4", out_mp4, "video/mp4")
             files["voice"] = storage_upload(base + "_voice.m4a", os.path.join(work, "stem_voice.m4a"), "audio/mp4")
@@ -3919,11 +4189,14 @@ def run_task(tk):
         log(f"제작 작업 완료: {kind} · {result}")
     except Retry as r:
         log(f"잠시 뒤 다시: {kind}: {r.why}")
-        rpc("agent_task_update", p_token=TOKEN, p_id=tk["id"], p_status="queued", p_progress=r.why[:200], p_retry_in=int(r.seconds))
+        try:   # 기다림은 시도 횟수에 세지 않는다(DB 650 이후). 옛 DB면 예전 방식으로
+            rpc("agent_task_update", p_token=TOKEN, p_id=tk["id"], p_status="queued", p_progress=r.why[:200], p_retry_in=int(r.seconds), p_wait=True)
+        except Exception:
+            rpc("agent_task_update", p_token=TOKEN, p_id=tk["id"], p_status="queued", p_progress=r.why[:200], p_retry_in=int(r.seconds))
     except Exception as e:
         log(f"제작 작업 실패: {kind}: {e}\n{traceback.format_exc()}")
         # 일시적인 문제(인터넷 끊김·서비스 붐빔·5xx·시간 초과·재시작)는 실패로 띄우지 않고 조용히 다시 한다(최대 3번)
-        if kind != "generate" and is_transient(str(e)) and (tk.get("attempts") or 1) < 4:
+        if is_transient(str(e)) and (tk.get("attempts") or 1) < 4:   # 영상 생성도: 다시 집으면 이미 맡긴 요청을 이어서 기다림(새 결제 없음)
             wait = 30 * (tk.get("attempts") or 1)
             if kind in ("photo_design", "photo_set"):
                 did = (tk.get("payload") or {}).get("design_id")
@@ -3943,9 +4216,12 @@ def run_task(tk):
 
 
 def is_transient(e):
-    """다시 하면 대부분 되는 오류인가(인터넷·서비스 붐빔·서버 오류·시간 초과)."""
+    """다시 하면 대부분 되는 오류인가(인터넷·서비스 붐빔·서버 오류·시간 초과).
+    단, Higgsfield 생성·얼굴 학습이 '시간 초과'된 것은 다시 하면 새로 결제되므로 자동 반복하지 않는다(대표가 확인 후 다시 시도)."""
+    if re.search(r"(생성|학습) 시간 초과", e):
+        return False
     return bool(re.search(r"(URLError|Connection|connection|reset|refused|Temporary failure|Name or service|timed out|timeout|시간 초과|"
-                          r"\b(429|500|502|503|504|520|522|524|529)\b|overloaded|rate.?limit|SSL|EOF occurred|RemoteDisconnected|IncompleteRead|"
+                          r"(?:실패|failed|error|Error|오류|HTTP|status|code|응답)\D{0,10}(429|500|502|503|504|520|522|524|529)\b|overloaded|rate.?limit|SSL|EOF occurred|RemoteDisconnected|IncompleteRead|"
                           r"Remote end closed|BrokenPipe|주소를 찾지 못함|후보가 만들어지지 않았습니다)", e))
 
 
@@ -3970,41 +4246,12 @@ QUIET_FAIL = {"coord_review", "bible_prompt", "photo_describe", "bible_place", "
 TASK_NAME = {"coord_review": "코디네이터 감수", "upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "코디네이터: 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
-class Beat:
-    """오래 걸리는 작업 중에도 15초마다 살아 있음 신호를 보내고, 간단한 명령은 바로 처리한다."""
-    def __init__(self, info, task=None):
-        self.info, self.stop, self.restart_after, self.task = info, threading.Event(), False, task or {}
-        self.th = threading.Thread(target=self.loop, daemon=True)
-
-    def loop(self):
-        while not self.stop.wait(BEAT_SECONDS):
-            try:
-                t = self.task
-                hb = rpc("agent_heartbeat", p_token=TOKEN, p_platform=PLATFORM, p_version=VERSION, p_state="busy",
-                         p_current_job=t.get("kind"), p_last_error=None, p_info=self.info)
-                PULSE["last"] = time.time()
-                for c in hb.get("commands") or []:
-                    if c["command"] in ("restart", "update"):
-                        self.restart_after = True
-                        rpc("agent_command_done", p_token=TOKEN, p_id=c["id"], p_ok=True, p_result="지금 작업이 끝나면 바로 처리합니다")
-                    else:
-                        handle_command(c)
-            except Exception as e:
-                log(f"작업 중 신호 실패: {e}")
-
-    def __enter__(self):
-        self.th.start()
-        return self
-
-    def __exit__(self, *a):
-        self.stop.set()
-
-
 # ------------------------------------------------------------------ 본체
 def main():
     global DEVICE_ID
     log(f"NYX 에이전트 v{VERSION} 시작 ({PLATFORM}, {socket.gethostname()})")
     keep_awake()
+    os.makedirs(os.path.join(HOME, "work"), exist_ok=True)   # 새로 설치한 컴퓨터에서 첫 대사 파일 쓰기가 실패하던 문제
     last_error, paused = None, False
     info = {"hostname": socket.gethostname(), "os": f"{platform.system()} {platform.release()}",
             "python": platform.python_version(), "started_at": STARTED, "jobs": sorted(HANDLERS), "tasks": sorted(TASKS),
@@ -4031,44 +4278,34 @@ def main():
                 if what == "update":
                     check_update(force=True)
                 raise Restart()
-            if not QUICK.get("started"):   # 첫 연결이 된 뒤에 짧은 일 줄을 연다
+            if not QUICK.get("started"):   # 첫 연결이 된 뒤에 일 줄을 연다. 모든 제작 일은 줄에서 동시에 하고, 본체는 신호·명령·업데이트만 맡는다
                 QUICK["started"] = True
                 threading.Thread(target=pulse, daemon=True).start()
-                for i in range(QUICK_WORKERS):
-                    threading.Thread(target=lane, args=(QUICK_KINDS, f"busy{i}", f"짧은 일 줄 {i + 1}"), daemon=True).start()
-                    time.sleep(1)
-                for i in range(2):   # 사진도 2개 동시에(서로 다른 인물 후보·얼굴 학습)
-                    threading.Thread(target=lane, args=(PHOTO_KINDS, f"photo{i}", f"사진 줄 {i + 1}"), daemon=True).start()
-                for i in range(3):   # 영상 생성 3개 동시에
-                    threading.Thread(target=lane, args=(GEN_KINDS, f"gen{i}", f"영상 줄 {i + 1}"), daemon=True).start()
-                for i in range(2):   # 컷 장면 사진 준비 2개 동시에
-                    threading.Thread(target=lane, args=(PREP_KINDS, f"prep{i}", f"장면 사진 줄 {i + 1}"), daemon=True).start()
-                log("짧은 일 줄(바이블 반영·코디네이터 감수)·사진 줄(Higgsfield 후보·얼굴 학습) 시작")
+                lanes = [(QUICK_KINDS, "busy", "짧은 일 줄", QUICK_WORKERS),
+                         (PHOTO_KINDS, "photo", "사진 줄", 2),        # 서로 다른 인물 후보·얼굴 학습
+                         (GEN_KINDS, "gen", "영상 줄", 3),
+                         (PREP_KINDS, "prep", "장면 사진 줄", 2),
+                         (work_kinds(), "work", "일반 줄", WORK_WORKERS),   # 감독·작가실·감수·보관·목소리 등
+                         (HEAVY_KINDS, "heavy", "편집·업스케일 줄", 1)]
+                for kinds, slot, label, n in lanes:
+                    for i in range(n):
+                        threading.Thread(target=lane, args=(kinds, f"{slot}{i}", f"{label} {i + 1}"), daemon=True,
+                                         name=f"{slot}{i}").start()
+                        time.sleep(0.3)   # 줄마다 대기열 확인 시점을 흩어 둔다
+                log("일 줄 시작: " + ", ".join(f"{label} {n}개" for _, _, label, n in lanes))
             last_error = None
             if os.path.exists(PENDING):  # 새 버전이 정상적으로 연결됨 → 업데이트 확정
                 os.remove(PENDING)
                 log(f"v{VERSION} 업데이트 확정")
             for c in hb.get("commands") or []:
                 handle_command(c)
-            if not paused:
-                tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=sorted(k for k in TASKS if k not in PHOTO_KINDS + GEN_KINDS + PREP_KINDS), p_platform=PLATFORM)
-                if tk and tk.get("id"):
+            if not paused and not QUICK.get("draining"):
+                j = rpc("agent_claim_job", p_token=TOKEN, p_types=sorted(HANDLERS))
+                if j and j.get("id"):
                     busy = True
-                    with Beat(info, tk) as beat:
-                        run_task(tk)
-                    if beat.restart_after:
-                        check_update(force=True)
-                        raise Restart()
-                else:
-                    j = rpc("agent_claim_job", p_token=TOKEN, p_types=sorted(HANDLERS))
-                    if j and j.get("id"):
-                        busy = True
-                        run_job(j)
+                    run_job(j)
         except Restart:
-            for _ in range(300):   # 다른 줄이 하던 일을 마칠 때까지 기다린다(최대 10분)
-                if not lanes_busy():
-                    break
-                time.sleep(2)
+            drain()
             log("재시작")
             sys.exit(0)  # 자동 시작 장치(맥 launchd / Windows 실행기)가 다시 켭니다
         except Exception as e:
@@ -4081,10 +4318,7 @@ def main():
         # 업데이트 확인은 일이 계속 있어도 일 사이마다(10분 간격) 한다 — 바쁘면 영영 옛 버전에 머물던 문제
         try:
             if check_update():
-                for _ in range(300):
-                    if not lanes_busy():
-                        break
-                    time.sleep(2)
+                drain()
                 log("새 버전으로 재시작")
                 sys.exit(0)
         except SystemExit:
