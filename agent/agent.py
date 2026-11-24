@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.16.1"
+VERSION = "1.16.2"
 
 import base64
 import glob
@@ -1010,6 +1010,12 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
         notify(f"{epno}화 컷 설계: 실패한 씬을 작가실·감독에게 다시 맡겼습니다", "\n".join(asked + lines[:5]), "warning")
         return "설계된 씬 없음 · " + " / ".join(asked)
     failed = lines
+    seq = {}
+    for c in cuts:   # 같은 씬이 여러 부분(S#7-1·7-2)으로 설계됐으면 컷 번호를 이어서 다시 매긴다(감수 전에)
+        sn = int(c.get("scene_no") or 0)
+        seq[sn] = seq.get(sn, 0) + 1
+        c["cut_no"] = seq[sn]
+        c["code"] = f"E{epno:02d}-S{sn:02d}-C{seq[sn]:02d}"
     progress(f"감정감수자가 컷 {len(cuts)}개를 감수하는 중")
     try:
         rv = review_cuts(ctx, ep, cuts, rmodel)
@@ -1032,17 +1038,8 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
         text, _ = claude(dmodel, director_system(ctx), f"감정감수자 의견을 반영해 아래 컷들만 고쳐서 같은 형식으로 다시 주세요.\n{fix_text}\n\n[대본]\n{src}",
                          max_tokens=12000, stage="cut_card", episode_id=ep, note="감독 감수 반영")
         fixed = {(int(c.get("scene_no") or 0), int(c.get("cut_no") or 0)): c for c in safe_json(text).get("cuts") or [] if isinstance(c, dict)}
-        cuts = [fixed.get((int(c["scene_no"]), int(c["cut_no"])), c) for c in cuts]
-    seq = {}
-    for c in cuts:   # 같은 씬이 여러 부분(S#7-1·7-2)으로 설계됐으면 컷 번호를 이어서 다시 매긴다
-        sn = int(c.get("scene_no") or 0)
-        old = (sn, int(c.get("cut_no") or 0))
-        seq[sn] = seq.get(sn, 0) + 1
-        if old[1] != seq[sn]:
-            if old in verdicts and (sn, seq[sn]) not in verdicts:
-                verdicts[(sn, seq[sn])] = verdicts.pop(old)
-            c["cut_no"] = seq[sn]
-        c["code"] = f"E{epno:02d}-S{sn:02d}-C{seq[sn]:02d}"
+        cuts = [{**fixed[(int(c["scene_no"]), int(c["cut_no"]))], "scene_no": c["scene_no"], "cut_no": c["cut_no"], "code": c.get("code")}
+                if (int(c["scene_no"]), int(c["cut_no"])) in fixed else c for c in cuts]   # 고친 컷도 번호·코드는 그대로
     by_scene = {}
     for c in cuts:
         k = (int(c.get("scene_no") or 0), int(c.get("cut_no") or 0))
@@ -2688,24 +2685,32 @@ def t_photo_describe(t):
         "background": "배경: 무엇이 보이는 풍경인가(도시·자연·하늘·무대 등), 거리감과 원근, 주요 형태와 색, 날씨·시간대·빛의 방향과 색온도, 분위기, 눈에 띄는 고유한 요소",
         "prop": "소품: 종류, 모양과 비율, 크기(손·몸 대비), 재질과 표면 질감, 색(주색·보조색), 로고·글자·무늬(실제 상표 이름은 쓰지 말 것), 낡음·흠집, 쓰는 방식",
     }.get(cat, "사진 속 대상의 생김새를 빠짐없이")
-    system = f"""너는 드라마 제작팀의 미술·캐스팅 담당이다. 대표가 올린 기준 사진을 보고 시리즈 바이블의 고정 묘사를 쓴다.
-이 묘사는 영상·사진 생성 모델 프롬프트에 그대로 들어가서, 모든 화에서 같은 {'얼굴' if cat == 'character' else '모습'}이 나오게 하는 기준이 된다.
-- description: 영어. 세세하고 꼼꼼하게, 사진에 실제로 보이는 것만. 4~8문장(약 80~160단어). 다룰 것 — {focus}.
-  여러 장이면 공통으로 일관된 특징을 쓰고, 장마다 다른 것(의상·조명 등)은 details로 보낸다. 실존 인물·배우·브랜드 이름 금지. 추측은 쓰지 않는다.
+    system = f"""너는 드라마 제작팀의 코디네이터다. 대표가 올린 기준 사진을 보고 시리즈 바이블의 고정 묘사와 영어 프롬프트를 쓴다.
+이 프롬프트는 영상·사진 생성 모델에 그대로 들어가서, 모든 화에서 같은 {'얼굴' if cat == 'character' else '모습'}이 나오게 하는 기준이 된다.
+다룰 것 — {focus}. 사진에 실제로 보이는 것만, 세세하고 꼼꼼하게. 여러 장이면 공통으로 일관된 특징을 쓰고 장마다 다른 것(의상·조명 등)은 details로.
+실존 인물·배우·브랜드 이름, 사진 속 글자(이름표·자막·간판 글자)는 쓰지 않는다. 추측은 쓰지 않는다.
+- description: 한국어. 대표가 읽고 확인할 묘사, 4~8문장. 위 항목을 빠짐없이.
+- prompt_en: 영어. description과 같은 내용을 생성 모델용으로 더 구체적으로(약 80~160단어, 쉼표로 이어진 묘사 위주, 현재형). 한글 금지.
 - details: 한국어. 바뀌면 안 되는 특징(얼굴·머리·체형 등), 사진별로 다른 점(의상·조명), 만들 때 주의할 점·금지 사항을 줄 단위로.
-답 형식: <json>{{"description": "", "details": ""}}</json>"""
+답 형식: <json>{{"description": "", "prompt_en": "", "details": ""}}</json>"""
     user = blocks + [{"type": "text", "text":
         f"시리즈: {info.get('series') or ''}\n항목: {info.get('name')} ({cat})\n대본 속 역할: {info.get('summary') or '-'}\n"
         f"지금 적혀 있는 묘사(참고만, 사진과 다르면 사진이 우선): {info.get('description') or '-'}"}]
-    progress(f"{info.get('name')}: 작가실이 사진을 보고 묘사(프롬프트)를 쓰는 중")
-    text, _ = claude("claude-opus-5-5", system, user, max_tokens=3000, stage="other", note=f"사진 보고 바이블 묘사: {info.get('name')}")
-    d = pick_json(text)
+    progress(f"{info.get('name')}: 코디네이터가 사진 {len(paths)}장을 보고 묘사·영어 프롬프트를 쓰는 중")
+    text, _ = claude("claude-opus-5-5", system, user, max_tokens=4000, stage="other", note=f"코디네이터: 사진 보고 묘사·프롬프트: {info.get('name')}")
+    d = safe_json(text)
     desc = (d.get("description") or "").strip()
+    en = clean_en(json.dumps({"prompt_en": d.get("prompt_en") or ""}))
     if not desc:
-        raise RuntimeError("Claude가 묘사를 돌려주지 않았습니다")
-    rpc("agent_bible_set_description", p_token=TOKEN, p_version=info["version_id"], p_description=desc, p_details=(d.get("details") or "").strip())
-    notify(f"{info.get('name')} 묘사 작성 완료", "바이블 탭에서 사진을 보고 쓴 묘사를 확인해 주세요")
-    return f"{info.get('name')} 묘사 {len(desc)}자"
+        raise RuntimeError(f"코디네이터가 사진을 보고 묘사를 쓰지 못했습니다(답 형식 오류). 다시 시도하면 대부분 해결됩니다. 답 앞부분: {text.strip()[:120]!r}")
+    rpc("agent_bible_set_description", p_token=TOKEN, p_version=info["version_id"], p_description=desc, p_details=(d.get("details") or "").strip(),
+        p_reason="코디네이터가 사진을 보고 묘사·영어 프롬프트 작성")
+    if en:   # 사진에서 바로 쓴 영어 프롬프트(작가실 번역보다 자세함)
+        rpc("agent_bible_set_prompt", p_token=TOKEN, p_version=info["version_id"], p_prompt=en)
+    rpc("agent_add_task", p_token=TOKEN, p={"kind": "coord_review", "payload": {"entry_id": info["entry_id"], "version_id": info["version_id"],
+                                                                                "series_id": info.get("series_id")}})
+    notify(f"{info.get('name')} 사진 보고 묘사·프롬프트 작성 완료", "코디네이터가 이어서 감수합니다. 바이블 카드의 '감수·반영 기록'에서 확인하세요")
+    return f"{info.get('name')} 묘사 {len(desc)}자 · 영어 프롬프트 {len(en)}자"
 
 
 @task("upscale")
@@ -2972,6 +2977,10 @@ def t_bible_prompt(t):
     if info.get("status") not in ("active", "proposed"):
         return "이미 다른 버전으로 바뀌었습니다"
     cat, name = info.get("category"), info.get("name")
+    if (info.get("description") or "").startswith("(작가실이 사진을 보고 쓰는 중)"):
+        return f"{name}: 코디네이터가 사진을 보고 쓰는 중이라 건너뜀"
+    if info.get("prompt_en") and not p.get("apply_reason") and not p.get("rerun"):
+        return f"{name}: 이미 영어 프롬프트가 있어 건너뜀(코디네이터가 사진을 보고 작성)"
     reason = (info.get("change_reason") or "").strip()
     by_owner = info.get("proposed_by") == "대표" and reason and "작가실" not in reason and "사진을 보고" not in reason
     if p.get("apply_reason") and reason:   # 대표가 '바꾸는 이유'에 적은 요청을 한국어 묘사에 먼저 반영
@@ -3049,6 +3058,8 @@ def t_coord_review(t):
     hangul = re.search(r"[가-힣]", (info.get("description") or "") + (info.get("details") or ""))
     if (info.get("prompt_pending") or (hangul and not info.get("prompt_en"))) and (t.get("attempts") or 1) < 15:
         raise Retry(45, f"{name}: 작가실이 영어 프롬프트를 반영하는 중이라 끝난 뒤 감수합니다")
+    if (info.get("description") or "").startswith("(작가실이 사진을 보고 쓰는 중)") and (t.get("attempts") or 1) < 15:
+        raise Retry(45, f"{name}: 코디네이터가 사진을 보고 묘사를 쓰는 중이라 끝난 뒤 감수합니다")
     prev = info.get("prev") or {}
     reason = (info.get("change_reason") or "").strip()
     owner_req = reason if info.get("proposed_by") == "대표" and not re.search(r"(사진을 보고|가져옴|얼굴 고정|Soul)", reason) else ""

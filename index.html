@@ -326,7 +326,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.16.1"
+VERSION = "1.16.2"
 
 import base64
 import glob
@@ -1326,6 +1326,12 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
         notify(f"{epno}화 컷 설계: 실패한 씬을 작가실·감독에게 다시 맡겼습니다", "\n".join(asked + lines[:5]), "warning")
         return "설계된 씬 없음 · " + " / ".join(asked)
     failed = lines
+    seq = {}
+    for c in cuts:   # 같은 씬이 여러 부분(S#7-1·7-2)으로 설계됐으면 컷 번호를 이어서 다시 매긴다(감수 전에)
+        sn = int(c.get("scene_no") or 0)
+        seq[sn] = seq.get(sn, 0) + 1
+        c["cut_no"] = seq[sn]
+        c["code"] = f"E{epno:02d}-S{sn:02d}-C{seq[sn]:02d}"
     progress(f"감정감수자가 컷 {len(cuts)}개를 감수하는 중")
     try:
         rv = review_cuts(ctx, ep, cuts, rmodel)
@@ -1348,17 +1354,8 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
         text, _ = claude(dmodel, director_system(ctx), f"감정감수자 의견을 반영해 아래 컷들만 고쳐서 같은 형식으로 다시 주세요.\n{fix_text}\n\n[대본]\n{src}",
                          max_tokens=12000, stage="cut_card", episode_id=ep, note="감독 감수 반영")
         fixed = {(int(c.get("scene_no") or 0), int(c.get("cut_no") or 0)): c for c in safe_json(text).get("cuts") or [] if isinstance(c, dict)}
-        cuts = [fixed.get((int(c["scene_no"]), int(c["cut_no"])), c) for c in cuts]
-    seq = {}
-    for c in cuts:   # 같은 씬이 여러 부분(S#7-1·7-2)으로 설계됐으면 컷 번호를 이어서 다시 매긴다
-        sn = int(c.get("scene_no") or 0)
-        old = (sn, int(c.get("cut_no") or 0))
-        seq[sn] = seq.get(sn, 0) + 1
-        if old[1] != seq[sn]:
-            if old in verdicts and (sn, seq[sn]) not in verdicts:
-                verdicts[(sn, seq[sn])] = verdicts.pop(old)
-            c["cut_no"] = seq[sn]
-        c["code"] = f"E{epno:02d}-S{sn:02d}-C{seq[sn]:02d}"
+        cuts = [{**fixed[(int(c["scene_no"]), int(c["cut_no"]))], "scene_no": c["scene_no"], "cut_no": c["cut_no"], "code": c.get("code")}
+                if (int(c["scene_no"]), int(c["cut_no"])) in fixed else c for c in cuts]   # 고친 컷도 번호·코드는 그대로
     by_scene = {}
     for c in cuts:
         k = (int(c.get("scene_no") or 0), int(c.get("cut_no") or 0))
@@ -3004,24 +3001,32 @@ def t_photo_describe(t):
         "background": "배경: 무엇이 보이는 풍경인가(도시·자연·하늘·무대 등), 거리감과 원근, 주요 형태와 색, 날씨·시간대·빛의 방향과 색온도, 분위기, 눈에 띄는 고유한 요소",
         "prop": "소품: 종류, 모양과 비율, 크기(손·몸 대비), 재질과 표면 질감, 색(주색·보조색), 로고·글자·무늬(실제 상표 이름은 쓰지 말 것), 낡음·흠집, 쓰는 방식",
     }.get(cat, "사진 속 대상의 생김새를 빠짐없이")
-    system = f"""너는 드라마 제작팀의 미술·캐스팅 담당이다. 대표가 올린 기준 사진을 보고 시리즈 바이블의 고정 묘사를 쓴다.
-이 묘사는 영상·사진 생성 모델 프롬프트에 그대로 들어가서, 모든 화에서 같은 {'얼굴' if cat == 'character' else '모습'}이 나오게 하는 기준이 된다.
-- description: 영어. 세세하고 꼼꼼하게, 사진에 실제로 보이는 것만. 4~8문장(약 80~160단어). 다룰 것 — {focus}.
-  여러 장이면 공통으로 일관된 특징을 쓰고, 장마다 다른 것(의상·조명 등)은 details로 보낸다. 실존 인물·배우·브랜드 이름 금지. 추측은 쓰지 않는다.
+    system = f"""너는 드라마 제작팀의 코디네이터다. 대표가 올린 기준 사진을 보고 시리즈 바이블의 고정 묘사와 영어 프롬프트를 쓴다.
+이 프롬프트는 영상·사진 생성 모델에 그대로 들어가서, 모든 화에서 같은 {'얼굴' if cat == 'character' else '모습'}이 나오게 하는 기준이 된다.
+다룰 것 — {focus}. 사진에 실제로 보이는 것만, 세세하고 꼼꼼하게. 여러 장이면 공통으로 일관된 특징을 쓰고 장마다 다른 것(의상·조명 등)은 details로.
+실존 인물·배우·브랜드 이름, 사진 속 글자(이름표·자막·간판 글자)는 쓰지 않는다. 추측은 쓰지 않는다.
+- description: 한국어. 대표가 읽고 확인할 묘사, 4~8문장. 위 항목을 빠짐없이.
+- prompt_en: 영어. description과 같은 내용을 생성 모델용으로 더 구체적으로(약 80~160단어, 쉼표로 이어진 묘사 위주, 현재형). 한글 금지.
 - details: 한국어. 바뀌면 안 되는 특징(얼굴·머리·체형 등), 사진별로 다른 점(의상·조명), 만들 때 주의할 점·금지 사항을 줄 단위로.
-답 형식: <json>{{"description": "", "details": ""}}</json>"""
+답 형식: <json>{{"description": "", "prompt_en": "", "details": ""}}</json>"""
     user = blocks + [{"type": "text", "text":
         f"시리즈: {info.get('series') or ''}\n항목: {info.get('name')} ({cat})\n대본 속 역할: {info.get('summary') or '-'}\n"
         f"지금 적혀 있는 묘사(참고만, 사진과 다르면 사진이 우선): {info.get('description') or '-'}"}]
-    progress(f"{info.get('name')}: 작가실이 사진을 보고 묘사(프롬프트)를 쓰는 중")
-    text, _ = claude("claude-opus-5-5", system, user, max_tokens=3000, stage="other", note=f"사진 보고 바이블 묘사: {info.get('name')}")
-    d = pick_json(text)
+    progress(f"{info.get('name')}: 코디네이터가 사진 {len(paths)}장을 보고 묘사·영어 프롬프트를 쓰는 중")
+    text, _ = claude("claude-opus-5-5", system, user, max_tokens=4000, stage="other", note=f"코디네이터: 사진 보고 묘사·프롬프트: {info.get('name')}")
+    d = safe_json(text)
     desc = (d.get("description") or "").strip()
+    en = clean_en(json.dumps({"prompt_en": d.get("prompt_en") or ""}))
     if not desc:
-        raise RuntimeError("Claude가 묘사를 돌려주지 않았습니다")
-    rpc("agent_bible_set_description", p_token=TOKEN, p_version=info["version_id"], p_description=desc, p_details=(d.get("details") or "").strip())
-    notify(f"{info.get('name')} 묘사 작성 완료", "바이블 탭에서 사진을 보고 쓴 묘사를 확인해 주세요")
-    return f"{info.get('name')} 묘사 {len(desc)}자"
+        raise RuntimeError(f"코디네이터가 사진을 보고 묘사를 쓰지 못했습니다(답 형식 오류). 다시 시도하면 대부분 해결됩니다. 답 앞부분: {text.strip()[:120]!r}")
+    rpc("agent_bible_set_description", p_token=TOKEN, p_version=info["version_id"], p_description=desc, p_details=(d.get("details") or "").strip(),
+        p_reason="코디네이터가 사진을 보고 묘사·영어 프롬프트 작성")
+    if en:   # 사진에서 바로 쓴 영어 프롬프트(작가실 번역보다 자세함)
+        rpc("agent_bible_set_prompt", p_token=TOKEN, p_version=info["version_id"], p_prompt=en)
+    rpc("agent_add_task", p_token=TOKEN, p={"kind": "coord_review", "payload": {"entry_id": info["entry_id"], "version_id": info["version_id"],
+                                                                                "series_id": info.get("series_id")}})
+    notify(f"{info.get('name')} 사진 보고 묘사·프롬프트 작성 완료", "코디네이터가 이어서 감수합니다. 바이블 카드의 '감수·반영 기록'에서 확인하세요")
+    return f"{info.get('name')} 묘사 {len(desc)}자 · 영어 프롬프트 {len(en)}자"
 
 
 @task("upscale")
@@ -3288,6 +3293,10 @@ def t_bible_prompt(t):
     if info.get("status") not in ("active", "proposed"):
         return "이미 다른 버전으로 바뀌었습니다"
     cat, name = info.get("category"), info.get("name")
+    if (info.get("description") or "").startswith("(작가실이 사진을 보고 쓰는 중)"):
+        return f"{name}: 코디네이터가 사진을 보고 쓰는 중이라 건너뜀"
+    if info.get("prompt_en") and not p.get("apply_reason") and not p.get("rerun"):
+        return f"{name}: 이미 영어 프롬프트가 있어 건너뜀(코디네이터가 사진을 보고 작성)"
     reason = (info.get("change_reason") or "").strip()
     by_owner = info.get("proposed_by") == "대표" and reason and "작가실" not in reason and "사진을 보고" not in reason
     if p.get("apply_reason") and reason:   # 대표가 '바꾸는 이유'에 적은 요청을 한국어 묘사에 먼저 반영
@@ -3365,6 +3374,8 @@ def t_coord_review(t):
     hangul = re.search(r"[가-힣]", (info.get("description") or "") + (info.get("details") or ""))
     if (info.get("prompt_pending") or (hangul and not info.get("prompt_en"))) and (t.get("attempts") or 1) < 15:
         raise Retry(45, f"{name}: 작가실이 영어 프롬프트를 반영하는 중이라 끝난 뒤 감수합니다")
+    if (info.get("description") or "").startswith("(작가실이 사진을 보고 쓰는 중)") and (t.get("attempts") or 1) < 15:
+        raise Retry(45, f"{name}: 코디네이터가 사진을 보고 묘사를 쓰는 중이라 끝난 뒤 감수합니다")
     prev = info.get("prev") or {}
     reason = (info.get("change_reason") or "").strip()
     owner_req = reason if info.get("proposed_by") == "대표" and not re.search(r"(사진을 보고|가져옴|얼굴 고정|Soul)", reason) else ""
@@ -5785,7 +5796,7 @@ async function viewBible(main) {
           ${hasPhotoSrc ? `<span class="seg" data-psrc="${esc(e.id)}" title="직접 올리기로 정하면 '사진 만들기'를 한꺼번에 눌러도 이 항목은 만들지 않습니다">
             <button type="button" data-v="auto" class="${e.photo_source !== 'upload' ? 'on' : ''}">자동으로 만들기</button><button type="button" data-v="upload" class="${e.photo_source === 'upload' ? 'on' : ''}">직접 올리기</button></span>` : ''}
           <button class="btn small only-auto" data-pd="${esc(e.id)}">${e.category === 'character' ? (c?.soul_id ? '실사 사진 다시 만들기' : '실사 사진 만들기·얼굴 고정') : '사진 만들기'}</button>
-          <label class="btn small only-up" style="margin:0" title="외부에서 구한 사진을 기준 사진으로 넣고 바로 적용합니다. 작가실이 사진을 보고 묘사(프롬프트)를 자동으로 씁니다">사진 올리기<input type="file" accept="image/*" multiple hidden data-pup="${esc(e.id)}"></label>
+          <label class="btn small only-up" style="margin:0" title="외부에서 구한 사진을 기준 사진으로 넣고 바로 적용합니다. 코디네이터가 사진을 보고 묘사·영어 프롬프트를 자동으로 씁니다">사진 올리기<input type="file" accept="image/*" multiple hidden data-pup="${esc(e.id)}"></label>
           ${e.category === 'character' && (c?.image_paths || []).length ? `<button class="btn small only-up" data-pd="${esc(e.id)}" title="올린 사진으로 Soul ID를 학습해 같은 얼굴의 기준 사진을 만듭니다">${c?.soul_id ? '얼굴 다시 고정' : '이 사진으로 얼굴 고정'}</button>` : ''}</div></div>` : ''}
         ${['character', 'voice'].includes(e.category) ? `<div class="brow"><span class="blbl">목소리</span><div class="bbtns">
           <button class="btn small" data-vd="${esc(e.id)}">${c?.voice_id ? '목소리 다시 디자인' : '목소리 디자인'}</button></div></div>` : ''}
@@ -5842,7 +5853,7 @@ async function viewBible(main) {
         .in('kind', ['photo_describe', 'bible_place']).eq('series_id', sid).order('created_at', { ascending: false }).limit(300));
       if (S.seriesId !== sid || S.tab !== 'bible') return null;
       const last = {}; rows.forEach(r => { const k = (r.payload?.entry_id || '') + '|' + r.kind; if (r.payload?.entry_id && !last[k]) last[k] = r; });
-      const LBL = { photo_describe: ['프롬프트 쓰는 중', '작가실이 사진을 보고 묘사를 쓰는 중', '묘사 작성 실패'],
+      const LBL = { photo_describe: ['프롬프트 쓰는 중', '코디네이터가 사진을 보고 묘사·영어 프롬프트를 쓰는 중', '묘사 작성 실패'],
         bible_place: ['넣을 곳 고르는 중', '제작자가 대본을 읽고 넣을 화·씬을 고르는 중', '추천 실패'] };
       let open = 0;
       main.querySelectorAll('[data-dsc]').forEach(box => {
@@ -5975,7 +5986,7 @@ async function viewBible(main) {
     seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
     const card = main.querySelector(`[data-card="${id}"]`);
     if (card) { card.classList.toggle('ps-up', v === 'upload'); card.classList.toggle('ps-auto', v !== 'upload'); }
-    toast(v === 'upload' ? `${e.name}: 직접 올리기. 사진을 올리면 작가실이 사진을 보고 묘사를 씁니다` : `${e.name}: 자동으로 만들기. '사진 만들기'로 후보를 만듭니다`);
+    toast(v === 'upload' ? `${e.name}: 직접 올리기. 사진을 올리면 코디네이터가 사진을 보고 묘사·영어 프롬프트를 씁니다` : `${e.name}: 자동으로 만들기. '사진 만들기'로 후보를 만듭니다`);
   }));
   // 외부 사진 올리기: 지금 적용본(없으면 작가실 수정안) 묘사에 사진을 붙여 새 버전으로 바로 적용한다
   main.querySelectorAll('[data-pup]').forEach(inp => inp.onchange = guard(async () => {
@@ -5998,7 +6009,7 @@ async function viewBible(main) {
     if (!active && prop) await q(S.sb.from('bible_versions').update({ status: 'rejected' }).eq('id', prop.id).eq('status', 'proposed'));
     if (hasPhotoSrc && e.photo_source !== 'upload') await q(S.sb.from('bible_entries').update({ photo_source: 'upload' }).eq('id', e.id)).catch(() => {});
     await queueDescribe(e.id, v.id);
-    toast(`${e.name} 사진 ${files.length}장 적용했습니다 (v${v.version_no}). 작가실이 사진을 보고 묘사를 씁니다`); go('bible');
+    toast(`${e.name} 사진 ${files.length}장 적용했습니다 (v${v.version_no}). 코디네이터가 사진을 보고 묘사·영어 프롬프트를 씁니다`); go('bible');
   }));
   const ballgo = $('#ballgo');
   if (ballgo) ballgo.onclick = guard(async () => {
@@ -6246,7 +6257,7 @@ function openBibleEditor({ entry, base, urls, fromId }) {
       <div style="flex:1;min-width:120px"><label>분류</label><select id="bcat">${Object.entries(BIBLE_CAT).map(([k, l]) =>
         `<option value="${k}" ${S.bibleCat === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>` : ''}
     <label>한 줄 설명 (화면 표시용)</label><input id="bsum" value="${esc(entry?.summary || '')}" placeholder="예: 주인공. 태국에서 온 연습생">
-    <label>고정 묘사 문장: 감독이 프롬프트에 그대로 넣는 문장입니다 <span class="quiet">(사진을 넣으면 비워 둬도 작가실이 사진을 보고 씁니다)</span></label>
+    <label>고정 묘사 문장: 감독이 프롬프트에 그대로 넣는 문장입니다 <span class="quiet">(사진을 넣으면 비워 둬도 코디네이터가 사진을 보고 씁니다)</span></label>
     <textarea id="bdesc" style="min-height:120px" placeholder="예: early-20s woman, shoulder-length straight black hair, almond eyes, slim build, ...">${esc(base?.description || '')}</textarea>
     <label>세부 사항 (화별 의상, 바뀌면 안 되는 특징, 금지 사항)</label>
     <textarea id="bdet" style="min-height:100px">${esc(base?.details || '')}</textarea>
@@ -6258,7 +6269,7 @@ function openBibleEditor({ entry, base, urls, fromId }) {
       ? `<img src="${esc(urls[p])}" alt="">` : '<span class="quiet">사진</span>'}</label>`).join('')}</div>` : ''}
     <input type="file" id="bimg" accept="image/*" multiple>
     ${PHOTO_CATS.includes(entry?.category || S.bibleCat) || isNew ? `<label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" id="bauto" style="width:auto">
-      실사 사진을 보고 고정 묘사(프롬프트)를 작가실이 다시 쓰기 <span class="quiet">(새 사진을 넣으면 자동으로 켜짐)</span></label>` : ''}
+      실사 사진을 보고 고정 묘사·영어 프롬프트를 코디네이터가 다시 쓰기 <span class="quiet">(새 사진을 넣으면 자동으로 켜짐)</span></label>` : ''}
     <label>목소리 샘플 (선택)</label>
     ${base?.voice_path ? `<label class="quiet" style="margin:0 0 6px"><input type="checkbox" id="bkeepv" style="width:auto" checked> 기존 샘플 유지</label>` : ''}
     <input type="file" id="bvoice" accept="audio/*">
@@ -6309,7 +6320,7 @@ function openBibleEditor({ entry, base, urls, fromId }) {
         toast(`v${v.version_no} 적용했습니다. 작가실이 "${reasonTxt.slice(0, 30)}"을(를) 묘사와 영어 프롬프트에 반영합니다(1~2분)`);
       } else if (autoDesc || description.startsWith('(작가실이 사진을 보고 쓰는 중)')) {
         await q(S.sb.from('pipeline_tasks').insert({ kind: 'photo_describe', series_id: S.seriesId, payload: { entry_id: entryId, version_id: v.id } }));
-        toast(`v${v.version_no} 적용했습니다. 작가실이 사진을 보고 묘사를 씁니다`);
+        toast(`v${v.version_no} 적용했습니다. 코디네이터가 사진을 보고 묘사·영어 프롬프트를 씁니다`);
       } else toast(`v${v.version_no} 적용했습니다`);
       go('bible');
     } finally {
@@ -6657,7 +6668,7 @@ async function directiveDetail(id) {
       <td>${esc(e.actor)}<br><span class="quiet">${esc(e.devices?.name || '')}</span></td><td>${esc(human(e.summary))}</td></tr>`).join('')}</table>` : '<p class="quiet">기록이 없습니다.</p>'}`;
 }
 const JOB_NAME = {
-  bible_extract: '대본에서 필요 항목 찾기', photo_describe: '사진 보고 묘사 쓰기', bible_place: '넣을 화·씬 추천',photo_design: '사진 디자인', photo_set: '얼굴 학습·기준 사진', prep_cut: '컷 준비(사진·목소리)', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보 만들기', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성 (Seedance)', store: '집 PC 보관', video_review: '영상 감수',
+  bible_extract: '대본에서 필요 항목 찾기', photo_describe: '코디네이터: 사진 보고 묘사·프롬프트', bible_place: '넣을 화·씬 추천',photo_design: '사진 디자인', photo_set: '얼굴 학습·기준 사진', prep_cut: '컷 준비(사진·목소리)', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보 만들기', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성 (Seedance)', store: '집 PC 보관', video_review: '영상 감수',
   ping: '연결 시험', summarize_script_diff: '대본 변경 요약', split_scenes: '씬 나누기', summarize_directive: '지시 읽고 담당 정하기',
   write_prompts: '프롬프트 작성 (감독)', review_prompts: '프롬프트 감수 (감정감수자)', generate_keyframe: '키프레임 생성',
   review_keyframe: '키프레임 검사 (영상감수자)', generate_video: '영상 생성', review_video: '영상 검사 (영상감수자)',
@@ -7269,7 +7280,7 @@ const CUT_STATUS = {
   designed: ['설계됨 · 승인 대기', 'accent'], approved: ['승인 · 생성 대기', 'warn'], generating: ['생성 중', 'warn'],
   reviewing: ['감수 중', 'warn'], passed: ['통과', 'good'], failed: ['불합격·실패', 'bad'], hold: ['보류', ''], cancelled: ['취소', ''],
 };
-const TASK_LABEL = { coord_review: '코디네이터 감수', bible_prompt: '바이블 영어 프롬프트', bible_suggest: '작가실 추천(스타일·음악)', api_check: '실제 연결 점검', upscale: '1080p 업그레이드', bible_extract: '대본에서 필요 항목 찾기', photo_describe: '사진 보고 묘사 쓰기', bible_place: '넣을 화·씬 추천',photo_design: '사진 디자인', photo_set: '얼굴 학습', prep_cut: '사진·목소리 준비', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
+const TASK_LABEL = { coord_review: '코디네이터 감수', bible_prompt: '바이블 영어 프롬프트', bible_suggest: '작가실 추천(스타일·음악)', api_check: '실제 연결 점검', upscale: '1080p 업그레이드', bible_extract: '대본에서 필요 항목 찾기', photo_describe: '코디네이터: 사진 보고 묘사·프롬프트', bible_place: '넣을 화·씬 추천',photo_design: '사진 디자인', photo_set: '얼굴 학습', prep_cut: '사진·목소리 준비', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
 const PROD_STEPS = [['원고', '대본 탭에서 넣기'], ['작가실', '감정선 정리본'], ['컷 설계', '컷 나누기·대사 미리 듣기·장면 사진'], ['생성 승인', '대표가 컷별로'], ['영상·감수', 'Seedance + 영상감수'], ['씬 보관', '집 PC · OneDrive']];
 const usdKrw = (usd, rate) => usd == null ? '-' : won(usd * (rate || 1340));
 
@@ -7402,7 +7413,7 @@ function bindFailCards(root, tasks, after) {
 // ------------------------------------------------------------------
 // 제작 현황판: 모든 시리즈의 대기·진행 중인 일을 담당별로, 같은 일이 두 번 걸려 있으면 중복 표시
 // ------------------------------------------------------------------
-const DESK = [['코디네이터', ['coord_review']], ['작가실', ['writers_room', 'bible_extract', 'bible_prompt', 'bible_suggest', 'bible_place', 'photo_describe', 'voice_cast']],
+const DESK = [['코디네이터', ['coord_review', 'photo_describe']], ['작가실', ['writers_room', 'bible_extract', 'bible_prompt', 'bible_suggest', 'bible_place', 'voice_cast']],
   ['감독실', ['director', 'prep_cut']], ['영상 생성', ['generate', 'upscale']], ['감수', ['video_review']],
   ['사진·목소리', ['photo_design', 'photo_set', 'voice_design', 'voice_save', 'api_check']], ['편집·보관', ['assemble', 'edit_command', 'bgm', 'store']]];
 async function renderBoard() {
@@ -9198,6 +9209,7 @@ const HELP = {
   </ul></li>
 <li>코디네이터는 <b>기준 사진</b>도 봅니다: 묘사와 맞는지, 사진에 글자·이름표·자막(예: 다른 사람 이름)이 찍혀 있지 않은지, 같은 사람인지. 문제가 있으면 카드가 빨갛게 표시되고 <b>다시 적용해서 사진 만들기 (추천)</b> 버튼이 나옵니다. 바이블 위 "코디네이터 감수 결과"에 이상 항목이 모입니다.<span class="ex">예: 도윤 — 사진 2에 '김윤호' 이름표 글자, 사진 3은 다른 사람 → [다시 적용해서 사진 만들기]</span></li>
 <li><b>다시 감수</b>(카드), <b>전체 감수 다시 하기</b>(위 "한꺼번에" 줄)으로 언제든 다시 확인할 수 있습니다. 지난 감수는 "이전 감수"에 쌓입니다.</li>
+<li><b>사진을 직접 넣으면</b> 코디네이터가 바로(짧은 일 줄) 사진을 보고 한글 묘사·세부 사항·영어 프롬프트를 꼼꼼히 쓰고, 이어서 감수까지 합니다. 사진을 안 넣으면 대본에서 가져온 추천 묘사로 작가실이 영어 프롬프트를 씁니다.<span class="ex">예: 도윤 사진 3장 업로드 → "20대 후반 한국 남성, 쌍꺼풀 없는 가는 눈, 짧은 흑발 투블럭…" + 영어 프롬프트 → 감수: 반영 확인</span></li>
 <li>사진 <b>새로 만들기</b>는 그 항목의 반영·감수가 진행 중이면 <b>그게 끝난 뒤</b> 반영된 프롬프트로 만듭니다.</li>
 </ul>
 <h4>⑥ 실사 사진·얼굴 고정 (캐릭터)</h4>
