@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.19.2"
+VERSION = "1.19.3"
 
 import base64
 import glob
@@ -480,7 +480,9 @@ CURRENT = _Current()
 QUICK_KINDS = ["bible_prompt", "coord_review", "photo_describe"]
 # 바이블 사진(Higgsfield 후보·얼굴 학습)도 영상 생성·컷 설계 뒤에 줄 서지 않게 따로
 PHOTO_KINDS = ["photo_design", "photo_set"]
-QUICK = {"busy": None, "photo": None}
+QUICK = {"busy": None, "photo": None, **{f"busy{i}": None for i in range(8)}, **{f"photo{i}": None for i in range(4)},
+         **{f"gen{i}": None for i in range(4)}, **{f"prep{i}": None for i in range(4)}}   # 줄 이름을 미리 다 만들어 둔다(동시에 고치다 깨지지 않게)
+PULSE = {"last": 0.0, "restart": False}
 
 
 def lane(kinds, slot, label):
@@ -533,7 +535,29 @@ def parallel(fns, workers=4):
 
 
 def lanes_busy():
-    return next((v for k, v in QUICK.items() if k not in ("paused", "started") and v), None)
+    return next((v for k, v in list(QUICK.items()) if k not in ("paused", "started") and v), None)
+
+
+def pulse():
+    """살아 있음 신호를 따로 보낸다: 본체가 업데이트 대기·긴 확인 등으로 잠시 신호를 못 보내도 '에이전트 없음'으로 보이지 않게.
+    재시작·업데이트 명령은 표시만 해 두고 본체가 일 사이에 처리한다."""
+    while True:
+        time.sleep(10)
+        if time.time() - PULSE["last"] < 25:
+            continue
+        try:
+            hb = rpc("agent_heartbeat", p_token=TOKEN, p_platform=PLATFORM, p_version=VERSION,
+                     p_state="busy" if lanes_busy() else "idle", p_current_job=lanes_busy(), p_last_error=None,
+                     p_info={"hostname": socket.gethostname(), "tasks": sorted(TASKS), "started_at": STARTED})
+            PULSE["last"] = time.time()
+            for c in hb.get("commands") or []:
+                if c["command"] in ("restart", "update"):
+                    PULSE["restart"] = c["command"]
+                    rpc("agent_command_done", p_token=TOKEN, p_id=c["id"], p_ok=True, p_result="하던 일이 끝나면 바로 처리합니다")
+                else:
+                    handle_command(c)
+        except Exception as e:
+            log(f"살아 있음 신호 실패(다시 시도): {e}")
 
 
 def progress(text):
@@ -3882,6 +3906,7 @@ class Beat:
                 t = self.task
                 hb = rpc("agent_heartbeat", p_token=TOKEN, p_platform=PLATFORM, p_version=VERSION, p_state="busy",
                          p_current_job=t.get("kind"), p_last_error=None, p_info=self.info)
+                PULSE["last"] = time.time()
                 for c in hb.get("commands") or []:
                     if c["command"] in ("restart", "update"):
                         self.restart_after = True
@@ -3923,9 +3948,16 @@ def main():
                      p_state="busy" if lanes_busy() else ("error" if last_error else ("paused" if paused else "idle")),
                      p_current_job=lanes_busy(), p_last_error=last_error, p_info=info)
             DEVICE_ID, paused = hb.get("device_id"), bool(hb.get("paused"))
+            PULSE["last"] = time.time()
             QUICK["paused"] = paused
+            if PULSE.get("restart"):   # 신호 줄이 받아 둔 재시작·업데이트 명령
+                what = PULSE["restart"]; PULSE["restart"] = False
+                if what == "update":
+                    check_update(force=True)
+                raise Restart()
             if not QUICK.get("started"):   # 첫 연결이 된 뒤에 짧은 일 줄을 연다
                 QUICK["started"] = True
+                threading.Thread(target=pulse, daemon=True).start()
                 for i in range(QUICK_WORKERS):
                     threading.Thread(target=lane, args=(QUICK_KINDS, f"busy{i}", f"짧은 일 줄 {i + 1}"), daemon=True).start()
                     time.sleep(1)
