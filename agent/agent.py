@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.14.3"
+VERSION = "1.15.0"
 
 import base64
 import glob
@@ -520,6 +520,7 @@ def claude(model, system, content, *, max_tokens=8000, stage="other", episode_id
                     + qty["output_tokens"] * pout / 1e6, 6)
     cid = log_cost(stage, "anthropic", model, qty, usd=usd, episode_id=episode_id, scene_no=scene_no, cut_id=cut_code,
                    outcome="success", note=note, job_id=(CURRENT.get("task") or {}).get("id"))
+    CURRENT["last_stop"] = data.get("stop_reason")
     if data.get("stop_reason") == "max_tokens":
         log("주의: Claude 답이 길이 제한에 걸려 잘렸습니다")
     return text, cid
@@ -758,8 +759,44 @@ def has_images(ctx, names):
     return out
 
 
+SCENE_HEAD = re.compile(r"^[ \t]*[*#>\[]*[ \t]*S[ \t]*#[ \t]*(\d+)", re.M)
+
+
+def split_scenes(content):
+    """정리본을 씬(S#번호) 단위로 나눈다. [(번호, 머리줄, 본문)] — 씬 표시가 없으면 통째로 하나."""
+    marks = list(SCENE_HEAD.finditer(content or ""))
+    if not marks:
+        return [(0, "", content or "")]
+    out = []
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(content)
+        body = content[m.start():end].strip()
+        out.append((int(m.group(1)), body.splitlines()[0][:120], body))
+    return out
+
+
+def scene_groups(scenes, max_n=3, max_chars=5000):
+    groups, cur, size = [], [], 0
+    for s in scenes:
+        if cur and (len(cur) >= max_n or size + len(s[2]) > max_chars):
+            groups.append(cur); cur, size = [], 0
+        cur.append(s); size += len(s[2])
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def first_line_of(body):
+    for ln in body.splitlines()[1:]:
+        if ln.strip():
+            return ln.strip()[:60]
+    return ""
+
+
 @task("director")
 def t_director(t):
+    """감독 컷 설계. 대본을 씬 몇 개씩 나눠 설계한다(한 번에 다 하면 답이 길이 제한에 걸려 잘림).
+    한 묶음이 실패하면 씬 하나씩 다시, 그래도 실패한 씬은 어느 화·어느 씬·왜 실패했는지 남긴다."""
     ep = t["episode_id"]
     p = t.get("payload") or {}
     if p.get("cut_id"):
@@ -769,82 +806,137 @@ def t_director(t):
     if not script:
         raise RuntimeError("확정된 대본이 없습니다. 대본 탭에서 정리본을 확정해 주세요")
     e = ctx.get("episode") or {}
+    epno = int(e.get("number") or 0)
     dmodel = setting(ctx, "generation", "claude_director", "claude-opus-5-5")
     rmodel = setting(ctx, "generation", "claude_reviewer", "claude-sonnet-5-5")
-    scenes = p.get("scenes")
-    want = f"씬 {', '.join(map(str, scenes))}만" if scenes else "모든 씬을"
-    progress(f"감독이 {e.get('number')}화 {want} 컷으로 나누는 중")
-    user = f"""{e.get('number')}화 「{e.get('title') or ''}」 대본 v{script.get('version_no')}의 {want} 컷으로 설계해 주세요.
-컷 code는 E{int(e.get('number') or 0):02d}-S씬번호2자리-C컷번호2자리.
-
-[대표 연출 메모 — 필수는 반드시 반영]
+    all_sc = split_scenes(script["content"])
+    want_set = set(int(x) for x in (p.get("scenes") or []))
+    todo = [s for s in all_sc if not want_set or s[0] in want_set or s[0] == 0]
+    if not todo:
+        raise RuntimeError(f"{epno}화 확정 대본에 요청한 씬 {sorted(want_set)}이(가) 없습니다. 대본 탭에서 씬 번호(S#)를 확인해 주세요")
+    heads = "\n".join(h for _, h, _ in all_sc if h)
+    base = f"""[대표 연출 메모 — 필수는 반드시 반영]
 {notes_text(ctx)}
 
 [직전 화가 끝났을 때 상태 — 이 화 첫 등장은 여기서 이어진다(대본에 바뀐다는 말이 없으면 헤어·의상·상처·소지품 유지)]
 {continuity_text(ctx)}
 
-[연속성 기록]
-JSON 최상위에 "end_state"도 함께 준다: 이 화가 끝났을 때 주요 인물·소품의 상태(헤어·의상·상처·화장·들고 있는 물건·장소).
-형식: "end_state": [{{"name": "바이블 이름 그대로", "scene_no": 마지막 등장 씬, "state": "한국어 한 줄"}}]. 다음 화 감독이 이어 받는다.
+[이 화 전체 씬 목록(흐름 참고)]
+{heads or '-'}"""
 
-[대본]
-{script['content']}"""
-    text, _ = claude(dmodel, director_system(ctx), user, max_tokens=24000, stage="cut_card", episode_id=ep, note="감독 컷 설계")
-    plan = pick_json(text)
-    cuts = plan.get("cuts") or []
-    if not cuts:   # 답이 잘리거나 형식이 깨졌으면 한 번 더: JSON만, 더 길게
-        progress("감독 답이 형식에 맞지 않아 한 번 더 요청하는 중")
-        text, _ = claude(dmodel, director_system(ctx), user + "\n\n[중요] 설명 없이 <json>{\"cuts\": [...], \"end_state\": [...]}</json> 형식 하나만 답한다. 프롬프트는 간결하게.",
-                         max_tokens=32000, stage="cut_card", episode_id=ep, note="감독 컷 설계(다시 요청)")
-        plan = pick_json(text)
-        cuts = plan.get("cuts") or []
-    if scenes:
-        cuts = [c for c in cuts if int(c.get("scene_no") or 0) in set(int(s) for s in scenes)]
+    def ask(group, tight=False):
+        nos = [n for n, _, _ in group]
+        prev = next((b for n, _, b in reversed(all_sc) if nos[0] and n < nos[0]), "")
+        label = "모든 씬" if nos == [0] else "씬 " + ", ".join(map(str, nos))
+        user = f"""{epno}화 「{e.get('title') or ''}」 대본 v{script.get('version_no')}의 {label}만 컷으로 설계해 주세요.
+컷 code는 E{epno:02d}-S씬번호2자리-C컷번호2자리.
+
+{base}
+
+[연속성 기록]
+JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주요 인물·소품의 상태(헤어·의상·상처·화장·들고 있는 물건·장소).
+형식: "end_state": [{{"name": "바이블 이름 그대로", "scene_no": 마지막 등장 씬, "state": "한국어 한 줄"}}].
+
+{('[바로 앞 씬(이어지는 흐름 참고, 설계하지 말 것)]' + chr(10) + prev[:3000] + chr(10) + chr(10)) if prev else ''}[설계할 대본]
+{chr(10).join(b for _, _, b in group)}"""
+        if tight:
+            user += "\n\n[중요] 지난번 답이 너무 길어 잘렸거나 형식이 깨졌다. 설명 없이 <json>{\"cuts\": [...], \"end_state\": [...]}</json> 하나만. 프롬프트·메모는 짧고 핵심만."
+        progress(f"감독이 {epno}화 {label}을(를) 컷으로 나누는 중")
+        text, _ = claude(dmodel, director_system(ctx), user, max_tokens=16000, stage="cut_card", episode_id=ep,
+                         note=f"감독 컷 설계 {label}")
+        d = safe_json(text)
+        cuts = [c for c in (d.get("cuts") or []) if isinstance(c, dict)]
+        if nos != [0]:
+            cuts = [c for c in cuts if int(c.get("scene_no") or 0) in nos]
+        if cuts:
+            return cuts, d.get("end_state") or [], None
+        if CURRENT.get("last_stop") == "max_tokens":
+            why = "감독 답이 길이 제한에 걸려 중간에 잘렸습니다(이 씬의 컷 설계가 너무 길어짐)"
+        elif not d:
+            why = f"감독이 정해진 형식(JSON) 대신 다른 답을 했습니다. 감독 답 앞부분(대본 아님): {text.strip()[:120]!r}"
+        else:
+            why = "감독 답에 이 씬의 컷이 비어 있었습니다(씬 번호를 다르게 적었을 수 있음)"
+        return [], [], why
+
+    cuts, end_state, failed = [], [], []
+    for g in scene_groups(todo):
+        cs, es, why = ask(g)
+        if not cs:   # 묶음이 실패하면 씬 하나씩, 그래도 안 되면 더 짧게 한 번 더
+            for one in g:
+                cs1, es1, why1 = ask([one])
+                if not cs1:
+                    cs1, es1, why1 = ask([one], tight=True)
+                if cs1:
+                    cuts += cs1; end_state += es1
+                else:
+                    n, h, b = one
+                    failed.append(f"{epno}화 S#{n} 「{h.split('|')[2].strip() if h.count('|') >= 2 else h}」"
+                                  f"(첫 줄: {first_line_of(b) or '-'}) — 원인: {why1}. 씬 하나로 줄여 두 번 더 시도했지만 같았습니다.")
+            continue
+        cuts += cs; end_state += es
     if not cuts:
-        raise RuntimeError(f"감독이 컷을 만들지 못했습니다(답이 형식에 맞지 않음, 두 번 시도). 답 앞부분: {text[:160]!r}")
+        raise RuntimeError("씬별 결과 — 감독이 한 씬도 설계하지 못했습니다.\n" + "\n".join(failed[:8])
+                           + "\n이렇게 하세요: 다시 시도. 같은 씬이 계속 실패하면 대본 탭에서 그 씬을 둘로 나누거나(긴 씬) 씬 머리(S#번호)를 확인하세요.")
     progress(f"감정감수자가 컷 {len(cuts)}개를 감수하는 중")
-    rv = review_cuts(ctx, ep, cuts, rmodel)
-    verdicts = {(int(r.get("scene_no") or 0), int(r.get("cut_no") or 0)): r for r in rv.get("cuts") or []}
-    fixes = [c for c in cuts if (verdicts.get((int(c["scene_no"]), int(c["cut_no"]))) or {}).get("verdict") == "fix"]
+    try:
+        rv = review_cuts(ctx, ep, cuts, rmodel)
+    except Exception as ex:   # 감수가 깨져도 설계는 살린다(감수는 생략하고 기록)
+        log(f"감정감수자 감수 실패(설계는 저장): {ex}")
+        rv = {}
+    verdicts = {(int(r.get("scene_no") or 0), int(r.get("cut_no") or 0)): r for r in rv.get("cuts") or [] if isinstance(r, dict)}
+    fixes = [c for c in cuts if (verdicts.get((int(c.get("scene_no") or 0), int(c.get("cut_no") or 0))) or {}).get("verdict") == "fix"]
     for l in rv.get("lessons") or []:
         try:
             rpc("agent_add_lesson", p_token=TOKEN, p_lesson={**l, "series_id": (ctx.get("series") or {}).get("id"), "sources": ["감정감수자"]})
         except Exception as ex:
             log(f"교훈 기록 실패: {ex}")
-    if fixes:
-        progress(f"감독이 감수 의견 {len(fixes)}건을 반영해 고치는 중")
-        fix_text = json.dumps([{"cut": c, "review": verdicts[(int(c['scene_no']), int(c['cut_no']))]} for c in fixes], ensure_ascii=False)
-        text, _ = claude(dmodel, director_system(ctx), f"감정감수자 의견을 반영해 아래 컷들만 고쳐서 같은 형식으로 다시 주세요.\n{fix_text}\n\n[대본]\n{script['content']}",
+    for i in range(0, len(fixes), 5):
+        part = fixes[i:i + 5]
+        progress(f"감독이 감수 의견을 반영해 고치는 중 ({i + len(part)}/{len(fixes)})")
+        fix_text = json.dumps([{"cut": c, "review": verdicts[(int(c['scene_no']), int(c['cut_no']))]} for c in part], ensure_ascii=False)
+        scs = {int(c["scene_no"]) for c in part}
+        src = "\n\n".join(b for n, _, b in all_sc if n in scs or n == 0)
+        text, _ = claude(dmodel, director_system(ctx), f"감정감수자 의견을 반영해 아래 컷들만 고쳐서 같은 형식으로 다시 주세요.\n{fix_text}\n\n[대본]\n{src}",
                          max_tokens=12000, stage="cut_card", episode_id=ep, note="감독 감수 반영")
-        fixed = {(int(c.get("scene_no") or 0), int(c.get("cut_no") or 0)): c for c in pick_json(text).get("cuts") or []}
+        fixed = {(int(c.get("scene_no") or 0), int(c.get("cut_no") or 0)): c for c in safe_json(text).get("cuts") or [] if isinstance(c, dict)}
         cuts = [fixed.get((int(c["scene_no"]), int(c["cut_no"])), c) for c in cuts]
     by_scene = {}
     for c in cuts:
-        k = (int(c["scene_no"]), int(c["cut_no"]))
+        k = (int(c.get("scene_no") or 0), int(c.get("cut_no") or 0))
         r = verdicts.get(k) or {}
-        c["review"] = {"verdict": "revised" if r.get("verdict") == "fix" else (r.get("verdict") or "pass"),
+        c["review"] = {"verdict": "revised" if r.get("verdict") == "fix" else (r.get("verdict") or ("pass" if verdicts else "skipped")),
                        "issues": r.get("issues") or [], "fix": r.get("fix")}
         c["reference_names"] = has_images(ctx, c.get("reference_names"))
         c["seconds"] = max(4, min(15, int(c.get("seconds") or 10)))
         c["resolution"] = setting(ctx, "generation", "resolution", "480p")
         c["est_usd"] = est_cut_usd(ctx, c["seconds"], c["reference_names"])
-        by_scene.setdefault(int(c["scene_no"]), []).append(c)
+        by_scene.setdefault(k[0], []).append(c)
     n = 0
     for sc, cs in sorted(by_scene.items()):
         n += rpc("agent_save_cuts", p_token=TOKEN, p_episode=ep, p_version=script["id"], p_scene=sc, p_cuts=cs) or 0
     total = sum(c.get("est_usd") or 0 for c in cuts)
-    if not scenes and plan.get("end_state"):
+    if not want_set and end_state:
         try:
-            k = rpc("agent_add_continuity", p_token=TOKEN, p_episode=ep, p_items=plan["end_state"], p_source="감독(컷 설계)")
+            k = rpc("agent_add_continuity", p_token=TOKEN, p_episode=ep, p_items=end_state, p_source="감독(컷 설계)")
             log(f"연속성 기록 {k}건(이 화가 끝났을 때 상태)")
         except Exception as ex:
             log(f"연속성 기록 실패: {ex}")
     if setting(ctx, "generation", "auto_prep", True):
         for sc in sorted(by_scene):
             rpc("agent_add_task", p_token=TOKEN, p={"kind": "prep_cut", "episode_id": ep, "scene_no": sc, "payload": {}})
-    notify(f"{e.get('number')}화 컷 설계 완료", f"씬 {len(by_scene)}개 · 컷 {n}개 · 감수 수정 {len(fixes)}건\n"
-           f"영상 생성 예상 ${total:.2f}. 제작 탭에서 확인하고 생성 승인을 눌러 주세요.")
-    return f"씬 {len(by_scene)}개 · 컷 {n}개 설계 (감수 수정 {len(fixes)}건) · 생성 예상 ${total:.2f}"
+    if failed:
+        nos = [int(re.search(r"S#(\d+)", f).group(1)) for f in failed]
+        if not p.get("retry_scenes"):   # 실패한 씬만 한 번 자동으로 다시(그 뒤엔 대표가 다시 시도)
+            rpc("agent_add_task", p_token=TOKEN, p={"kind": "director", "episode_id": ep,
+                "payload": {"script_version_id": script["id"], "scenes": nos, "retry_scenes": True}})
+            notify(f"{epno}화 컷 설계: 씬 {len(by_scene)}개 완료, {len(failed)}개는 다시 시도 중", "\n".join(failed[:5]), "warning")
+        else:
+            raise RuntimeError(f"씬별 결과 — 씬 {len(by_scene)}개는 설계·저장했고, 아래 씬은 두 번(자동 재시도 포함) 실패했습니다.\n" + "\n".join(failed[:8])
+                               + "\n이렇게 하세요: 다시 시도(실패한 씬만 다시 합니다). 같은 씬이 계속 실패하면 대본 탭에서 그 씬을 둘로 나누세요.")
+    if not failed:
+        notify(f"{epno}화 컷 설계 완료", f"씬 {len(by_scene)}개 · 컷 {n}개 · 감수 수정 {len(fixes)}건\n"
+               f"영상 생성 예상 ${total:.2f}. 제작 탭에서 확인하고 생성 승인을 눌러 주세요.")
+    return f"씬 {len(by_scene)}개 · 컷 {n}개 설계 (감수 수정 {len(fixes)}건) · 생성 예상 ${total:.2f}" + (f" · 실패 씬 {len(failed)}개는 다시 시도 중" if failed else "")
 
 
 def director_revise(t, cut_id):

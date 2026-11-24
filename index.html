@@ -202,7 +202,14 @@
   .desk { border: 1px solid var(--line); border-radius: 8px; padding: 8px; } .dtask { border-top: 1px dashed var(--line); padding: 4px 0; margin-top: 4px; font-size: 13px; }
   .pkgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; margin-top: 8px; }
   .pk { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 0; cursor: pointer; color: var(--ink); } .pk.on { border-color: var(--accent); background: var(--accent-soft); }
-  .pk input { width: auto; margin-right: 4px; }
+  .pk input { width: auto; margin-right: 4px; } .pk { position: relative; } .pkhold { position: absolute; right: 8px; top: 6px; font-size: 12px; cursor: pointer; }
+  .zoombox { position: fixed; inset: 0; background: rgba(0,0,0,.82); z-index: 9999; display: flex; align-items: center; justify-content: center; }
+  .zoomin { position: relative; max-width: 94vw; max-height: 94vh; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .zoomin img { max-width: 94vw; max-height: 82vh; object-fit: contain; border-radius: 6px; background: #111; }
+  .zoombar { display: flex; gap: 8px; align-items: center; color: #fff; font-size: 14px; flex-wrap: wrap; justify-content: center; }
+  .zarrow { position: fixed; top: 50%; transform: translateY(-50%); font-size: 48px; line-height: 1; background: rgba(255,255,255,.12); color: #fff; border: 0; border-radius: 8px; padding: 6px 14px; cursor: pointer; }
+  .zarrow.l { left: 12px; } .zarrow.r { right: 12px; }
+  .pdimg img, .thumbs img, .bimgs img, .tmpimg img, .kf img { cursor: zoom-in; }
   /* 편집실 */
   .ed-empty { text-align: center; padding: 30px 16px; } .ed-empty .row { justify-content: center; }
   .ed-top { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; }
@@ -317,7 +324,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.14.3"
+VERSION = "1.15.0"
 
 import base64
 import glob
@@ -827,6 +834,7 @@ def claude(model, system, content, *, max_tokens=8000, stage="other", episode_id
                     + qty["output_tokens"] * pout / 1e6, 6)
     cid = log_cost(stage, "anthropic", model, qty, usd=usd, episode_id=episode_id, scene_no=scene_no, cut_id=cut_code,
                    outcome="success", note=note, job_id=(CURRENT.get("task") or {}).get("id"))
+    CURRENT["last_stop"] = data.get("stop_reason")
     if data.get("stop_reason") == "max_tokens":
         log("주의: Claude 답이 길이 제한에 걸려 잘렸습니다")
     return text, cid
@@ -1065,8 +1073,44 @@ def has_images(ctx, names):
     return out
 
 
+SCENE_HEAD = re.compile(r"^[ \t]*[*#>\[]*[ \t]*S[ \t]*#[ \t]*(\d+)", re.M)
+
+
+def split_scenes(content):
+    """정리본을 씬(S#번호) 단위로 나눈다. [(번호, 머리줄, 본문)] — 씬 표시가 없으면 통째로 하나."""
+    marks = list(SCENE_HEAD.finditer(content or ""))
+    if not marks:
+        return [(0, "", content or "")]
+    out = []
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(content)
+        body = content[m.start():end].strip()
+        out.append((int(m.group(1)), body.splitlines()[0][:120], body))
+    return out
+
+
+def scene_groups(scenes, max_n=3, max_chars=5000):
+    groups, cur, size = [], [], 0
+    for s in scenes:
+        if cur and (len(cur) >= max_n or size + len(s[2]) > max_chars):
+            groups.append(cur); cur, size = [], 0
+        cur.append(s); size += len(s[2])
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def first_line_of(body):
+    for ln in body.splitlines()[1:]:
+        if ln.strip():
+            return ln.strip()[:60]
+    return ""
+
+
 @task("director")
 def t_director(t):
+    """감독 컷 설계. 대본을 씬 몇 개씩 나눠 설계한다(한 번에 다 하면 답이 길이 제한에 걸려 잘림).
+    한 묶음이 실패하면 씬 하나씩 다시, 그래도 실패한 씬은 어느 화·어느 씬·왜 실패했는지 남긴다."""
     ep = t["episode_id"]
     p = t.get("payload") or {}
     if p.get("cut_id"):
@@ -1076,82 +1120,137 @@ def t_director(t):
     if not script:
         raise RuntimeError("확정된 대본이 없습니다. 대본 탭에서 정리본을 확정해 주세요")
     e = ctx.get("episode") or {}
+    epno = int(e.get("number") or 0)
     dmodel = setting(ctx, "generation", "claude_director", "claude-opus-5-5")
     rmodel = setting(ctx, "generation", "claude_reviewer", "claude-sonnet-5-5")
-    scenes = p.get("scenes")
-    want = f"씬 {', '.join(map(str, scenes))}만" if scenes else "모든 씬을"
-    progress(f"감독이 {e.get('number')}화 {want} 컷으로 나누는 중")
-    user = f"""{e.get('number')}화 「{e.get('title') or ''}」 대본 v{script.get('version_no')}의 {want} 컷으로 설계해 주세요.
-컷 code는 E{int(e.get('number') or 0):02d}-S씬번호2자리-C컷번호2자리.
-
-[대표 연출 메모 — 필수는 반드시 반영]
+    all_sc = split_scenes(script["content"])
+    want_set = set(int(x) for x in (p.get("scenes") or []))
+    todo = [s for s in all_sc if not want_set or s[0] in want_set or s[0] == 0]
+    if not todo:
+        raise RuntimeError(f"{epno}화 확정 대본에 요청한 씬 {sorted(want_set)}이(가) 없습니다. 대본 탭에서 씬 번호(S#)를 확인해 주세요")
+    heads = "\n".join(h for _, h, _ in all_sc if h)
+    base = f"""[대표 연출 메모 — 필수는 반드시 반영]
 {notes_text(ctx)}
 
 [직전 화가 끝났을 때 상태 — 이 화 첫 등장은 여기서 이어진다(대본에 바뀐다는 말이 없으면 헤어·의상·상처·소지품 유지)]
 {continuity_text(ctx)}
 
-[연속성 기록]
-JSON 최상위에 "end_state"도 함께 준다: 이 화가 끝났을 때 주요 인물·소품의 상태(헤어·의상·상처·화장·들고 있는 물건·장소).
-형식: "end_state": [{{"name": "바이블 이름 그대로", "scene_no": 마지막 등장 씬, "state": "한국어 한 줄"}}]. 다음 화 감독이 이어 받는다.
+[이 화 전체 씬 목록(흐름 참고)]
+{heads or '-'}"""
 
-[대본]
-{script['content']}"""
-    text, _ = claude(dmodel, director_system(ctx), user, max_tokens=24000, stage="cut_card", episode_id=ep, note="감독 컷 설계")
-    plan = pick_json(text)
-    cuts = plan.get("cuts") or []
-    if not cuts:   # 답이 잘리거나 형식이 깨졌으면 한 번 더: JSON만, 더 길게
-        progress("감독 답이 형식에 맞지 않아 한 번 더 요청하는 중")
-        text, _ = claude(dmodel, director_system(ctx), user + "\n\n[중요] 설명 없이 <json>{\"cuts\": [...], \"end_state\": [...]}</json> 형식 하나만 답한다. 프롬프트는 간결하게.",
-                         max_tokens=32000, stage="cut_card", episode_id=ep, note="감독 컷 설계(다시 요청)")
-        plan = pick_json(text)
-        cuts = plan.get("cuts") or []
-    if scenes:
-        cuts = [c for c in cuts if int(c.get("scene_no") or 0) in set(int(s) for s in scenes)]
+    def ask(group, tight=False):
+        nos = [n for n, _, _ in group]
+        prev = next((b for n, _, b in reversed(all_sc) if nos[0] and n < nos[0]), "")
+        label = "모든 씬" if nos == [0] else "씬 " + ", ".join(map(str, nos))
+        user = f"""{epno}화 「{e.get('title') or ''}」 대본 v{script.get('version_no')}의 {label}만 컷으로 설계해 주세요.
+컷 code는 E{epno:02d}-S씬번호2자리-C컷번호2자리.
+
+{base}
+
+[연속성 기록]
+JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주요 인물·소품의 상태(헤어·의상·상처·화장·들고 있는 물건·장소).
+형식: "end_state": [{{"name": "바이블 이름 그대로", "scene_no": 마지막 등장 씬, "state": "한국어 한 줄"}}].
+
+{('[바로 앞 씬(이어지는 흐름 참고, 설계하지 말 것)]' + chr(10) + prev[:3000] + chr(10) + chr(10)) if prev else ''}[설계할 대본]
+{chr(10).join(b for _, _, b in group)}"""
+        if tight:
+            user += "\n\n[중요] 지난번 답이 너무 길어 잘렸거나 형식이 깨졌다. 설명 없이 <json>{\"cuts\": [...], \"end_state\": [...]}</json> 하나만. 프롬프트·메모는 짧고 핵심만."
+        progress(f"감독이 {epno}화 {label}을(를) 컷으로 나누는 중")
+        text, _ = claude(dmodel, director_system(ctx), user, max_tokens=16000, stage="cut_card", episode_id=ep,
+                         note=f"감독 컷 설계 {label}")
+        d = safe_json(text)
+        cuts = [c for c in (d.get("cuts") or []) if isinstance(c, dict)]
+        if nos != [0]:
+            cuts = [c for c in cuts if int(c.get("scene_no") or 0) in nos]
+        if cuts:
+            return cuts, d.get("end_state") or [], None
+        if CURRENT.get("last_stop") == "max_tokens":
+            why = "감독 답이 길이 제한에 걸려 중간에 잘렸습니다(이 씬의 컷 설계가 너무 길어짐)"
+        elif not d:
+            why = f"감독이 정해진 형식(JSON) 대신 다른 답을 했습니다. 감독 답 앞부분(대본 아님): {text.strip()[:120]!r}"
+        else:
+            why = "감독 답에 이 씬의 컷이 비어 있었습니다(씬 번호를 다르게 적었을 수 있음)"
+        return [], [], why
+
+    cuts, end_state, failed = [], [], []
+    for g in scene_groups(todo):
+        cs, es, why = ask(g)
+        if not cs:   # 묶음이 실패하면 씬 하나씩, 그래도 안 되면 더 짧게 한 번 더
+            for one in g:
+                cs1, es1, why1 = ask([one])
+                if not cs1:
+                    cs1, es1, why1 = ask([one], tight=True)
+                if cs1:
+                    cuts += cs1; end_state += es1
+                else:
+                    n, h, b = one
+                    failed.append(f"{epno}화 S#{n} 「{h.split('|')[2].strip() if h.count('|') >= 2 else h}」"
+                                  f"(첫 줄: {first_line_of(b) or '-'}) — 원인: {why1}. 씬 하나로 줄여 두 번 더 시도했지만 같았습니다.")
+            continue
+        cuts += cs; end_state += es
     if not cuts:
-        raise RuntimeError(f"감독이 컷을 만들지 못했습니다(답이 형식에 맞지 않음, 두 번 시도). 답 앞부분: {text[:160]!r}")
+        raise RuntimeError("씬별 결과 — 감독이 한 씬도 설계하지 못했습니다.\n" + "\n".join(failed[:8])
+                           + "\n이렇게 하세요: 다시 시도. 같은 씬이 계속 실패하면 대본 탭에서 그 씬을 둘로 나누거나(긴 씬) 씬 머리(S#번호)를 확인하세요.")
     progress(f"감정감수자가 컷 {len(cuts)}개를 감수하는 중")
-    rv = review_cuts(ctx, ep, cuts, rmodel)
-    verdicts = {(int(r.get("scene_no") or 0), int(r.get("cut_no") or 0)): r for r in rv.get("cuts") or []}
-    fixes = [c for c in cuts if (verdicts.get((int(c["scene_no"]), int(c["cut_no"]))) or {}).get("verdict") == "fix"]
+    try:
+        rv = review_cuts(ctx, ep, cuts, rmodel)
+    except Exception as ex:   # 감수가 깨져도 설계는 살린다(감수는 생략하고 기록)
+        log(f"감정감수자 감수 실패(설계는 저장): {ex}")
+        rv = {}
+    verdicts = {(int(r.get("scene_no") or 0), int(r.get("cut_no") or 0)): r for r in rv.get("cuts") or [] if isinstance(r, dict)}
+    fixes = [c for c in cuts if (verdicts.get((int(c.get("scene_no") or 0), int(c.get("cut_no") or 0))) or {}).get("verdict") == "fix"]
     for l in rv.get("lessons") or []:
         try:
             rpc("agent_add_lesson", p_token=TOKEN, p_lesson={**l, "series_id": (ctx.get("series") or {}).get("id"), "sources": ["감정감수자"]})
         except Exception as ex:
             log(f"교훈 기록 실패: {ex}")
-    if fixes:
-        progress(f"감독이 감수 의견 {len(fixes)}건을 반영해 고치는 중")
-        fix_text = json.dumps([{"cut": c, "review": verdicts[(int(c['scene_no']), int(c['cut_no']))]} for c in fixes], ensure_ascii=False)
-        text, _ = claude(dmodel, director_system(ctx), f"감정감수자 의견을 반영해 아래 컷들만 고쳐서 같은 형식으로 다시 주세요.\n{fix_text}\n\n[대본]\n{script['content']}",
+    for i in range(0, len(fixes), 5):
+        part = fixes[i:i + 5]
+        progress(f"감독이 감수 의견을 반영해 고치는 중 ({i + len(part)}/{len(fixes)})")
+        fix_text = json.dumps([{"cut": c, "review": verdicts[(int(c['scene_no']), int(c['cut_no']))]} for c in part], ensure_ascii=False)
+        scs = {int(c["scene_no"]) for c in part}
+        src = "\n\n".join(b for n, _, b in all_sc if n in scs or n == 0)
+        text, _ = claude(dmodel, director_system(ctx), f"감정감수자 의견을 반영해 아래 컷들만 고쳐서 같은 형식으로 다시 주세요.\n{fix_text}\n\n[대본]\n{src}",
                          max_tokens=12000, stage="cut_card", episode_id=ep, note="감독 감수 반영")
-        fixed = {(int(c.get("scene_no") or 0), int(c.get("cut_no") or 0)): c for c in pick_json(text).get("cuts") or []}
+        fixed = {(int(c.get("scene_no") or 0), int(c.get("cut_no") or 0)): c for c in safe_json(text).get("cuts") or [] if isinstance(c, dict)}
         cuts = [fixed.get((int(c["scene_no"]), int(c["cut_no"])), c) for c in cuts]
     by_scene = {}
     for c in cuts:
-        k = (int(c["scene_no"]), int(c["cut_no"]))
+        k = (int(c.get("scene_no") or 0), int(c.get("cut_no") or 0))
         r = verdicts.get(k) or {}
-        c["review"] = {"verdict": "revised" if r.get("verdict") == "fix" else (r.get("verdict") or "pass"),
+        c["review"] = {"verdict": "revised" if r.get("verdict") == "fix" else (r.get("verdict") or ("pass" if verdicts else "skipped")),
                        "issues": r.get("issues") or [], "fix": r.get("fix")}
         c["reference_names"] = has_images(ctx, c.get("reference_names"))
         c["seconds"] = max(4, min(15, int(c.get("seconds") or 10)))
         c["resolution"] = setting(ctx, "generation", "resolution", "480p")
         c["est_usd"] = est_cut_usd(ctx, c["seconds"], c["reference_names"])
-        by_scene.setdefault(int(c["scene_no"]), []).append(c)
+        by_scene.setdefault(k[0], []).append(c)
     n = 0
     for sc, cs in sorted(by_scene.items()):
         n += rpc("agent_save_cuts", p_token=TOKEN, p_episode=ep, p_version=script["id"], p_scene=sc, p_cuts=cs) or 0
     total = sum(c.get("est_usd") or 0 for c in cuts)
-    if not scenes and plan.get("end_state"):
+    if not want_set and end_state:
         try:
-            k = rpc("agent_add_continuity", p_token=TOKEN, p_episode=ep, p_items=plan["end_state"], p_source="감독(컷 설계)")
+            k = rpc("agent_add_continuity", p_token=TOKEN, p_episode=ep, p_items=end_state, p_source="감독(컷 설계)")
             log(f"연속성 기록 {k}건(이 화가 끝났을 때 상태)")
         except Exception as ex:
             log(f"연속성 기록 실패: {ex}")
     if setting(ctx, "generation", "auto_prep", True):
         for sc in sorted(by_scene):
             rpc("agent_add_task", p_token=TOKEN, p={"kind": "prep_cut", "episode_id": ep, "scene_no": sc, "payload": {}})
-    notify(f"{e.get('number')}화 컷 설계 완료", f"씬 {len(by_scene)}개 · 컷 {n}개 · 감수 수정 {len(fixes)}건\n"
-           f"영상 생성 예상 ${total:.2f}. 제작 탭에서 확인하고 생성 승인을 눌러 주세요.")
-    return f"씬 {len(by_scene)}개 · 컷 {n}개 설계 (감수 수정 {len(fixes)}건) · 생성 예상 ${total:.2f}"
+    if failed:
+        nos = [int(re.search(r"S#(\d+)", f).group(1)) for f in failed]
+        if not p.get("retry_scenes"):   # 실패한 씬만 한 번 자동으로 다시(그 뒤엔 대표가 다시 시도)
+            rpc("agent_add_task", p_token=TOKEN, p={"kind": "director", "episode_id": ep,
+                "payload": {"script_version_id": script["id"], "scenes": nos, "retry_scenes": True}})
+            notify(f"{epno}화 컷 설계: 씬 {len(by_scene)}개 완료, {len(failed)}개는 다시 시도 중", "\n".join(failed[:5]), "warning")
+        else:
+            raise RuntimeError(f"씬별 결과 — 씬 {len(by_scene)}개는 설계·저장했고, 아래 씬은 두 번(자동 재시도 포함) 실패했습니다.\n" + "\n".join(failed[:8])
+                               + "\n이렇게 하세요: 다시 시도(실패한 씬만 다시 합니다). 같은 씬이 계속 실패하면 대본 탭에서 그 씬을 둘로 나누세요.")
+    if not failed:
+        notify(f"{epno}화 컷 설계 완료", f"씬 {len(by_scene)}개 · 컷 {n}개 · 감수 수정 {len(fixes)}건\n"
+               f"영상 생성 예상 ${total:.2f}. 제작 탭에서 확인하고 생성 승인을 눌러 주세요.")
+    return f"씬 {len(by_scene)}개 · 컷 {n}개 설계 (감수 수정 {len(fixes)}건) · 생성 예상 ${total:.2f}" + (f" · 실패 씬 {len(failed)}개는 다시 시도 중" if failed else "")
 
 
 def director_revise(t, cut_id):
@@ -5659,7 +5758,7 @@ async function openPhotoDesign(entry, cur, fresh) {
       <button class="btn small" id="pdNew-${entry.id}" style="margin-left:auto">새로 만들기</button></div>
     ${busy ? `<p><span class="spin"></span>${d.status === 'training' ? '고른 사진으로 얼굴을 학습하고 같은 얼굴의 기준 사진을 만드는 중입니다. 5~20분 걸릴 수 있습니다.' : 'Higgsfield에서 후보를 만드는 중입니다.'} 끝나면 알림이 옵니다.</p>` : ''}
     ${d.status === 'failed' ? `<div class="msg err">${esc(d.error || '실패')}</div>` : ''}
-    ${d.status === 'ready' ? `<p class="quiet" style="margin:4px 0">${isChar ? '같은 사람으로 쓸 사진을 1~4장 고르세요(여러 장이면 얼굴이 더 안정적).' : '바이블에 넣을 사진을 고르세요.'}</p>
+    ${d.status === 'ready' ? `<p class="quiet" style="margin:4px 0">${isChar ? '같은 사람으로 쓸 사진을 1~4장 고르세요(여러 장이면 얼굴이 더 안정적). 사진을 누르면 크게 보고, 크게 본 채로 고를 수 있습니다. 고르기는 체크칸.' : '바이블에 넣을 사진을 고르세요.'}</p>
       <div class="pdgrid">${(d.previews || []).map(x => img(x, true)).join('')}</div>
       <div class="row" style="margin-top:8px"><button class="btn small primary" id="pdPick-${entry.id}">${isChar ? '이 얼굴로 학습 + 기준 사진 만들기' : '바이블에 적용'}</button>
         ${isChar ? '<span class="quiet">얼굴 학습 1회 + 기준 사진 4장</span>' : ''}</div>` : ''}
@@ -5975,6 +6074,8 @@ async function loadInbox() {
     .eq('status', 'failed').gte('created_at', since).order('created_at', { ascending: false }).limit(300)).catch(() => []);
   const pds2 = fails.some(f => f.payload?.design_id) ? await q(S.sb.from('photo_designs').select('id,entry_id').in('id', fails.map(f => f.payload?.design_id).filter(Boolean))).catch(() => []) : [];
   const epOf = id => eps.find(e => e.id === id), entOf = id => ents.find(e => e.id === id);
+  const serTitles = {}; eps.forEach(e => { if (e.series?.title) serTitles[e.series_id] = e.series.title; });
+  const serName = sid => serTitles[sid] ? `[${serTitles[sid]}] ` : '';
   const epName = e => e ? `${e.series?.title || ''} ${e.number}화` : '';
   const lastConf = {}; confs.forEach(c => { const t = c.confirmed_at || c.created_at; if (!lastConf[c.episode_id] || t > lastConf[c.episode_id]) lastConf[c.episode_id] = t; });
   const items = [];
@@ -5985,13 +6086,13 @@ async function loadInbox() {
   props.forEach(p => items.push({ src: 'script', type: 'story', id: p.id, key: 'p' + p.id, at: p.created_at,
     title: `${epName(epOf(p.episode_id))}${p.scene_no ? ' S#' + p.scene_no : ''} 흐름 변경: ${PKIND[p.kind] || p.kind}`, sub: p.proposed_text + (p.reason ? ` · 이유: ${p.reason}` : ''), tab: 'scripts', ep: p.episode_id }));
   bvers.forEach(v => { const e = entOf(v.entry_id); items.push({ src: 'bible', type: 'bible', id: v.id, key: 'b' + v.entry_id, at: v.created_at,
-    title: `${e?.name || '항목'} (${BIBLE_CAT[e?.category] || ''}) v${v.version_no || ''} 수정안`, sub: v.change_reason || (v.description || '').slice(0, 120), tab: 'bible', ser: e?.series_id }); });
+    title: `${serName(e?.series_id)}${e?.name || '항목'} (${BIBLE_CAT[e?.category] || ''}) v${v.version_no || ''} 수정안`, sub: v.change_reason || (v.description || '').slice(0, 120), tab: 'bible', ser: e?.series_id }); });
   const seen = new Set();
   fails.forEach(f => {
     const p = f.payload || {}, k = f.kind + '|' + (p.version_id || p.entry_id || p.design_id || f.cut_id || f.episode_id || f.series_id || f.id);
     if (seen.has(k)) return; seen.add(k);
     const ent = entOf(p.entry_id || pds2.find(d => d.id === p.design_id)?.entry_id), ep = epOf(f.episode_id);
-    const target = ent ? `${ent.name}${BIBLE_CAT[ent.category] ? ' (' + BIBLE_CAT[ent.category] + ')' : ''}` : ep ? epName(ep) + (f.scene_no ? ` S${f.scene_no}` : '') : '';
+    const target = ent ? `${serName(ent.series_id)}${ent.name}${BIBLE_CAT[ent.category] ? ' (' + BIBLE_CAT[ent.category] + ')' : ''}` : ep ? epName(ep) + (f.scene_no ? ` S${f.scene_no}` : '') : '';
     items.push({ src: 'fail', type: 'fail', id: f.id, key: 'f' + k, at: f.finished_at || f.created_at, task: f,
       title: `${TASK_LABEL[f.kind] || f.kind} 실패${target ? ' — ' + target : ''}`, sub: (() => { const x = explainFail(f.kind, f.error); return `${x.what} → ${x.how} (원인: ${(f.error || '기록 없음').slice(0, 120)})`; })(),
       tab: ['bible_prompt', 'photo_describe', 'bible_place', 'photo_design', 'photo_set', 'bible_extract', 'bible_suggest', 'voice_cast', 'voice_design'].includes(f.kind) ? 'bible'
@@ -6649,10 +6750,36 @@ async function viewCosts(main) {
 // ------------------------------------------------------------------
 // 활동 기록
 // ------------------------------------------------------------------
+// 보류함: 만들다 멈춘 시리즈·화. 자료는 그대로 두고, 꺼내면 이어서 만든다.
+async function renderShelf() {
+  const box = $('#shelfBox'); if (!box) return;
+  const [sers, eps] = await Promise.all([
+    q(S.sb.from('series').select('id,title,on_hold,held_at,hold_note').eq('on_hold', true)).catch(() => []),
+    q(S.sb.from('episodes').select('id,number,title,series_id,held_at,hold_note,series(title)').eq('status', 'on_hold').order('number')).catch(() => []),
+  ]);
+  const ids = eps.map(e => e.id);
+  const [vers, cuts] = ids.length ? await Promise.all([
+    q(S.sb.from('script_versions').select('episode_id,status').in('episode_id', ids)),
+    q(S.sb.from('production_cuts').select('episode_id,status').in('episode_id', ids).neq('status', 'cancelled'))]) : [[], []];
+  const where = e => { const c = cuts.filter(x => x.episode_id === e.id); const v = vers.filter(x => x.episode_id === e.id);
+    return c.length ? `컷 ${c.length}개(통과 ${c.filter(x => x.status === 'passed').length})까지 만듦` : v.some(x => x.status === 'confirmed') ? '대본 확정까지' : v.length ? '원고만' : '대본 없음'; };
+  box.innerHTML = `<div class="card"><div class="row"><b>보류함</b><span class="quiet">만들다 멈춘 시리즈·화를 여기 영구 보관합니다. 대본·바이블·컷·영상은 그대로 있고, 꺼내면 멈춘 곳부터 이어서 만듭니다. 보류는 제작 탭(시리즈 옆 "이 시리즈 보류", 화 카드의 "보류")에서.</span></div>
+    ${!sers.length && !eps.length ? '<p class="quiet" style="margin:6px 0 0">보류한 것이 없습니다.</p>' : ''}
+    ${sers.map(s => `<div class="ibrow" style="grid-template-columns:58px 1fr auto">${pill('시리즈', 'warn')}<div><b>${esc(s.title)}</b><div class="quiet">${fmt(s.held_at)} 보류${s.hold_note ? ' · ' + esc(s.hold_note) : ''}</div></div>
+      <div class="row"><button class="btn small" data-shopen="${esc(s.id)}">제작 탭에서 보기</button><button class="btn small primary" data-shun="series:${esc(s.id)}">꺼내기</button></div></div>`).join('')}
+    ${eps.map(e => `<div class="ibrow" style="grid-template-columns:58px 1fr auto">${pill('화')}<div><b>${esc(e.series?.title || '')} ${e.number}화</b> ${esc(e.title || '')}<div class="quiet">${fmt(e.held_at)} 보류 · ${esc(where(e))}${e.hold_note ? ' · ' + esc(e.hold_note) : ''}</div></div>
+      <div class="row"><button class="btn small" data-shopen="${esc(e.series_id)}" data-shep="${esc(e.id)}">제작 탭에서 보기</button><button class="btn small primary" data-shun="episode:${esc(e.id)}">꺼내기</button></div></div>`).join('')}</div>`;
+  box.querySelectorAll('[data-shun]').forEach(b => b.onclick = guard(async () => {
+    const [k, id] = b.dataset.shun.split(':'); await q(S.sb.rpc('owner_hold', { p_kind: k, p_id: id, p_on: false })); toast('꺼냈습니다. 제작 탭에서 이어서 만들 수 있어요'); renderShelf();
+  }));
+  box.querySelectorAll('[data-shopen]').forEach(b => b.onclick = () => { S.seriesId = b.dataset.shopen; S.episodeId = b.dataset.shep || null; go('production'); });
+}
 async function viewLog(main) {
   const devices = await q(S.sb.from('devices').select('name').order('name'));
   main.innerHTML = `
-  <h2>활동 기록</h2>
+  <h2>기록</h2>
+  <div id="shelfBox"></div>
+  <h3 style="margin:16px 0 6px">활동 기록</h3>
   <div class="card row">
     <select id="fdev" style="width:auto"><option value="">모든 기기</option>${devices.map(d => `<option>${esc(d.name)}</option>`).join('')}</select>
     <select id="fwho" style="width:auto"><option value="">모든 주체</option><option value="대표">대표</option><option value="!대표">AI·에이전트</option></select>
@@ -6661,6 +6788,7 @@ async function viewLog(main) {
   </div>
   <div class="card" id="logBox"><p class="quiet">불러오는 중…</p></div>
   <div class="row"><button class="btn" id="fmore">더 보기</button></div>`;
+  renderShelf().catch(console.error);
   let limit = 100;
   const load = guard(async () => {
     let qy = S.sb.from('v_activity').select('*').limit(limit);
@@ -6764,11 +6892,48 @@ const usdKrw = (usd, rate) => usd == null ? '-' : won(usd * (rate || 1340));
 
 
 // ------------------------------------------------------------------
+// 사진 크게 보기: 바이블(실사 사진·얼굴 고정 후보, 기준 사진, 임시 사진)·제작 키프레임의 사진을 누르면 크게.
+// ←/→로 같은 묶음 넘기기, 고를 수 있는 사진이면 크게 본 채로 "이 사진 고르기"
+// ------------------------------------------------------------------
+const ZOOM_SCOPE = '.pdimg, .thumbs, .bimgs, .tmpimg, .kf';
+function openZoom(imgs, i) {
+  document.getElementById('zoomBox')?.remove();
+  const box = document.createElement('div'); box.id = 'zoomBox'; box.className = 'zoombox';
+  const show = () => {
+    const im = imgs[i], wrap = im.closest('label, a, div'), cb = wrap?.querySelector('input[type=checkbox]');
+    const label = wrap?.querySelector('span:not(.ph)')?.textContent || '';
+    box.innerHTML = `<div class="zoomin"><img src="${esc(im.src)}" alt="">
+      <div class="zoombar"><span>${i + 1} / ${imgs.length}${label ? ' · ' + esc(label) : ''}</span>
+        ${cb ? `<button class="btn small ${cb.checked ? 'primary' : ''}" id="zPick">${cb.checked ? '✓ 고름 (누르면 빼기)' : '이 사진 고르기'}</button>` : ''}
+        <a class="btn small" href="${esc(im.src)}" target="_blank" rel="noopener">원본 새 창</a>
+        <button class="btn small" id="zClose">닫기 (Esc)</button></div>
+      ${imgs.length > 1 ? '<button class="zarrow l" id="zPrev">‹</button><button class="zarrow r" id="zNext">›</button>' : ''}</div>`;
+    box.querySelector('#zClose').onclick = close;
+    const zp = box.querySelector('#zPick'); if (zp) zp.onclick = () => { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change', { bubbles: true })); cb.closest('label')?.classList.toggle('on', cb.checked); show(); };
+    const pv = box.querySelector('#zPrev'); if (pv) pv.onclick = ev => { ev.stopPropagation(); i = (i - 1 + imgs.length) % imgs.length; show(); };
+    const nx = box.querySelector('#zNext'); if (nx) nx.onclick = ev => { ev.stopPropagation(); i = (i + 1) % imgs.length; show(); };
+  };
+  const key = ev => { if (ev.key === 'Escape') close(); else if (ev.key === 'ArrowLeft') box.querySelector('#zPrev')?.click(); else if (ev.key === 'ArrowRight') box.querySelector('#zNext')?.click(); };
+  function close() { box.remove(); document.removeEventListener('keydown', key); }
+  box.onclick = ev => { if (ev.target === box) close(); };
+  document.addEventListener('keydown', key);
+  document.body.appendChild(box); show();
+}
+document.addEventListener('click', ev => {
+  const im = ev.target.closest('img'); if (!im || !im.closest(ZOOM_SCOPE) || im.closest('#zoomBox')) return;
+  ev.preventDefault(); ev.stopPropagation();   // 체크박스가 바뀌거나 새 창이 열리지 않게: 크게 보기만
+  const group = im.closest('.pdgrid, .thumbs, .bimgs, .kfs, .card, .vdbox') || im.parentElement;
+  const imgs = [...group.querySelectorAll('img')].filter(x => x.closest(ZOOM_SCOPE));
+  openZoom(imgs, Math.max(0, imgs.indexOf(im)));
+}, true);
+
+// ------------------------------------------------------------------
 // 실패 설명: 원인 문구를 보고 "무슨 뜻인지"와 "대표가 할 일"을 알려 준다(버튼: 다시 시도·설정·대본·바이블)
 // ------------------------------------------------------------------
 function explainFail(kind, err) {
   const e = String(err || '');
   const R = (what, how, acts) => ({ what, how, acts });
+  if (/^씬별 결과/.test(e)) return R(e.split('\n')[0].replace(/^씬별 결과 — /, ''), '아래 "어느 화·어느 씬·왜"를 확인하세요. 다시 시도하면 실패한 씬만 다시 합니다. 같은 씬이 계속 실패하면 대본 탭에서 그 씬을 둘로 나누세요. ' + e.split('\n').slice(1).filter(l => !/^이렇게 하세요/.test(l)).join(' / '), ['retry', 'scripts']);
   if (/대표님이 쓴 묘사로는/.test(e)) return R('대표님이 바이블에 쓴 묘사가 짧거나 모호해서, 두 번 시도했지만 영어 프롬프트를 만들지 못했습니다.', (e.match(/빠진 것:[^.]*\./) || [''])[0] + ' 바이블에서 그 항목 카드 → 내용 고치기로 한글로 자세히 적어 주세요. 고치면 자동으로 다시 돕니다. ' + (e.match(/예: .*/) || [''])[0], ['bible']);
   if (/묘사와 대본 모두에서/.test(e)) return R('묘사도 짧고 대본에도 이 항목의 생김새가 거의 없어 영어 프롬프트를 만들지 못했습니다(세 번 시도).', '바이블에서 그 항목 묘사를 한글로 자세히 적어 주세요. ' + (e.match(/\(담을 것:[^)]*\)/) || [''])[0], ['bible', 'retry']);
   if (/묘사|프롬프트/.test(e)) return R('바이블 묘사를 영어 프롬프트로 옮기지 못했습니다(예전 방식에서 난 실패).', '다시 시도하면 새 방식으로 돕니다: 한 번 더 시도 → 그래도 안 되면 대본에서 그 항목이 나오는 부분을 읽고 채움. 대표님이 직접 쓴 묘사면 빠진 것을 알려 드립니다.', ['retry', 'bible']);
@@ -6797,7 +6962,7 @@ function failCard(t) {
     <div class="row" style="gap:6px">${pill((TASK_LABEL[t.kind] || t.kind) + ' 실패', 'bad')}<span class="quiet">${esc(agoText(t.finished_at || t.created_at))}${t.scene_no ? ` · S${t.scene_no}` : ''}</span></div>
     <div style="margin-top:4px"><b>무슨 일인가요?</b> ${esc(x.what)}</div>
     <div><b>이렇게 하세요:</b> ${esc(x.how)}</div>
-    <details style="margin-top:2px"><summary class="quiet">원인 원문</summary><div class="quiet" style="white-space:pre-wrap">${esc(t.error || '기록 없음')}</div></details>
+    <details style="margin-top:2px" ${/^씬별 결과/.test(t.error || '') ? 'open' : ''}><summary class="quiet">원인 원문</summary><div class="quiet" style="white-space:pre-wrap">${esc(t.error || '기록 없음')}</div></details>
     <div class="row" style="gap:6px;margin-top:6px">${x.acts.map(a => `<button class="btn small ${a === 'retry' ? 'primary' : ''}" data-fact="${a}">${FAIL_ACT[a]}</button>`).join('')}
       <button class="btn small" data-fact="dismiss" style="margin-left:auto">확인했어요(지우기)</button></div></div>`;
 }
@@ -6820,28 +6985,36 @@ const DESK = [['작가실', ['writers_room', 'bible_extract', 'bible_prompt', 'b
   ['사진·목소리', ['photo_design', 'photo_set', 'voice_design', 'voice_save', 'api_check']], ['편집·보관', ['assemble', 'edit_command', 'bgm', 'store']]];
 async function renderBoard() {
   const box = $('#prodBoard'); if (!box) return;
-  const [open, eps, sers] = await Promise.all([
-    q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,episode_id,series_id,scene_no,cut_id,payload,created_at,started_at,devices(name)').in('status', ['queued', 'running']).order('created_at')),
+  const [all, eps, sers] = await Promise.all([
+    q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,episode_id,series_id,scene_no,cut_id,payload,created_at,started_at,not_before,devices(name)').in('status', ['queued', 'running']).order('created_at')),
     q(S.sb.from('episodes').select('id,number,title,series_id')), q(S.sb.from('series').select('id,title')),
   ]);
   const epOf = id => eps.find(e => e.id === id), serOf = id => sers.find(s => s.id === id);
-  const where = t => { const e = epOf(t.episode_id); const s = serOf(e?.series_id || t.series_id || t.payload?.series_id);
-    return `${s ? s.title : ''}${e ? ` · ${e.number}화` : ''}${t.scene_no ? ` S${t.scene_no}` : ''}`; };
-  const key = t => t.kind + '|' + (t.cut_id || t.payload?.version_id || t.payload?.design_id || t.payload?.entry_id || '') + '|' + (t.episode_id || t.series_id || t.payload?.series_id || '') + '|' + (t.cut_id ? '' : t.scene_no || '');
+  const sidOf = t => epOf(t.episode_id)?.series_id || t.series_id || t.payload?.series_id || null;
+  const where = t => { const e = epOf(t.episode_id); const s = serOf(sidOf(t));
+    return `${S.boardAll && s ? s.title + ' · ' : ''}${e ? `${e.number}화` : '시리즈 공통(바이블 등)'}${t.scene_no ? ` S${t.scene_no}` : ''}`; };
+  const cur = serOf(S.seriesId);
+  // 기본은 지금 고른 시리즈만. 다른 시리즈 일은 한 줄 요약(모든 시리즈 보기로 펼침)
+  const open = S.boardAll ? all : all.filter(t => sidOf(t) === S.seriesId);
+  const others = {}; all.filter(t => sidOf(t) !== S.seriesId).forEach(t => { const n = serOf(sidOf(t))?.title || '시리즈 미정'; others[n] = (others[n] || 0) + 1; });
+  const key = t => t.kind + '|' + (t.cut_id || t.payload?.version_id || t.payload?.design_id || t.payload?.entry_id || '') + '|' + (t.episode_id || sidOf(t) || '') + '|' + (t.cut_id ? '' : t.scene_no || '') + '|' + JSON.stringify(t.payload?.scenes || '');
   const cnt = {}; open.forEach(t => { cnt[key(t)] = (cnt[key(t)] || 0) + 1; });
   const dups = open.filter(t => cnt[key(t)] > 1);
   const running = open.filter(t => t.status === 'running'), queued = open.filter(t => t.status === 'queued');
-  const serNow = [...new Set(open.map(t => serOf(epOf(t.episode_id)?.series_id || t.series_id || t.payload?.series_id)?.title).filter(Boolean))];
+  const later = t => t.status === 'queued' && t.not_before && new Date(t.not_before) > Date.now();
+  const otherLine = Object.keys(others).length ? `다른 시리즈에서도 일하는 중: ${Object.entries(others).map(([n, c]) => `${n} ${c}건`).join(', ')}` : '';
   box.innerHTML = `<div class="card">
-    <div class="row"><b>제작 현황 (모든 시리즈)</b>${pill(`진행 중 ${running.length}`, running.length ? 'warn' : '')}${pill(`대기 ${queued.length}`)}${dups.length ? pill(`중복 ${dups.length}`, 'bad') : ''}
-      <span class="quiet">${serNow.length ? '지금 다루는 시리즈: ' + esc(serNow.join(', ')) : '대기·진행 중인 일이 없습니다'}</span>
-      <button class="btn small" id="pbToggle" style="margin-left:auto">${S.boardOpen ? '접기' : '자세히'}</button></div>
+    <div class="row"><b>제작 현황 — ${S.boardAll ? '모든 시리즈' : esc(cur?.title || '')}</b>${pill(`진행 중 ${running.length}`, running.length ? 'warn' : '')}${pill(`대기 ${queued.length}`)}${dups.length ? pill(`중복 ${dups.length}`, 'bad') : ''}
+      <span class="quiet">${open.length ? '' : '이 시리즈는 대기·진행 중인 일이 없습니다. '}${S.boardAll ? '' : esc(otherLine)}</span>
+      <span style="margin-left:auto" class="row"><label class="quiet" style="margin:0"><input type="checkbox" id="pbAll" ${S.boardAll ? 'checked' : ''} style="width:auto"> 모든 시리즈 보기</label>
+      <button class="btn small" id="pbToggle">${S.boardOpen ? '접기' : '자세히'}</button></span></div>
     ${dups.length ? `<div class="msg warn" style="margin:6px 0 0">같은 일이 두 번 이상 걸려 있습니다(같은 화·같은 작업). 하나만 남기면 비용·시간이 줄어듭니다. <button class="btn small" id="pbDedup">중복 정리(먼저 넣은 것만 남김)</button></div>` : ''}
     ${S.boardOpen ? `<div class="board">${DESK.map(([desk, kinds]) => { const ts = open.filter(t => kinds.includes(t.kind)); return `<div class="desk"><b>${desk}</b> <span class="quiet">${ts.length ? `${ts.filter(t => t.status === 'running').length} 진행 · ${ts.filter(t => t.status === 'queued').length} 대기` : '쉬는 중'}</span>
-      ${ts.map(t => `<div class="dtask">${t.status === 'running' ? '<span class="spin"></span>' : '<span class="quiet">대기</span>'} <b>${esc(where(t) || '시리즈 공통')}</b> · ${esc(TASK_LABEL[t.kind] || t.kind)}${cnt[key(t)] > 1 ? ' ' + pill('중복', 'bad') : ''}
-        <div class="quiet">${esc(t.status === 'running' ? (t.progress || '처리 중') + (t.devices?.name ? ` · ${t.devices.name}` : '') : '요청 ' + agoText(t.created_at))}</div></div>`).join('')}</div>`; }).join('')}</div>` : ''}
+      ${ts.map(t => `<div class="dtask">${t.status === 'running' ? '<span class="spin"></span>' : '<span class="quiet">대기</span>'} <b>${esc(where(t))}</b> · ${esc(TASK_LABEL[t.kind] || t.kind)}${t.payload?.scenes ? ` (씬 ${esc(t.payload.scenes.join(', '))})` : ''}${cnt[key(t)] > 1 ? ' ' + pill('중복', 'bad') : ''}
+        <div class="quiet">${esc(t.status === 'running' ? (t.progress || '처리 중') + (t.devices?.name ? ` · ${t.devices.name}` : '') : later(t) ? `${Math.ceil((new Date(t.not_before) - Date.now()) / 60000)}분 뒤 시작 예정` : '요청 ' + agoText(t.created_at) + ' · 차례 기다리는 중')}</div></div>`).join('')}</div>`; }).join('')}</div>` : ''}
   </div>`;
   $('#pbToggle').onclick = () => { S.boardOpen = !S.boardOpen; renderBoard(); };
+  $('#pbAll').onchange = e => { S.boardAll = e.target.checked; renderBoard(); };
   const dd = $('#pbDedup'); if (dd) dd.onclick = guard(async () => {
     const keep = new Set(), drop = [];
     open.forEach(t => { const k = key(t); if (keep.has(k) && t.status === 'queued') drop.push(t.id); else keep.add(k); });
@@ -6853,7 +7026,9 @@ async function renderBoard() {
 // 제작할 화 고르기: 전체 또는 원하는 화만 골라 작가실 정리(→ 확정 → 컷 설계) 또는 컷 설계를 시작
 async function renderPicker(episodes) {
   const box = $('#prodPick'); if (!box || !episodes.length) return;
-  const ids = episodes.map(e => e.id);
+  const held = episodes.filter(e => e.status === 'on_hold'); const all = episodes; episodes = episodes.filter(e => e.status !== 'on_hold');
+  held.forEach(e => { delete (S.pick || {})[e.id]; });
+  const ids = all.map(e => e.id);
   const [vers, cuts, open] = await Promise.all([
     q(S.sb.from('script_versions').select('episode_id,status').in('episode_id', ids)),
     q(S.sb.from('production_cuts').select('episode_id,status').in('episode_id', ids).neq('status', 'cancelled')),
@@ -6867,15 +7042,28 @@ async function renderPicker(episodes) {
       <button class="btn small" id="pkAll" style="margin-left:auto">전체 선택</button><button class="btn small" id="pkNone">선택 해제</button></div>
     <div class="pkgrid">${episodes.map(e => { const s = st(e); return `<label class="pk ${S.pick[e.id] ? 'on' : ''}"><input type="checkbox" data-pk="${esc(e.id)}" ${S.pick[e.id] ? 'checked' : ''}>
       <b>${e.number}화</b> <span class="quiet">${esc((e.title || '').slice(0, 14))}</span>
+      <a class="quiet pkhold" data-pkhold="${esc(e.id)}" title="이 화 보류(기록 탭 보류함으로)">보류</a>
       <div class="quiet" style="font-size:12px">${s.busy.length ? `<span style="color:var(--warn)">진행 중: ${esc([...new Set(s.busy)].join(', '))}</span>` : s.cuts ? `컷 ${s.cuts} · 통과 ${s.passed}` : s.conf ? '대본 확정 · 컷 전' : s.raw ? '원고만' : '대본 없음'}</div></label>`; }).join('')}</div>
+    ${held.length ? `<div class="row quiet" style="margin-top:6px">보류한 화: ${held.map(e => `<span>${e.number}화${e.hold_note ? ` (${esc(e.hold_note)})` : ''} <a href="#" data-pkun="${esc(e.id)}">꺼내기</a></span>`).join(' · ')}</div>` : ''}
     <div class="row" style="margin-top:8px"><button class="btn primary small" id="pkWr">선택한 화: 작가실 정리부터</button>
       <button class="btn small" id="pkDir">선택한 화: 감독 컷 설계만(확정본 있는 화)</button><span class="quiet" id="pkN"></span></div>
     <p class="quiet" style="margin:4px 0 0">작가실 정리부터: 정리본 → (자동 확정이 켜져 있으면) 확정 → 컷 설계까지 이어집니다. 이미 진행 중인 화는 건너뜁니다. 영상 생성은 여전히 컷마다 대표 승인으로만.</p></div>`;
   const sel = () => episodes.filter(e => S.pick[e.id]);
   const upd = () => { $('#pkN').textContent = sel().length ? `${sel().length}개 화 선택` : ''; };
   box.querySelectorAll('[data-pk]').forEach(c => c.onchange = () => { S.pick[c.dataset.pk] = c.checked; c.closest('.pk').classList.toggle('on', c.checked); upd(); });
-  $('#pkAll').onclick = () => { episodes.forEach(e => { S.pick[e.id] = true; }); renderPicker(episodes); };
-  $('#pkNone').onclick = () => { S.pick = {}; renderPicker(episodes); };
+  box.querySelectorAll('[data-pkhold]').forEach(a => a.onclick = guard(async ev => {
+    ev.preventDefault(); ev.stopPropagation();
+    const e = all.find(x => x.id === a.dataset.pkhold);
+    const note = prompt(`${e.number}화를 보류할까요? 대본·컷·영상은 그대로 두고, 대기 중인 일만 취소합니다. 기록 탭 '보류함'에서 언제든 꺼낼 수 있어요.\n보류 이유(선택):`, '');
+    if (note === null) return;
+    const n = await q(S.sb.rpc('owner_hold', { p_kind: 'episode', p_id: e.id, p_on: true, p_note: note.trim() || null }));
+    toast(`${e.number}화 보류${n ? ` · 대기 중이던 일 ${n}건 취소` : ''}`); go('production');
+  }));
+  box.querySelectorAll('[data-pkun]').forEach(a => a.onclick = guard(async ev => {
+    ev.preventDefault(); await q(S.sb.rpc('owner_hold', { p_kind: 'episode', p_id: a.dataset.pkun, p_on: false })); toast('꺼냈습니다'); go('production');
+  }));
+  $('#pkAll').onclick = () => { episodes.forEach(e => { S.pick[e.id] = true; }); renderPicker(all); };
+  $('#pkNone').onclick = () => { S.pick = {}; renderPicker(all); };
   const start = kind => guard(async () => {
     const list = sel(); if (!list.length) return toast('화를 먼저 고르세요');
     const skip = [], go2 = [];
@@ -6888,27 +7076,38 @@ async function renderPicker(episodes) {
     if (!confirm(`${go2.map(e => e.number + '화').join(', ')}에 ${kind === 'writers_room' ? '작가실 정리' : '감독 컷 설계'}를 맡깁니다(Claude 비용, 화당 수백 원).${skip.length ? `\n건너뜀: ${skip.join(', ')}` : ''}`)) return;
     const conf = kind === 'director' ? await q(S.sb.from('script_versions').select('id,episode_id,version_no').in('episode_id', go2.map(e => e.id)).eq('status', 'confirmed').order('version_no', { ascending: false })) : [];
     await q(S.sb.from('pipeline_tasks').insert(go2.map(e => ({ kind, episode_id: e.id, payload: kind === 'director' ? { script_version_id: conf.find(v => v.episode_id === e.id)?.id } : {} }))));
-    toast(`${go2.length}개 화를 맡겼습니다. 위 제작 현황에서 진행을 볼 수 있습니다`); S.boardOpen = true; renderBoard(); renderPicker(episodes);
+    toast(`${go2.length}개 화를 맡겼습니다. 위 제작 현황에서 진행을 볼 수 있습니다`); S.boardOpen = true; renderBoard(); renderPicker(all);
   });
   $('#pkWr').onclick = start('writers_room'); $('#pkDir').onclick = start('director'); upd();
 }
 
 async function viewProduction(main) {
-  const series = await q(S.sb.from('series').select('id,title').order('created_at'));
-  if (!S.seriesId || !series.some(s => s.id === S.seriesId)) S.seriesId = series[0]?.id || null;
-  const episodes = S.seriesId ? await q(S.sb.from('episodes').select('id,number,title').eq('series_id', S.seriesId).order('number')) : [];
-  if (!S.episodeId || !episodes.some(e => e.id === S.episodeId)) S.episodeId = episodes[0]?.id || null;
+  const series = await q(S.sb.from('series').select('id,title,on_hold,hold_note').order('created_at')).catch(() => q(S.sb.from('series').select('id,title').order('created_at')));
+  if (!S.seriesId || !series.some(s => s.id === S.seriesId)) S.seriesId = (series.find(s => !s.on_hold) || series[0])?.id || null;
+  const curSer = series.find(s => s.id === S.seriesId);
+  const episodes = S.seriesId ? await q(S.sb.from('episodes').select('id,number,title,status,hold_note').eq('series_id', S.seriesId).order('number'))
+    .catch(() => q(S.sb.from('episodes').select('id,number,title,status').eq('series_id', S.seriesId).order('number'))) : [];
+  if (!S.episodeId || !episodes.some(e => e.id === S.episodeId)) S.episodeId = (episodes.find(e => e.status !== 'on_hold') || episodes[0])?.id || null;
   main.innerHTML = `
     <div class="row" style="margin-bottom:12px">
       <h2 style="margin:0 12px 0 0">제작</h2>
-      <select id="pSer" style="width:auto">${series.map(s => `<option value="${esc(s.id)}" ${s.id === S.seriesId ? 'selected' : ''}>${esc(s.title)}</option>`).join('')}</select>
+      <select id="pSer" style="width:auto">${series.map(s => `<option value="${esc(s.id)}" ${s.id === S.seriesId ? 'selected' : ''}>${esc(s.title)}${s.on_hold ? ' (보류)' : ''}</option>`).join('')}</select>
+      ${curSer ? `<button class="btn small" id="pSerHold">${curSer.on_hold ? '이 시리즈 보류 풀기' : '이 시리즈 보류'}</button>` : ''}
       <span class="quiet">보고 있는 화:</span><div class="epchips">${episodes.map(e => `<button class="chip ${e.id === S.episodeId ? 'on' : ''}" data-pep="${esc(e.id)}">${e.number}화</button>`).join('') || '<span class="quiet">대본 탭에서 화를 먼저 만드세요</span>'}</div>
     </div>
+    ${curSer?.on_hold ? `<div class="msg warn">이 시리즈는 보류 중입니다${curSer.hold_note ? ` (${esc(curSer.hold_note)})` : ''}. 새 일은 시작되지 않습니다. 자료는 모두 그대로 있으니 "보류 풀기"로 이어서 만들 수 있습니다.</div>` : ''}
     <div id="prodBoard"></div>
     <div id="prodPick"></div>
     <div id="prodPane"><p class="quiet">불러오는 중…</p></div>`;
   renderBoard().catch(console.error); renderPicker(episodes).catch(console.error);
   $('#pSer').onchange = e => { S.seriesId = e.target.value; S.episodeId = null; go('production'); };
+  const sh = $('#pSerHold'); if (sh) sh.onclick = guard(async () => {
+    if (curSer.on_hold) { await q(S.sb.rpc('owner_hold', { p_kind: 'series', p_id: curSer.id, p_on: false })); toast('보류를 풀었습니다'); return go('production'); }
+    const note = prompt(`「${curSer.title}」 시리즈를 보류할까요? 대본·바이블·컷·영상은 그대로 두고 대기 중인 일만 취소합니다(진행 중인 일은 끝까지). 기록 탭 '보류함'에서 언제든 꺼낼 수 있어요.\n보류 이유(선택):`, '');
+    if (note === null) return;
+    const n = await q(S.sb.rpc('owner_hold', { p_kind: 'series', p_id: curSer.id, p_on: true, p_note: note.trim() || null }));
+    toast(`보류했습니다${n ? ` · 대기 중이던 일 ${n}건 취소` : ''}`); go('production');
+  });
   main.querySelectorAll('[data-pep]').forEach(b => b.onclick = () => { S.episodeId = b.dataset.pep; go('production'); });
   if (S.episodeId) await renderProduction(episodes.find(e => e.id === S.episodeId));
   else $('#prodPane').innerHTML = '';
@@ -8431,6 +8630,9 @@ const HELP = {
 <ul>
 <li><b>제작 현황(모든 시리즈)</b> — 작가실·감독실·영상 생성·감수·사진·목소리·편집·보관별로 지금 <b>어느 시리즈 몇 화</b>의 무엇을 진행·대기하는지. 같은 일이 두 번 걸려 있으면 <b>중복</b> 표시와 "중복 정리" 버튼.<span class="ex">예: 작가실 — 한국 갔더니 아이돌 · 3화 · 작가실 정리(진행) / 시리즈B · 1화(대기) · 감독실 — 아이돌 2화 컷 설계</span></li>
 <li><b>제작할 화 고르기</b> — 대본에 올린 화를 다 만들지 않아도 됩니다. 원하는 화만 체크(또는 전체 선택) → <b>선택한 화: 작가실 정리부터</b>(정리 → 확정 → 컷 설계) 또는 <b>감독 컷 설계만</b>. 이미 진행 중인 화는 건너뜁니다.<span class="ex">예: 1~3화만 체크 → 작가실 정리부터 → 3개 화만 진행, 4~10화는 그대로</span></li>
+<li><b>제작 현황은 지금 고른 시리즈만</b> 보여 줍니다. 다른 시리즈 일은 "다른 시리즈에서도 일하는 중: … 2건"으로 한 줄만, 전부 보려면 "모든 시리즈 보기". "15분 뒤 시작 예정"은 일부러 늦춰 둔 일입니다.</li>
+<li><b>보류</b> — 만들다 멈출 시리즈는 시리즈 옆 "이 시리즈 보류", 화는 화 카드의 "보류". 대본·바이블·컷·영상은 그대로 두고 대기 중인 일만 취소하며, 보류 중에는 새 일이 시작되지 않습니다. 보류한 것은 <b>기록 탭 → 보류함</b>에 모이고 "꺼내기"로 멈춘 곳부터 이어서 만듭니다.<span class="ex">예: 동구밭 4·5화 보류(이유: 결말 수정 예정) → 다음 달 기록 탭 보류함에서 꺼내기</span></li>
+<li><b>감독 컷 설계는 씬 몇 개씩 나눠서</b> 합니다(한 번에 하면 답이 길어 잘림). 실패한 씬은 하나씩 다시, 그래도 안 되면 그 씬만 자동으로 한 번 더. 끝내 실패하면 빨간 상자에 <b>몇 화 · S#몇 「장소」(첫 줄: …) — 원인</b>이 씬마다 나오고, 다시 시도는 실패한 씬만 합니다. 성공한 씬은 그대로 저장됩니다.<span class="ex">예: 3화 S#7 「옥상」(첫 줄: 린: 여긴 어디지?) — 원인: 감독 답이 길이 제한에 걸려 잘림 → 대본 탭에서 S#7을 둘로 나누고 다시 시도</span></li>
 <li><b>보고 있는 화</b>(위 1화·2화… 칩) — 아래 컷 카드·진행 상황을 볼 화를 고릅니다(만들기 시작과는 별개).</li>
 <li><b>해결이 필요한 실패</b>(빨간 상자) — 실패하면 <b>무슨 일인지</b>와 <b>이렇게 하세요</b>가 쉬운 말로 나오고, 그 자리에서 다시 시도·대본 탭·설정·바이블로 이동할 수 있습니다. 해결했으면 "확인했어요".<span class="ex">예: "감독 컷 설계 실패 — 이 화에 확정된 대본이 없습니다 → 대본 탭에서 확정 후 다시 시도" [대본 탭 열기] [다시 시도]</span></li>
 </ul>
@@ -8562,6 +8764,7 @@ const HELP = {
 <h4>⑥ 실사 사진·얼굴 고정 (캐릭터)</h4>
 <ol>
 <li><b>실사 사진 만들기·얼굴 고정</b> → 묘사 확인 → 후보 4장(Soul 2).<span class="ex">예: 민지 후보 4장 중 2번·4번이 같은 사람 느낌</span></li>
+<li><b>사진을 누르면 크게</b> 볼 수 있습니다. ←/→로 넘기고, 크게 본 채로 "이 사진 고르기". 기준 사진·임시 사진·제작 키프레임도 같습니다.<span class="ex">예: 후보 2번을 눌러 눈매를 확대해 보고 → "이 사진 고르기" → → 로 3번 확인</span></li>
 <li>같은 사람으로 쓸 사진 1~4장 체크 → <b>이 얼굴로 학습 + 기준 사진 만들기</b>(5~20분) → 정면·3/4·전신·감정 표정 4장.<span class="ex">예: 2번·4번 체크 → Soul ID 학습 → 기준 사진 4장</span></li>
 <li>같은 사람으로 보이면 <b>바이블에 적용</b> → "얼굴 고정됨".<span class="ex">예: 이후 민지가 나오는 모든 장면 사진이 이 얼굴</span></li>
 </ol>
