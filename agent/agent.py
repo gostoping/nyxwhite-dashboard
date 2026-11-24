@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.27.0"
+VERSION = "1.27.1"
 
 import base64
 import glob
@@ -825,46 +825,43 @@ def writers_split(t, p):
                 cp = safe_json(text).get("cut_points") or []
                 notes.append(f"S#{n} → {len(heads)}개 부분으로 나눔" + (f" ({'; '.join(map(str, cp[:3]))})" if cp else ""))
                 break
-        else:
-            notes.append(f"S#{n}: 대사를 그대로 두고 나누지 못함(대사 보존 {int(kept * 100)}%)")
+        else:   # AI가 대사를 지키지 못하면 원문을 줄 단위로 기계적으로 나눈다(글자 하나 안 바뀜)
+            body = mech_split(n, orig)
+            if body:
+                new_body[n] = body
+                notes.append(f"S#{n} → {len(re.findall(rf'S#{n}-\d+', body))}개 부분으로 나눔(원문 그대로 줄 단위로 나눔 · AI 나누기는 대사 보존 {int(kept * 100)}%라 쓰지 않음)")
+            else:
+                notes.append(f"S#{n}: 너무 짧아 나누지 않음")
 
     for r in parallel([(lambda n=n: split_one(n)) for n in targets], workers=3):   # 여러 씬을 동시에
         if isinstance(r, Exception):
             notes.append(f"나누기 실패: {str(r)[:120]}")
-    if not new_body and prep:   # 나누지 못해도 제작은 멈추지 않는다: 감독이 그 씬을 그대로(컷 여러 개로) 설계
-        rpc("agent_add_task", p_token=TOKEN, p={"kind": "director", "episode_id": ep,
-            "payload": {"script_version_id": src["id"], "prepped": True}})
-        return f"작가실이 긴 씬을 대사 그대로 나누지 못해 그대로 둡니다({' / '.join(notes)}) · 감독이 이어서 컷을 설계합니다"
-    if not new_body:
-        raise RuntimeError(f"작가실이 {epno}화 긴 씬을 나누지 못했습니다. " + " / ".join(notes)
-                           + ". 이렇게 하세요: 대본 탭에서 그 씬 중간에 'S#번호-2 | 시간 | 장소 | 낮·밤' 머리를 직접 넣어 나누고 확정하면 감독이 이어서 설계합니다.")
+    if not new_body:   # 나눌 게 없어도 제작은 멈추지 않는다: 감독이 그 씬을 그대로(컷 여러 개로) 설계
+        pl = {"script_version_id": src["id"], "prepped": True}
+        if not prep and targets:
+            pl.update({"scenes": [x for x in targets if x > 0], "retry_scenes": True})
+        rpc("agent_add_task", p_token=TOKEN, p={"kind": "director", "episode_id": ep, "payload": pl})
+        return f"나눌 씬이 없어 그대로 둡니다({' / '.join(notes)}) · 감독이 이어서 컷을 설계합니다"
     content = normalize_scene_heads(src["content"])   # 나눈 씬 본문과 같은 모양(S# 머리 붙인 대본)에서 바꿔 넣는다
     for sn, body in new_body.items():
         content = content.replace(orig_of[sn], body, 1)
     content = normalize_scene_heads(content)   # S#3-1·3-2 → S#3·S#4…: 씬 번호를 화 처음부터 순서대로
-    note = f"작가실: {'컷 설계 전 제작용 씬 나누기' if prep else '감독 요청으로 긴 씬 나눔'}(대사 그대로) — " + " / ".join(notes)
+    note = f"작가실: 제작용 씬 나누기(대사 그대로) — " + " / ".join(notes)
     vid = rpc("agent_save_script_draft", p_token=TOKEN, p_episode=ep, p_content=content, p_note=note[:480])
-    if prep:   # 대사·사건은 그대로(95% 이상 확인)라 대표 확정 없이 바로 확정 → 감독이 화 전체를 설계
-        rpc("agent_set_script_followup", p_token=TOKEN, p_id=vid, p={"kind": "director", "payload": {"prepped": True}})
+    # 컷 설계 전 나누기면 화 전체, 예전 감독 요청이면 나눈 씬부터 끝까지(번호가 한 칸씩 밀림) 다시 설계
+    follow = {"prepped": True} if prep else {"scenes": [s for s, _, _ in split_scenes(content) if s >= min(new_body)], "prepped": True, "retry_scenes": True}
+    rpc("agent_set_script_followup", p_token=TOKEN, p_id=vid, p={"kind": "director", "payload": follow})
+    # 대사·사건은 그대로(AI 나누기는 95% 이상 확인, 아니면 원문 줄 단위)라 대표 확정 없이 바로 확정
+    try:
+        rpc("agent_confirm_split", p_token=TOKEN, p_id=vid, p_summary=note[:480])
+    except Exception as ex:   # DB 반영 전이면 예전 방식(정리본 자동 확정 설정)으로
+        log(f"씬 나누기 확정 실패, 일반 확정 시도: {ex}")
         try:
-            rpc("agent_confirm_split", p_token=TOKEN, p_id=vid, p_summary=note[:480])
-        except Exception as ex:   # DB 반영 전이면 예전 방식(정리본 자동 확정 설정)으로
-            log(f"씬 나누기 확정 실패, 일반 확정 시도: {ex}")
-            try:
-                rpc("agent_confirm_script", p_token=TOKEN, p_id=vid, p_summary=note[:480])
-            except Exception:
-                notify(f"{epno}화 씬 나누기 정리본: 확정을 기다립니다", note[:300] + "\n대사는 그대로입니다. 대본 탭에서 확정하면 감독이 컷을 설계합니다.")
-                return note + " · 확정 대기"
-        return note + " · 자동 확정 → 감독이 컷 설계"
-    # 나눈 씬부터 뒤 씬들은 번호가 한 칸씩 밀린다(씬 순서대로 다시 매김) → 나눈 씬부터 끝까지 다시 설계해야 번호가 맞는다
-    redo = [s for s, _, _ in split_scenes(content) if s >= min(new_body)]
-    rpc("agent_set_script_followup", p_token=TOKEN, p_id=vid, p={"kind": "director", "payload": {"scenes": redo, "fix_round": 1}})
-    wr = rpc("agent_writers_room_context", p_token=TOKEN, p_episode=ep) or {}
-    if wr.get("auto_confirm") is True:
-        rpc("agent_confirm_script", p_token=TOKEN, p_id=vid, p_summary=note[:480])
-        return note + " · 자동 확정 → 감독이 그 씬만 다시 설계"
-    notify(f"{epno}화 작가실 수정본: 긴 씬 나눔(감독 요청)", note[:300] + "\n대사·흐름은 그대로입니다. 대본 탭(또는 지시 탭)에서 확정하면 감독이 그 씬만 다시 설계합니다.")
-    return note + " · 확정 대기"
+            rpc("agent_confirm_script", p_token=TOKEN, p_id=vid, p_summary=note[:480])
+        except Exception:
+            notify(f"{epno}화 씬 나누기 정리본: 확정을 기다립니다", note[:300] + "\n대사는 그대로입니다. 대본 탭에서 확정하면 감독이 컷을 설계합니다.")
+            return note + " · 확정 대기"
+    return note + " · 자동 확정 → 감독이 컷 설계"
 
 
 @task("writers_room")
@@ -1101,6 +1098,43 @@ def scene_seconds(head, body):
         if d > 0:
             return d
     return len(body or "") // 12
+
+
+def _mmss(s):
+    return f"{s // 60:02d}:{s % 60:02d}"
+
+
+def mech_split(n, orig, limit=SCENE_MAX_SEC):
+    """원문 씬을 줄 단위로 2~6개 부분(S#n-1, S#n-2…)으로 나눈다. 대사·지문은 한 글자도 바꾸지 않고 머리만 붙인다."""
+    lines = orig.strip("\n").split("\n")
+    head, rest = lines[0], lines[1:]
+    if not re.search(r"S\s*#\s*\d+", head):
+        head, rest = f"S#{n}", lines
+    rest_idx = [i for i, x in enumerate(rest) if x.strip()]
+    secs = scene_seconds(head, orig)
+    k = min(6, max(2, -(-secs // limit)), len(rest_idx))
+    if k < 2:
+        return None
+    total = sum(len(x) + 1 for x in rest)
+    cuts, acc, want = [], 0, 1
+    for i, x in enumerate(rest):   # 글 양이 1/k, 2/k…가 되는 줄 앞에서 나눔(빈 줄 앞이면 더 좋음)
+        if want < k and acc >= total * want / k and x.strip() and i > (cuts[-1] if cuts else 0):
+            cuts.append(i); want += 1
+        acc += len(x) + 1
+    if not cuts:
+        return None
+    m = re.search(r"(\d{1,2}:\d{2}(?::\d{2})?)\s*[–—\-~]\s*(\d{1,2}:\d{2}(?::\d{2})?)", head)
+    t0, t1 = (_secs(m.group(1)), _secs(m.group(2))) if m else (None, None)
+    bounds = [0] + cuts + [len(rest)]
+    out = []
+    for j in range(len(bounds) - 1):
+        h = re.sub(r"S\s*#\s*\d+(?:\s*-\s*\d+)*", f"S#{n}-{j + 1}", head, count=1)
+        if m and t1 > t0:
+            a = t0 + (t1 - t0) * sum(len(x) + 1 for x in rest[:bounds[j]]) // max(1, total)
+            b = t0 + (t1 - t0) * sum(len(x) + 1 for x in rest[:bounds[j + 1]]) // max(1, total)
+            h = h.replace(m.group(0), f"{_mmss(a)}–{_mmss(b)}", 1)
+        out.append(h + "\n" + "\n".join(rest[bounds[j]:bounds[j + 1]]))
+    return "\n".join(out).strip()
 
 
 def long_scenes(all_sc, limit=SCENE_MAX_SEC):
