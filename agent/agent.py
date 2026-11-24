@@ -783,6 +783,12 @@ def writers_split(t, p):
     model = setting(ctx, "generation", "claude_writer", "claude-opus-5-5")
     all_sc = split_scenes(src["content"])
     targets = [int(x) for x in p.get("scenes") or []]
+    if 0 in targets:   # 예전 버전이 '화 전체(S#0)를 나눠 달라'고 남긴 요청: 이제 씬 구분을 알아보므로 나눌 필요 없이 감독이 씬별로 다시 설계
+        real = [s for s, _, _ in all_sc if s > 0]
+        if not real:
+            raise RuntimeError(f"{epno}화 확정 대본에 씬 구분이 없어 화 전체가 씬 하나로 읽혔습니다. 이렇게 하세요: 대본 탭에서 씬마다 '00:12–00:48 | 장소' 줄을 넣고 확정하세요")
+        rpc("agent_add_task", p_token=TOKEN, p={"kind": "director", "episode_id": ep, "payload": {"script_version_id": src["id"]}})
+        return f"{epno}화는 이제 씬 {len(real)}개로 읽힙니다(대본의 '시간 | 장소' 줄). 화 전체를 나눌 필요 없이 감독이 씬별로 다시 설계합니다"
     system = (guide(ctx, "작가실") or "너는 드라마 작가실이다.") + """
 
 [이번 일 — 감독의 요청: 긴 씬 나누기]
