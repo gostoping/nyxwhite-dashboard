@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.16.2"
+VERSION = "1.16.4"
 
 import base64
 import glob
@@ -2517,6 +2517,7 @@ def t_photo_design(t):
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": "후보가 만들어지지 않았습니다"})
         raise RuntimeError("후보가 만들어지지 않았습니다")
     rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "ready", "previews": previews})
+    rpc("agent_add_task", p_token=TOKEN, p={"kind": "coord_review", "payload": {"design_id": did, "entry_id": d.get("entry_id"), "series_id": d.get("series_id")}})
     log_cost("keyframe", "higgsfield", model, {"images": len(previews)}, note=f"사진 디자인: {name}", outcome="success")
     notify(f"{name} 사진 후보 {len(previews)}장 도착", "바이블 탭에서 마음에 드는 사진을 골라 주세요")
     return f"{name} 사진 후보 {len(previews)}장"
@@ -2539,7 +2540,7 @@ def t_photo_set(t):
         soul_id = soul_train(f"{d.get('series_title') or 'NYX'} · {name}", src)
         log_cost("keyframe", "higgsfield", "soul-id-training", {"calls": 1}, note=f"얼굴 학습: {name}", outcome="success")
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "training", "soul_id": soul_id})
-        look = (d.get("description") or d.get("prompt") or "")[:900]
+        look = (d.get("prompt_en") or d.get("description") or d.get("prompt") or "")[:900]   # 사진 모델에는 영어 프롬프트
         outfit = (d.get("details") or "")[:500]
         ref_set = []
         for label, shot in SET_SHOTS:
@@ -2554,6 +2555,7 @@ def t_photo_set(t):
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
         raise
     rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "set_ready", "soul_id": soul_id, "ref_set": ref_set})
+    rpc("agent_add_task", p_token=TOKEN, p={"kind": "coord_review", "payload": {"design_id": did, "entry_id": d.get("entry_id"), "series_id": d.get("series_id")}})
     notify(f"{name} 얼굴 고정 완료", f"같은 얼굴 기준 사진 {len(ref_set)}장을 바이블 탭에서 확인하고 적용해 주세요")
     return f"{name} Soul ID + 기준 사진 {len(ref_set)}장"
 
@@ -2983,22 +2985,31 @@ def t_bible_prompt(t):
         return f"{name}: 이미 영어 프롬프트가 있어 건너뜀(코디네이터가 사진을 보고 작성)"
     reason = (info.get("change_reason") or "").strip()
     by_owner = info.get("proposed_by") == "대표" and reason and "작가실" not in reason and "사진을 보고" not in reason
+    reason = re.sub(r"\s*→ (작가실이|코디네이터가) 묘사·프롬프트에 반영:.*$", "", reason)   # 다시 반영할 때 이전 반영 기록은 빼고 요청만
     if p.get("apply_reason") and reason:   # 대표가 '바꾸는 이유'에 적은 요청을 한국어 묘사에 먼저 반영
         progress(f"{name}: 대표 요청('{reason[:40]}')을 묘사에 반영하는 중")
-        text, _ = claude("claude-opus-5-5", """너는 드라마 작가실의 바이블 담당이다. 대표가 바이블 항목을 고치며 남긴 요청을 지금 묘사·세부 사항에 반영해 고쳐 쓴다.
-- 요청한 부분만 바꾸고 나머지 내용은 그대로 둔다(빠뜨리지 않는다). 요청이 기존 내용과 부딪히면 요청을 따른다.
-- 한국어로, 지금 글의 형식·길이를 비슷하게. 이름·실존 인물·브랜드는 새로 넣지 않는다.
-답 형식: <json>{"description": "고친 묘사 전체", "details": "고친 세부 사항 전체(없으면 빈 문자열)", "changed": "무엇을 어떻게 바꿨는지 한 줄"}</json>""",
-            f"분류: {cat}\n이름: {name}\n[대표 요청]\n{reason}\n\n[지금 묘사]\n{info.get('description') or '-'}\n[지금 세부 사항]\n{info.get('details') or '-'}",
-            max_tokens=3000, stage="other", note=f"바이블 묘사에 대표 요청 반영: {name}")
+        sysm = """너는 드라마 제작팀의 코디네이터다. 대표가 바이블 항목을 고치며 남긴 요청을 지금 묘사·세부 사항에 반드시 반영해 고쳐 쓴다.
+- 대표 요청이 최우선이다. 요청과 다른 기존 표현(국적 인상·나이 인상·얼굴·머리·체형·의상 등)은 요청대로 바꾼다.
+  예: 요청 "어려 보이는 한국 사람 얼굴" + 기존 "Thai-Korean woman in her early twenties" → "앳되어 보이는 한국인 얼굴의 20대 초반 여성"으로 바꾸고 태국계 인상 표현은 뺀다.
+- 요청과 관계없는 나머지 내용은 그대로 둔다(빠뜨리지 않는다).
+- 한국어로 쓴다(기존이 영어여도 한국어로 옮겨 쓴다). 이름·실존 인물·브랜드는 넣지 않는다.
+답 형식: <json>{"description": "고친 묘사 전체", "details": "고친 세부 사항 전체(없으면 빈 문자열)", "changed": "무엇을 어떻게 바꿨는지 한 줄"}</json>"""
+        ask = f"분류: {cat}\n이름: {name}\n[대표 요청]\n{reason}\n\n[지금 묘사]\n{info.get('description') or '-'}\n[지금 세부 사항]\n{info.get('details') or '-'}"
+        text, _ = claude("claude-opus-5-5", sysm, ask, max_tokens=3000, stage="other", note=f"바이블 묘사에 대표 요청 반영: {name}")
         d = safe_json(text)
         nd = (d.get("description") or "").strip()
+        if nd and nd.strip() == (info.get("description") or "").strip():   # 그대로면 한 번 더, 더 분명하게
+            text, _ = claude("claude-opus-5-5", sysm, ask + "\n\n[중요] 지난번 답이 묘사를 바꾸지 않았다. 대표 요청을 묘사에 분명히 넣어라.",
+                             max_tokens=3000, stage="other", note=f"바이블 묘사에 대표 요청 반영(다시): {name}")
+            d = safe_json(text)
+            nd = (d.get("description") or "").strip()
         if len(nd) < 10:
             raise RuntimeError(f"대표님이 '바꾸는 이유'에 적은 요청('{reason[:60]}')을 '{name}' 묘사에 반영하지 못했습니다. "
                                f"바이블 카드 → 내용 고치기에서 묘사 칸에 바뀐 내용을 직접 적어 주세요(예: '눈매가 더 날카롭게' → 묘사에 '눈꼬리가 올라간 날카로운 눈매').")
         info["description"], info["details"] = nd, (d.get("details") or "").strip() or info.get("details")
         rpc("agent_bible_set_description", p_token=TOKEN, p_version=info["version_id"], p_description=nd, p_details=info.get("details") or "",
-            p_reason=f"{reason} → 작가실이 묘사·프롬프트에 반영: {str(d.get('changed') or '')[:200]}")
+            p_reason=f"{reason} → 코디네이터가 묘사·프롬프트에 반영: {str(d.get('changed') or '')[:200]}")
+        applied = str(d.get("changed") or "요청 반영")[:120]
     rules = f"""- 눈에 보이는 고정 특징만. 이 분류({cat})에서 담을 것: {PROMPT_NEEDS.get(cat, '눈에 보이는 특징')}.
 - 세부 사항에 '바뀌면 안 되는 특징'이 있으면 반드시 포함한다. 화마다 바뀌는 상황·줄거리·성격·대사는 넣지 않는다.
 - 4~8문장, 현재형, 쉼표로 이어진 묘사 위주. 이름·실존 인물·배우·브랜드는 쓰지 않는다. 한글은 한 글자도 쓰지 않는다."""
@@ -3010,7 +3021,7 @@ def t_bible_prompt(t):
     user = (f"분류: {cat}\n이름(참고, 프롬프트에 쓰지 말 것): {name}\n대본 속 역할: {info.get('summary') or '-'}\n"
             f"[묘사]\n{info.get('description') or '-'}\n[세부 사항]\n{info.get('details') or '-'}"
             + (f"\n[대표가 이번에 바꾸며 남긴 요청 — 묘사와 함께 반드시 반영]\n{reason}" if by_owner or p.get("apply_reason") else ""))
-    progress(f"{name}: 작가실이 영어 프롬프트로 옮기는 중")
+    progress(f"{name}: 코디네이터가 영어 프롬프트로 옮기는 중")
     text, _ = claude("claude-opus-5-5", system, user, max_tokens=3000, stage="other", note=f"바이블 영어 프롬프트: {name}")
     en, missing = clean_en(text), safe_json(text).get("missing") or []
     if not en:   # 2) 한 번 더: 형식을 더 단순하게
@@ -3020,7 +3031,7 @@ def t_bible_prompt(t):
         en = clean_en(text)
         missing = safe_json(text).get("missing") or missing
     how = "묘사로 옮김"
-    owner_wrote = (info.get("proposed_by") == "대표") and "자동" not in reason and "작가실이 묘사" not in reason
+    owner_wrote = (info.get("proposed_by") == "대표") and "자동" not in reason and "묘사·프롬프트에 반영" not in (info.get("change_reason") or "")
     if not en and not owner_wrote:   # 3-a) AI가 쓴 묘사 → 대본에서 채운다
         sid = info.get("series_id") or t.get("series_id")
         found = script_mentions(sid, name, info.get("summary")) if sid else ""
@@ -3041,7 +3052,57 @@ def t_bible_prompt(t):
         raise RuntimeError(f"묘사와 대본 모두에서 '{name}'의 영어 프롬프트를 만들지 못했습니다(세 번 시도). "
                            f"바이블 '{name}' 카드에서 한글 묘사를 자세히 적어 주세요(담을 것: {need}). {PROMPT_EXAMPLE.get(cat, '')}")
     rpc("agent_bible_set_prompt", p_token=TOKEN, p_version=info["version_id"], p_prompt=en)
-    return f"{name} 영어 프롬프트 {len(en)}자 ({how})"
+    return f"{name} 영어 프롬프트 {len(en)}자 ({how})" + (f" · 요청 반영: {applied}" if p.get("apply_reason") and reason else "")
+
+
+def design_check(did):
+    """코디네이터: 만들어진 사진 후보(또는 기준 사진 세트)를 프롬프트와 한 장씩 비교한다.
+    글자·이름표·사원증 같은 글씨, 다른 사람, 묘사와 다른 나이·성별·머리·옷, 실사가 아닌 것 → 장마다 표시."""
+    d = rpc("agent_get_photo_design", p_token=TOKEN, p_id=did) or {}
+    if not d:
+        return "사진 디자인이 없습니다(삭제됨)"
+    name, cat = d.get("entry_name"), d.get("category")
+    items = (d.get("previews") or []) if d.get("status") == "ready" else (d.get("ref_set") or []) if d.get("status") == "set_ready" else []
+    items = [x for x in items if x.get("path")][:6]
+    if not items:
+        return f"{name}: 확인할 사진이 없습니다(상태 {d.get('status')})"
+    prompt = d.get("prompt_en") or d.get("prompt") or d.get("description") or ""
+    blocks = []
+    for i, x in enumerate(items, 1):
+        tmp = os.path.join(HOME, "work", f"dc_{uuid.uuid4().hex[:6]}.img")
+        try:
+            fetch_to(storage_signed_url(x.get("bucket") or "takes", x["path"], 3600), tmp)
+            blocks += photo_block_large(tmp, f"[사진 {i}]{' ' + x['label'] if x.get('label') else ''}")
+        except Exception as ex:
+            log(f"확인용 사진 받기 실패: {ex}")
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+    if not blocks:
+        raise RuntimeError("확인할 사진을 받지 못했습니다(저장소 연결 문제). 다시 시도해 주세요")
+    system = f"""너는 드라마 제작팀의 코디네이터다. 생성된 {'인물' if cat == 'character' else '바이블'} 사진 후보를 프롬프트와 한 장씩 비교한다.
+장마다 확인: 1) 프롬프트의 나이·성별·국적 인상·얼굴·머리(길이·색)·체형·의상(장소·소품이면 구조·재질·색)과 맞는가
+2) 사진 안에 글자가 찍혀 있지 않은가 — 이름표·사원증·명찰·자막·간판·워터마크·로고(예: '김도연' 같은 이름). 하나라도 있으면 문제
+3) {'후보끼리 같은 사람으로 쓸 수 있는가(세트면 모두 같은 사람인가), ' if cat == 'character' else ''}실사 사진인가(그림·3D 아님)
+match: "ok"(그대로 써도 됨) | "issue"(문제 있음). issues는 한국어로 짧게, 글자가 보이면 그 글자를 text에.
+답 형식: <json>{{"images": [{{"no": 1, "match": "ok", "issues": [], "text": ""}}], "best": [1], "summary": "한국어 한 줄(몇 장이 쓸 만한지)"}}</json>"""
+    progress(f"코디네이터가 {name} 사진 {len(items)}장을 프롬프트와 비교하는 중")
+    text, _ = claude("claude-sonnet-5-5", system, [{"type": "text", "text": f"항목: {name} ({cat})\n[프롬프트]\n{prompt}"}] + blocks,
+                     max_tokens=2500, stage="other", note=f"코디네이터 사진 확인: {name}")
+    r = safe_json(text)
+    imgs = {int(x.get("no") or 0): x for x in (r.get("images") or []) if isinstance(x, dict)}
+    if not imgs:
+        raise RuntimeError(f"코디네이터 사진 확인 답이 형식에 맞지 않았습니다. 다시 시도하면 대부분 해결됩니다. 답 앞부분: {text.strip()[:120]!r}")
+    out = []
+    for i, x in enumerate(items, 1):
+        v = imgs.get(i) or {}
+        out.append({"path": x["path"], "ok": v.get("match") == "ok", "issues": [str(s)[:120] for s in (v.get("issues") or [])][:4],
+                    "text": str(v.get("text") or "")[:60]})
+    bad = sum(1 for x in out if not x["ok"])
+    rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"review": {"items": out, "best": r.get("best") or [], "summary": str(r.get("summary") or "")[:300],
+                                                                         "prompt": prompt[:600], "checked_at": datetime.now().isoformat(timespec="seconds"),
+                                                                         "stage": d.get("status")}})
+    return f"{name} 사진 {len(out)}장 확인: 문제 {bad}장"
 
 
 @task("coord_review")
@@ -3049,6 +3110,8 @@ def t_coord_review(t):
     """코디네이터: 적용된 바이블 항목을 감수한다 — 대표 요청 반영, 묘사↔영어 프롬프트 일치, 대본과 어긋남.
     영어 프롬프트만 틀렸으면 직접 보정하고, 묘사 자체를 바꿔야 하면 대표 확인 필요로 넘긴다. 결과는 바이블 카드에 기록."""
     p = t.get("payload") or {}
+    if p.get("design_id"):
+        return design_check(p["design_id"])
     info = rpc("agent_coord_info", p_token=TOKEN, p_version=p.get("version_id")) or {}
     if not info:
         return "대상 버전이 없습니다(삭제됨)"
@@ -3063,7 +3126,7 @@ def t_coord_review(t):
     prev = info.get("prev") or {}
     reason = (info.get("change_reason") or "").strip()
     owner_req = reason if info.get("proposed_by") == "대표" and not re.search(r"(사진을 보고|가져옴|얼굴 고정|Soul)", reason) else ""
-    owner_req = re.sub(r"\s*→ 작가실이 묘사·프롬프트에 반영:.*$", "", owner_req)
+    owner_req = re.sub(r"\s*→ (작가실이|코디네이터가) 묘사·프롬프트에 반영:.*$", "", owner_req)
     prompt = (info.get("prompt_en") or "").strip()
     found = script_mentions(info.get("series_id"), name, info.get("summary"), limit=6000) if cat not in ("style", "music") else ""
     system = f"""너는 드라마 제작팀의 코디네이터다. 시리즈 바이블 항목의 묘사·영어 프롬프트를 감수한다.
@@ -3073,10 +3136,11 @@ def t_coord_review(t):
 3) 대본 발췌(있으면)와 어긋나는 것(나이·성별·머리·옷·장소 구조 등)이 없는가.
 처리:
 - 영어 프롬프트만 틀리거나 빠졌으면 verdict "fix"와 fixed_prompt_en(고친 영어 프롬프트 전체, 4~8문장)을 준다. 묘사는 고치지 않는다.
-- 한글 묘사 자체가 요청과 다르거나 대본과 부딪히면 verdict "owner", owner_note에 무엇을 어떻게 고치면 되는지 한국어 한 줄.
+- 대표 요청이 한글 묘사에 빠졌거나 다르게 들어갔으면 verdict "apply"와 fixed_description(요청을 반영해 고친 한국어 묘사 전체), fixed_prompt_en(그에 맞춘 영어 프롬프트 전체)을 준다. 대표 요청은 대표가 직접 시킨 일이므로 그대로 반영한다.
+- 요청과 관계없이 묘사가 대본과 부딪히면 고치지 않고 verdict "owner", owner_note에 무엇을 어떻게 고치면 되는지 한국어 한 줄.
 - 모두 맞으면 verdict "pass".
 checks는 항목마다: item(무엇을 봤는지, 한국어 짧게), status(ok|missing|conflict), where(request|description|prompt|script), note(근거 문구, 짧게).
-답 형식: <json>{{"verdict": "pass|fix|owner", "checks": [{{"item": "", "status": "ok", "where": "prompt", "note": ""}}], "fixed_prompt_en": "", "owner_note": "", "summary": "한국어 한 줄"}}</json>"""
+답 형식: <json>{{"verdict": "pass|fix|apply|owner", "checks": [{{"item": "", "status": "ok", "where": "prompt", "note": ""}}], "fixed_description": "", "fixed_prompt_en": "", "owner_note": "", "summary": "한국어 한 줄"}}</json>"""
     user = (f"항목: {name} ({cat})\n대본 속 역할: {info.get('summary') or '-'}\n"
             f"[대표 요청(고쳐쓰기 '바꾸는 이유·바꿀 내용')]\n{owner_req or '(없음)'}\n\n"
             f"[바로 앞 버전 v{prev.get('version_no', '-')} 묘사]\n{prev.get('description') or '-'}\n[바로 앞 버전 영어 프롬프트]\n{prev.get('prompt_en') or '-'}\n\n"
@@ -3104,11 +3168,24 @@ checks는 항목마다: item(무엇을 봤는지, 한국어 짧게), status(ok|m
     text, _ = claude("claude-sonnet-5-5", system, ([{"type": "text", "text": user}] + blocks) if blocks else user,
                      max_tokens=4000, stage="other", note=f"코디네이터 감수: {name}")
     d = safe_json(text)
-    verdict = d.get("verdict") if d.get("verdict") in ("pass", "fix", "owner") else None
+    verdict = d.get("verdict") if d.get("verdict") in ("pass", "fix", "apply", "owner") else None
     if not verdict:
         raise RuntimeError(f"코디네이터 답이 형식에 맞지 않았습니다(감수 기록 없음). 다시 시도하면 대부분 해결됩니다. 답 앞부분: {text.strip()[:120]!r}")
     checks = [c for c in (d.get("checks") or []) if isinstance(c, dict)][:20]
     after = None
+    applied_desc = False
+    if verdict == "apply":   # 대표 요청이 묘사에 빠짐 → 코디네이터가 요청대로 묘사·프롬프트를 고친다
+        nd = (d.get("fixed_description") or "").strip()
+        if len(nd) >= 10 and owner_req:
+            rpc("agent_bible_set_description", p_token=TOKEN, p_version=info["version_id"], p_description=nd, p_details=info.get("details") or "",
+                p_reason=f"{owner_req} → 코디네이터가 묘사·프롬프트에 반영: 감수에서 빠진 요청을 넣음")
+            for c in checks:
+                if c.get("status") in ("missing", "conflict") and c.get("where") in ("request", "description"):
+                    c["status"] = "fixed"
+            verdict, applied_desc = "fix", True
+        else:
+            verdict = "owner"
+            d["owner_note"] = d.get("owner_note") or "대표 요청이 묘사에 빠졌는데 고친 묘사가 비었습니다. 고쳐쓰기에서 묘사 칸에 직접 적어 주세요"
     if verdict == "fix":
         after = clean_en(json.dumps({"prompt_en": d.get("fixed_prompt_en") or ""}))
         if after:
@@ -3116,6 +3193,8 @@ checks는 항목마다: item(무엇을 봤는지, 한국어 짧게), status(ok|m
             for c in checks:
                 if c.get("status") in ("missing", "conflict") and c.get("where") == "prompt":
                     c["status"] = "fixed"
+        elif applied_desc:   # 묘사는 고쳤고 영어 프롬프트는 곧 새로 씀(묘사가 바뀌면 자동으로 다시 돎)
+            d["summary"] = (d.get("summary") or "") + " · 영어 프롬프트는 고친 묘사로 곧 새로 씁니다"
         else:
             verdict = "owner"
             d["owner_note"] = d.get("owner_note") or "영어 프롬프트를 고쳐야 하는데 보정안이 비었습니다. 다시 감수를 누르거나 묘사를 더 자세히 적어 주세요"
@@ -3695,7 +3774,7 @@ def fail_hint(e):
 
 
 QUIET_FAIL = {"coord_review", "bible_prompt", "photo_describe", "bible_place", "photo_design", "prep_cut"}
-TASK_NAME = {"coord_review": "코디네이터 감수", "upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"coord_review": "코디네이터 감수", "upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "코디네이터: 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
