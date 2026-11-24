@@ -195,6 +195,7 @@
   .tooltab td { vertical-align: top; padding: 6px 8px; } .tooltab td:first-child { white-space: nowrap; color: var(--quiet); }
   .tooltab select { max-width: 340px; }
   .ytbox { position: relative; width: 100%; max-width: 420px; aspect-ratio: 9 / 16; } .ytbox iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; border-radius: 8px; }
+  .upbox { border-color: var(--accent); margin: 8px 0; }
   /* 편집실 */
   .ed-empty { text-align: center; padding: 30px 16px; } .ed-empty .row { justify-content: center; }
   .ed-top { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; }
@@ -309,7 +310,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.13.2"
+VERSION = "1.14.0"
 
 import base64
 import glob
@@ -1261,6 +1262,13 @@ def ffmpeg():
 
 def ff(*args):
     r = subprocess.run([ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", *args], capture_output=True, text=True, timeout=600)
+    if r.returncode != 0:
+        raise RuntimeError(f"ffmpeg 실패: {(r.stderr or '')[-300:]}")
+
+
+def ff_long(*args, timeout=7200):
+    """오래 걸리는 ffmpeg(업스케일 등): 2시간까지 기다린다."""
+    r = subprocess.run([ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", *args], capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
         raise RuntimeError(f"ffmpeg 실패: {(r.stderr or '')[-300:]}")
 
@@ -2755,6 +2763,68 @@ def t_photo_describe(t):
     return f"{info.get('name')} 묘사 {len(desc)}자"
 
 
+@task("upscale")
+def t_upscale(t):
+    """편집 OK 때 '1080p로 업그레이드' → 완성본을 1080p 배포용으로 키운다(집 PC, 추가 비용 없음).
+    Real-ESRGAN(realesrgan-ncnn-vulkan)이 이 컴퓨터에 있으면 AI 업스케일, 없으면 ffmpeg 고품질 확대(lanczos + 약한 선명도)."""
+    p = t.get("payload") or {}
+    rel = rpc("agent_get_release", p_token=TOKEN, p_id=p.get("release_id")) or {}
+    rd = rel.get("render") or {}
+    files = rd.get("files") or {}
+    folder = files.get("folder")
+    if not folder or not os.path.isdir(folder):
+        raise RuntimeError(f"완성본 폴더가 이 컴퓨터에 없습니다: {folder or '(없음)'} — 완성본을 만든 컴퓨터에서 해야 합니다")
+    src = next((os.path.join(folder, f) for f in sorted(os.listdir(folder)) if f.endswith("_완성.mp4")), None)
+    if not src:
+        raise RuntimeError("완성 영상(_완성.mp4)을 찾지 못했습니다")
+    rpc("agent_update_release", p_token=TOKEN, p_id=rel["id"], p={"upscale_status": "running"})
+    try:
+        info = subprocess.run([ffmpeg(), "-hide_banner", "-i", src], capture_output=True, text=True, timeout=60).stderr
+        m = re.search(r"Video:.*?, (\d{3,5})x(\d{3,5})", info)
+        w, h = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+        if not w:
+            raise RuntimeError("영상 크기를 읽지 못했습니다")
+        k = 1080 / min(w, h)
+        W, H = int(round(w * k / 2) * 2), int(round(h * k / 2) * 2)
+        if abs(w / h - 9 / 16) < 0.02:
+            W, H = 1080, 1920
+        elif abs(w / h - 16 / 9) < 0.02:
+            W, H = 1920, 1080
+        out = src.replace("_완성.mp4", "_완성_1080p.mp4")
+        esr = shutil.which("realesrgan-ncnn-vulkan") or next((x for x in glob.glob(os.path.join(HOME, "tools", "realesrgan*", "realesrgan-ncnn-vulkan*")) if os.access(x, os.X_OK)), None)
+        method = "ffmpeg 고품질 확대"
+        if esr:
+            try:
+                work = os.path.join(HOME, "work", f"esr_{uuid.uuid4().hex[:6]}")
+                fin, fout = os.path.join(work, "in"), os.path.join(work, "out")
+                os.makedirs(fin), os.makedirs(fout)
+                progress(f"{rel['episode']['number']}화 AI 업스케일: 장면 나누는 중")
+                ff_long("-i", src, "-qscale:v", "1", os.path.join(fin, "f%06d.jpg"))
+                progress(f"{rel['episode']['number']}화 AI 업스케일 중(Real-ESRGAN, 수십 분 걸릴 수 있음)")
+                subprocess.run([esr, "-i", fin, "-o", fout, "-n", "realesr-animevideov3", "-s", "2", "-f", "jpg"], check=True, capture_output=True)
+                fps = re.search(r"(\d+(?:\.\d+)?) fps", info)
+                ff_long("-framerate", fps.group(1) if fps else "24", "-i", os.path.join(fout, "f%06d.jpg"), "-i", src, "-map", "0:v", "-map", "1:a?",
+                   "-vf", f"scale={W}:{H}:flags=lanczos", "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p",
+                   "-c:a", "copy", "-movflags", "+faststart", out)
+                method = "AI 업스케일(Real-ESRGAN)"
+                shutil.rmtree(work, ignore_errors=True)
+            except Exception as ex:
+                log(f"AI 업스케일 실패, ffmpeg 확대로: {ex}")
+                esr = None
+        if not esr:
+            progress(f"{rel['episode']['number']}화 1080p로 키우는 중(ffmpeg)")
+            ff_long("-i", src, "-vf", f"scale={W}:{H}:flags=lanczos,unsharp=5:5:0.5:5:5:0.0", "-c:v", "libx264", "-preset", "slow", "-crf", "16",
+               "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", out)
+        ff("-i", out, "-an", "-c:v", "copy", out.replace("_완성_1080p.mp4", "_영상만(무음)_1080p.mp4"))
+    except Exception as ex:
+        rpc("agent_update_release", p_token=TOKEN, p_id=rel["id"], p={"upscale_status": "failed", "upscale_files": {"error": str(ex)[:300]}})
+        raise
+    rpc("agent_update_release", p_token=TOKEN, p_id=rel["id"], p={"upscale_status": "done", "resolution": "1080p",
+                                                                  "upscale_files": {"path": out, "folder": folder, "method": method, "size": f"{W}x{H}", "platform": PLATFORM}})
+    notify(f"{rel['episode']['number']}화 1080p 배포본 완성", f"{method} · {W}x{H}\n{out}")
+    return f"{W}x{H} · {method}"
+
+
 @task("bgm")
 def t_bgm(t):
     """편집실 '이 화 음악 톤' → ElevenLabs Music으로 가사 없는 배경음악을 만들어 저장소에 올린다(편집실에서 타임라인에 넣기)."""
@@ -3459,7 +3529,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
@@ -6859,8 +6929,8 @@ async function renderProdSettings() {
       <tr><td>영상 생성</td><td><b>${esc(nm('video', G.video_model || 'seedance-2.5'))}</b></td><td>${toolSel('gVid', 'video', G.video_model || 'seedance-2.5')}</td></tr>
       <tr><td>화면 방향</td><td><b>${esc(ASPECTS.find(x => x[0] === (G.aspect_ratio || '9:16'))?.[1] || G.aspect_ratio)}</b></td>
         <td><select id="gAsp" style="width:auto">${ASPECTS.map(([a, l]) => opt(a, G.aspect_ratio || '9:16', l)).join('')}</select></td></tr>
-      <tr><td>해상도(처음 생성)</td><td><b>${esc(G.resolution || '480p')}</b> · 10초 컷 약 ${won((p('seedance-2.5-i2v-' + (G.resolution || '480p')) || p('seedance-2.5-ref-' + (G.resolution || '480p')) || 0) * 10 * 1340)}</td>
-        <td><select id="gRes" style="width:auto">${['480p', '720p', '1080p'].map(r => opt(r, G.resolution || '480p', `${r} · 10초 컷 약 ${won((p('seedance-2.5-i2v-' + r) || p('seedance-2.5-ref-' + r) || 0) * 10 * 1340)}`)).join('')}</select></td></tr>
+      <tr><td>해상도(처음 생성)<br><span class="quiet" style="font-size:12px">권장 480p · 배포 때 1080p 업그레이드</span></td><td><b>${esc(G.resolution || '480p')}</b> · 10초 컷 약 ${won((p('seedance-2.5-i2v-' + (G.resolution || '480p')) || p('seedance-2.5-ref-' + (G.resolution || '480p')) || 0) * 10 * 1340)}</td>
+        <td><select id="gRes" style="width:auto">${['480p', '720p', '1080p'].map(r => opt(r, G.resolution || '480p', `${r}${r === '480p' ? ' (권장)' : ''} · 10초 컷 약 ${won((p('seedance-2.5-i2v-' + r) || p('seedance-2.5-ref-' + r) || 0) * 10 * 1340)}`)).join('')}</select></td></tr>
       <tr><td>장면 사진(컷의 첫·끝 장면)</td><td><b>${esc(imgCur === 'custom' ? G.image_model : nm('image', imgCur))}</b></td><td>${toolSel('gImgSel', 'image', imgCur)}
         <input id="gImg" value="${esc(imgCur === 'custom' ? G.image_model : '')}" placeholder="Higgsfield 모델 경로" ${imgCur === 'custom' ? '' : 'hidden'} style="margin-top:4px"></td></tr>
       <tr><td>인물 실사 사진(바이블)</td><td><b>Higgsfield · Soul 2 + Soul ID</b></td><td class="quiet">고정(실사 인물 전용)</td></tr>
@@ -6913,6 +6983,8 @@ async function renderProdSettings() {
 // ------------------------------------------------------------------
 // 유튜브 주소에서 영상 ID(11자) 꺼내기
 const ytId = u => { const m = String(u || '').match(/(?:youtu\.be\/|v=|shorts\/|embed\/)([\w-]{11})/); return m ? m[1] : null; };
+const upPill = r => r.upscale_status === 'done' ? pill('1080p', 'good') : ['queued', 'running'].includes(r.upscale_status) ? pill('1080p 업그레이드 중', 'warn')
+  : r.upscale_status === 'failed' ? pill('업그레이드 실패', 'bad') : pill(r.resolution || '480p');
 const REL_ST = { ready: ['배포 대기', 'accent'], scheduled: ['예약됨', 'warn'], published: ['공개됨', 'good'], hold: ['보류', ''] };
 async function viewRelease(main) {
   const series = await q(S.sb.from('series').select('id,title').order('created_at'));
@@ -6949,7 +7021,7 @@ async function viewRelease(main) {
     ${eps.map(e => { const r = relOf(e.id); return `<tr ${r ? `class="click" data-rel="${esc(e.id)}"` : ''}>
       <td><b>${e.number}화</b> ${esc(e.title || '')}</td>
       <td class="quiet">${r ? 'OK' : esc(editState(e))}</td>
-      <td>${r ? pill(REL_ST[r.status][0], REL_ST[r.status][1]) : '<span class="quiet">-</span>'}</td>
+      <td>${r ? pill(REL_ST[r.status][0], REL_ST[r.status][1]) + ' ' + upPill(r) : '<span class="quiet">-</span>'}</td>
       <td>${bundleNo(e) ? pill(`${bundleNo(e)}묶음`) : ''}</td>
       <td class="quiet">${r?.published_at ? '공개 ' + esc(fmt(r.published_at)) : r?.planned_at ? '예약 ' + esc(fmt(r.planned_at)) : ''}</td>
       <td>${r && (ytId(r.published_url) || urls[rOf(r.render_id)?.files?.preview]) ? `<button class="btn small" data-play="${esc(e.id)}">▶ 보기</button>` : ''}</td></tr>`; }).join('')}
@@ -6970,7 +7042,11 @@ async function viewRelease(main) {
       <div class="ed-result" style="margin-top:8px"><div>${S.relView === 'yt' && yt
           ? `<div class="ytbox"><iframe src="https://www.youtube-nocookie.com/embed/${yt}?rel=0" title="${esc(e.number + '화')}" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe></div>`
           : v ? `<video id="relVid" controls playsinline preload="metadata" src="${esc(v)}" style="max-height:480px;width:100%"></video>` : '<p class="quiet">미리보기 파일이 없습니다(용량이 커서 올리지 않았으면 완성본 폴더에서 보세요)</p>'}</div>
-        <div>${rd?.files?.folder ? `<div class="quiet">완성본 폴더</div><div class="path-box">${esc(rd.files.folder)}</div>` : ''}</div></div>
+        <div>${rd?.files?.folder ? `<div class="quiet">완성본 폴더</div><div class="path-box">${esc(rd.files.folder)}</div>` : ''}
+          <div style="margin-top:8px">${upPill(r)}</div>
+          ${r.upscale_status === 'done' ? `<div class="quiet" style="margin-top:4px">배포용 1080p 파일 (${esc(r.upscale_files?.method || '')} · ${esc(r.upscale_files?.size || '')})</div><div class="path-box">${esc(r.upscale_files?.path || '')}</div>`
+            : r.upscale_status === 'failed' ? `<div style="color:var(--bad);margin-top:4px">${esc(r.upscale_files?.error || '')}</div><button class="btn small" id="rUpRe">다시 업그레이드</button>`
+            : r.upscale_status === 'none' && rd ? `<button class="btn small" id="rUpRe" style="margin-top:6px">1080p로 업그레이드</button>` : ''}</div></div>
       <label>제목</label><input id="rTitle" value="${esc(r.title || '')}">
       <label>설명</label><textarea id="rDesc" style="min-height:90px">${esc(r.description || '')}</textarea>
       <div class="row"><div style="flex:1;min-width:180px"><label>상태</label><select id="rSt">${Object.entries(REL_ST).map(([k, [l]]) => `<option value="${k}" ${r.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
@@ -6980,6 +7056,11 @@ async function viewRelease(main) {
       <div class="row" style="margin-top:10px"><button class="btn primary" id="rSave">저장</button><button class="btn" id="rClose">닫기</button></div></div>`;
     $('#rClose').onclick = () => { $('#relDetail').innerHTML = ''; S.relEp = null; };
     $('#relDetail').querySelectorAll('[data-rv]').forEach(b => b.onclick = () => { S.relView = b.dataset.rv; open(id); });
+    const ur = $('#rUpRe'); if (ur) ur.onclick = guard(async () => {
+      await q(S.sb.from('releases').update({ upscale_status: 'queued', resolution: '1080p' }).eq('id', r.id));
+      await q(S.sb.from('pipeline_tasks').insert({ kind: 'upscale', episode_id: e.id, platform: rd?.files?.platform === 'windows' ? 'server' : (rd?.files?.platform || null), payload: { release_id: r.id, render_id: r.render_id } }));
+      toast('1080p로 키우기 시작했습니다'); go('release');
+    });
     $('#rSave').onclick = guard(async () => {
       const st = $('#rSt').value, url = $('#rUrl').value.trim();
       await q(S.sb.from('releases').update({ title: $('#rTitle').value.trim() || null, description: $('#rDesc').value.trim() || null, status: url && st !== 'hold' ? 'published' : st,
@@ -7715,12 +7796,24 @@ async function edRenderOut() {
       <td class="quiet">버전 ${r.rev || '-'} · ${fmt(r.created_at)}</td>
       <td>${r.files?.preview && urls[r.files.preview] ? `<a href="${esc(urls[r.files.preview])}" target="_blank">열기</a>` : ''}</td>
       <td>${r.kind === 'final' && r.status === 'done' ? (rel?.render_id === r.id ? pill('배포 중인 완성본', 'good') : `<button class="btn small primary" data-rel="${esc(r.id)}">OK · 배포로 넘기기</button>`) : ''}</td></tr>`).join('')}</table>` : ''}`;
-  box.querySelectorAll('[data-rel]').forEach(b => b.onclick = guard(async () => {
-    if (!confirm('이 완성본으로 OK할까요? 배포 탭의 이 시리즈·화에 "배포 대기"로 올라갑니다.')) return;
-    await q(S.sb.from('releases').upsert({ episode_id: ED.ep.id, render_id: b.dataset.rel, status: rel?.status && rel.status !== 'hold' ? rel.status : 'ready',
-      title: rel?.title || `${ED.ep.number}화 ${ED.ep.title || ''}`.trim(), approved_at: new Date().toISOString() }, { onConflict: 'episode_id' }));
-    toast('배포로 넘겼습니다. 배포 탭에서 볼 수 있습니다'); edRenderOut();
-  }));
+  // OK → "1080p로 업그레이드할까요?" → 예: 집 PC가 1080p 배포본을 만든 뒤 배포 탭에 / 아니요: 지금 해상도 그대로 배포 탭에
+  box.querySelectorAll('[data-rel]').forEach(b => b.onclick = () => {
+    const rid = b.dataset.rel, r = renders.find(x => x.id === rid);
+    const hold = document.createElement('div'); hold.className = 'card upbox';
+    hold.innerHTML = `<b>이 완성본으로 OK · 배포로 넘깁니다</b>
+      <p style="margin:6px 0"><b>1080p로 업그레이드하시겠습니까?</b> 영상은 480p로 싸게 만들어 확인했습니다. 업그레이드하면 ${hasWin ? '집 PC' : '완성본을 만든 컴퓨터'}가 완성본을 1080p 배포용 파일로 키운 뒤 배포 탭에 올립니다(추가 비용 없음, 2분짜리 기준 수 분~수십 분).</p>
+      <div class="row"><button class="btn primary" id="upYes">예, 1080p로 업그레이드</button><button class="btn" id="upNo">아니요, 지금 해상도로</button><button class="btn" id="upX">취소</button></div>`;
+    b.closest('table').before(hold);
+    const go2 = up => guard(async () => {
+      const row = await q(S.sb.from('releases').upsert({ episode_id: ED.ep.id, render_id: rid, status: rel?.status && rel.status !== 'hold' ? rel.status : 'ready',
+        title: rel?.title || `${ED.ep.number}화 ${ED.ep.title || ''}`.trim(), approved_at: new Date().toISOString(),
+        resolution: up ? '1080p' : (r?.files?.resolution || '480p'), upscale_status: up ? 'queued' : 'none', upscale_files: {} }, { onConflict: 'episode_id' }).select('id').single());
+      if (up) await q(S.sb.from('pipeline_tasks').insert({ kind: 'upscale', episode_id: ED.ep.id, platform: r?.files?.platform === 'windows' ? 'server' : (r?.files?.platform || null), payload: { release_id: row.id, render_id: rid } }));
+      hold.remove();
+      toast(up ? '1080p로 키우는 중입니다. 끝나면 알림이 오고 배포 탭에 1080p로 표시됩니다' : '배포로 넘겼습니다. 배포 탭에서 볼 수 있습니다'); edRenderOut();
+    });
+    $('#upYes').onclick = go2(true); $('#upNo').onclick = go2(false); $('#upX').onclick = () => hold.remove();
+  });
   const gr = box.querySelector('[data-gorel]'); if (gr) gr.onclick = e => { e.preventDefault(); go('release'); };
   const make = kind => guard(async () => {
     await edSave();
@@ -8061,7 +8154,7 @@ const HELP = {
 <li><b>PPL 수정 전 컷</b> 노란 안내 — PPL이 들어간 씬에 그 전에 만든 컷이 있으면 "PPL 반영해 다시 설계".<span class="ex">예: S3에 협찬 텀블러를 넣었는데 S3 컷이 이미 있음 → 다시 설계 → 새로 승인</span></li>
 </ul>
 <h4>비용 감각</h4>
-<p>480p 10초 컷 약 2,800원. 720p는 약 2.2배. 실제 쓴 돈은 비용 탭에 자동 기록.<span class="ex">예: 2분짜리 1화(컷 20개 × 6초) 480p ≈ 3~4만 원 + 재시도분</span></p>`],
+<p><b>480p로 만드는 것을 권장합니다.</b> 480p 10초 컷 약 2,800원, 720p는 약 2.2배. 컷 확인·재시도·편집은 480p로 싸게 하고, 마지막에 편집에서 OK → 배포로 넘길 때 <b>1080p로 업그레이드</b>(추가 비용 없음)를 고르면 배포본만 1080p가 됩니다. 실제 쓴 돈은 비용 탭에 자동 기록.<span class="ex">예: 2분짜리 1화(컷 20개 × 6초) 480p ≈ 3~4만 원 + 재시도분</span></p>`],
 
   edit: ['편집실 사용법', `
 <p>통과한 컷을 한 화짜리 영상으로 잇고 다듬습니다. 브라우저에서는 "어디를 몇 초 자르고 어떻게 잇는지"만 정하고, 실제 영상은 맥·집 PC가 만듭니다. 모든 변경은 자동 저장되고 ↶로 되돌립니다.<span class="ex">예: C04 끝 0.8초 자르기 → 자동 저장 → 정확한 미리보기로 확인</span></p>
@@ -8089,7 +8182,7 @@ const HELP = {
 <h4>6. 결과물 → 배포</h4>
 <ul><li><b>정확한 미리보기</b> — 완성본과 똑같이 작은 화질로(무료, 1분 안팎).<span class="ex">예: 휴대폰으로 보고 확인</span></li>
 <li><b>완성본 내보내기</b> — 원본 화질로 집 PC가 완성 영상·무음 영상·대사·음악·자막·프리미어/다빈치 XML까지 저장.<span class="ex">예: EP01_… › 00_편집본 › v7_1124</span></li>
-<li><b>OK · 배포로 넘기기</b> — 완성본 줄의 버튼. 누르면 배포 탭에 "배포 대기"로 올라갑니다.<span class="ex">예: v7 완성본 OK → 배포 탭 1화 "배포 대기"</span></li></ul>
+<li><b>OK · 배포로 넘기기</b> — 완성본 줄의 버튼. 누르면 <b>"1080p로 업그레이드하시겠습니까?"</b>를 묻습니다. <b>예</b>: 집 PC가 완성본을 1080p 배포용 파일(<code>_완성_1080p.mp4</code>)로 키운 뒤 배포 탭에 1080p로 올림(추가 비용 없음). <b>아니요</b>: 지금 해상도 그대로 배포 대기.<span class="ex">예: v7 완성본 OK → 예 → 10분 뒤 알림 "1화 1080p 배포본 완성" → 배포 탭 1화 "배포 대기 · 1080p"</span></li></ul>
 <h4>단축키</h4>
 <p>스페이스 재생 · ←/→ 0.1초(⇧ 1초) · S 나누기 · Delete 빼기 · ⌘Z 되돌리기 · Esc 선택 해제</p>`],
 
@@ -8100,6 +8193,7 @@ const HELP = {
 <li><b>묶음</b> — 배포 기준(설정 → 배포, 기본 3화 묶음 · 알림 1번)대로 대기 중인 화를 순서대로 묶습니다.<span class="ex">예: 1~3화 = 1묶음(한 번에 올리고 알림 1번), 4~6화 = 2묶음</span></li>
 <li><b>▶ 보기</b>(목록 오른쪽) 또는 화를 누르면 그 화 영상을 바로 봅니다. 공개 주소가 유튜브면 <b>공개된 유튜브</b>와 <b>완성본 파일</b> 중 골라 봅니다.<span class="ex">예: 3화 ▶ 보기 → 유튜브에 올라간 그대로 재생</span></li>
 <li>화를 누르면 완성본 미리보기, 폴더, 제목·설명·예약 시각·상태.<span class="ex">예: 제목 "EP.01 얼굴로 노래하라고요?" · 예약 11/28 18:00</span></li>
+<li><b>해상도</b> — OK 때 업그레이드를 골랐으면 "1080p 업그레이드 중" → "1080p". 안 했으면 화를 눌러 <b>1080p로 업그레이드</b>를 나중에 눌러도 됩니다. 올릴 때는 <code>_완성_1080p.mp4</code>를 쓰세요.<span class="ex">예: 2화 480p → 1080p로 업그레이드 → 완료 후 폴더의 EP02_완성_1080p.mp4 업로드</span></li>
 <li><b>공개 주소</b>를 넣으면 '공개됨'이 됩니다(유튜브 자동 업로드는 연결 예정).<span class="ex">예: https://youtu.be/abc123 입력 → 공개됨</span></li>
 <li>다른 완성본으로 바꾸려면 편집 탭에서 그 완성본의 OK를 다시.<span class="ex">예: 자막 고친 v8로 교체</span></li>
 </ul>`],
@@ -8258,7 +8352,7 @@ const HELP = {
 <li><b>2단계 인증</b> — 꼭 켜 두세요.</li>
 <li><b>API 키</b> — Claude·Higgsfield·ElevenLabs. 연결 시험은 무료로 키만 확인. 키는 채팅에 붙이지 마세요.<span class="ex">예: Higgsfield "연결됨" 초록</span></li>
 <li><b>제작</b> — 해상도(처음엔 480p), 화면 비율, 장면 사진 모델(auto = Nano Banana Pro), 자동 재시도(0~2), 보관 폴더.<span class="ex">예: 480p · 9:16 · auto · 자동 재시도 1번</span></li>
-<li><b>화면 방향 · 해상도</b>(모델·도구 표 안) — 세로(9:16)/가로(16:9) 등과 처음 생성 해상도(480p·720p·1080p). 새로 설계하는 컷부터 적용됩니다.<span class="ex">예: 세로 9:16 · 720p (10초 컷 약 3,500원)</span></li>
+<li><b>화면 방향 · 해상도</b>(모델·도구 표 안) — 세로(9:16)/가로(16:9) 등과 처음 생성 해상도. <b>480p로 만드는 것을 권장합니다</b>: 컷을 여러 번 만들고 감수·편집하는 동안 비용이 가장 적고(720p의 약 절반), 화질은 마지막에 <b>편집에서 OK → 배포로 넘길 때 "1080p로 업그레이드"</b>로 올립니다. 새로 설계하는 컷부터 적용됩니다.<span class="ex">예: 세로 9:16 · 480p로 제작 → 편집 OK 때 "예, 1080p로 업그레이드" → 배포 탭에 1080p</span></li>
 <li><b>모델·도구 표</b>(제작 칸) — 분야마다 <b>지금 고정된 것</b>(왼쪽)과 <b>바꾸기</b>(오른쪽). 영상 생성·장면 사진·대사 목소리·배경음악·작가실·감독·감수자 모델을 고릅니다. Higgsfield 영상 모델은 전체 목록이 보이고, 입력 형식을 확인해 연결한 것만 고를 수 있습니다("연결 준비 중"은 회색).<span class="ex">예: 영상 Seedance 2.5 · 장면 사진 Nano Banana Pro · 대사 ElevenLabs · 배경음악 ElevenLabs Music(music_v1) · 감독 Opus 5.5</span></li>
 <li><b>영상 모델 · 대사 도구 · 배경음악 도구</b>(제작 칸) — <b>API 키가 등록된 것 중에서</b> 고릅니다(키 없는 도구는 회색). 영상 모델은 Higgsfield 안의 Seedance 2.5 / Kling 4.0.<span class="ex">예: 영상 Seedance 2.5 · 대사 Higgsfield(영상과 함께 만든 목소리) · 배경음악 ElevenLabs Music</span><span class="ex">예: 영상 Kling 4.0 · 대사 ElevenLabs(Kling은 소리가 없어 바이블 목소리로 입힘) · 배경음악 직접 올리기(Suno)</span></li>
 <li><b>실제 연결 점검</b>(제작 칸) — 진짜 호출을 한 번씩(약 100~300원) 해서 결과를 알려 줍니다. 집에서 에이전트를 켠 뒤 처음 한 번.<span class="ex">예: "OK 장면 사진 모델 경로: google/nano-banana-pro/edit"</span></li>

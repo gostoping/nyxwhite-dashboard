@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.13.2"
+VERSION = "1.14.0"
 
 import base64
 import glob
@@ -962,6 +962,13 @@ def ffmpeg():
 
 def ff(*args):
     r = subprocess.run([ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", *args], capture_output=True, text=True, timeout=600)
+    if r.returncode != 0:
+        raise RuntimeError(f"ffmpeg 실패: {(r.stderr or '')[-300:]}")
+
+
+def ff_long(*args, timeout=7200):
+    """오래 걸리는 ffmpeg(업스케일 등): 2시간까지 기다린다."""
+    r = subprocess.run([ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", *args], capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
         raise RuntimeError(f"ffmpeg 실패: {(r.stderr or '')[-300:]}")
 
@@ -2456,6 +2463,68 @@ def t_photo_describe(t):
     return f"{info.get('name')} 묘사 {len(desc)}자"
 
 
+@task("upscale")
+def t_upscale(t):
+    """편집 OK 때 '1080p로 업그레이드' → 완성본을 1080p 배포용으로 키운다(집 PC, 추가 비용 없음).
+    Real-ESRGAN(realesrgan-ncnn-vulkan)이 이 컴퓨터에 있으면 AI 업스케일, 없으면 ffmpeg 고품질 확대(lanczos + 약한 선명도)."""
+    p = t.get("payload") or {}
+    rel = rpc("agent_get_release", p_token=TOKEN, p_id=p.get("release_id")) or {}
+    rd = rel.get("render") or {}
+    files = rd.get("files") or {}
+    folder = files.get("folder")
+    if not folder or not os.path.isdir(folder):
+        raise RuntimeError(f"완성본 폴더가 이 컴퓨터에 없습니다: {folder or '(없음)'} — 완성본을 만든 컴퓨터에서 해야 합니다")
+    src = next((os.path.join(folder, f) for f in sorted(os.listdir(folder)) if f.endswith("_완성.mp4")), None)
+    if not src:
+        raise RuntimeError("완성 영상(_완성.mp4)을 찾지 못했습니다")
+    rpc("agent_update_release", p_token=TOKEN, p_id=rel["id"], p={"upscale_status": "running"})
+    try:
+        info = subprocess.run([ffmpeg(), "-hide_banner", "-i", src], capture_output=True, text=True, timeout=60).stderr
+        m = re.search(r"Video:.*?, (\d{3,5})x(\d{3,5})", info)
+        w, h = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+        if not w:
+            raise RuntimeError("영상 크기를 읽지 못했습니다")
+        k = 1080 / min(w, h)
+        W, H = int(round(w * k / 2) * 2), int(round(h * k / 2) * 2)
+        if abs(w / h - 9 / 16) < 0.02:
+            W, H = 1080, 1920
+        elif abs(w / h - 16 / 9) < 0.02:
+            W, H = 1920, 1080
+        out = src.replace("_완성.mp4", "_완성_1080p.mp4")
+        esr = shutil.which("realesrgan-ncnn-vulkan") or next((x for x in glob.glob(os.path.join(HOME, "tools", "realesrgan*", "realesrgan-ncnn-vulkan*")) if os.access(x, os.X_OK)), None)
+        method = "ffmpeg 고품질 확대"
+        if esr:
+            try:
+                work = os.path.join(HOME, "work", f"esr_{uuid.uuid4().hex[:6]}")
+                fin, fout = os.path.join(work, "in"), os.path.join(work, "out")
+                os.makedirs(fin), os.makedirs(fout)
+                progress(f"{rel['episode']['number']}화 AI 업스케일: 장면 나누는 중")
+                ff_long("-i", src, "-qscale:v", "1", os.path.join(fin, "f%06d.jpg"))
+                progress(f"{rel['episode']['number']}화 AI 업스케일 중(Real-ESRGAN, 수십 분 걸릴 수 있음)")
+                subprocess.run([esr, "-i", fin, "-o", fout, "-n", "realesr-animevideov3", "-s", "2", "-f", "jpg"], check=True, capture_output=True)
+                fps = re.search(r"(\d+(?:\.\d+)?) fps", info)
+                ff_long("-framerate", fps.group(1) if fps else "24", "-i", os.path.join(fout, "f%06d.jpg"), "-i", src, "-map", "0:v", "-map", "1:a?",
+                   "-vf", f"scale={W}:{H}:flags=lanczos", "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p",
+                   "-c:a", "copy", "-movflags", "+faststart", out)
+                method = "AI 업스케일(Real-ESRGAN)"
+                shutil.rmtree(work, ignore_errors=True)
+            except Exception as ex:
+                log(f"AI 업스케일 실패, ffmpeg 확대로: {ex}")
+                esr = None
+        if not esr:
+            progress(f"{rel['episode']['number']}화 1080p로 키우는 중(ffmpeg)")
+            ff_long("-i", src, "-vf", f"scale={W}:{H}:flags=lanczos,unsharp=5:5:0.5:5:5:0.0", "-c:v", "libx264", "-preset", "slow", "-crf", "16",
+               "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", out)
+        ff("-i", out, "-an", "-c:v", "copy", out.replace("_완성_1080p.mp4", "_영상만(무음)_1080p.mp4"))
+    except Exception as ex:
+        rpc("agent_update_release", p_token=TOKEN, p_id=rel["id"], p={"upscale_status": "failed", "upscale_files": {"error": str(ex)[:300]}})
+        raise
+    rpc("agent_update_release", p_token=TOKEN, p_id=rel["id"], p={"upscale_status": "done", "resolution": "1080p",
+                                                                  "upscale_files": {"path": out, "folder": folder, "method": method, "size": f"{W}x{H}", "platform": PLATFORM}})
+    notify(f"{rel['episode']['number']}화 1080p 배포본 완성", f"{method} · {W}x{H}\n{out}")
+    return f"{W}x{H} · {method}"
+
+
 @task("bgm")
 def t_bgm(t):
     """편집실 '이 화 음악 톤' → ElevenLabs Music으로 가사 없는 배경음악을 만들어 저장소에 올린다(편집실에서 타임라인에 넣기)."""
@@ -3160,7 +3229,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
