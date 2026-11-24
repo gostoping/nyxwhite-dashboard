@@ -5405,7 +5405,13 @@ function openPropForm(cat = 'prop') {
 // 영어 프롬프트: 한글로 적은 묘사는 적용 즉시 작가실이 영어 고정 프롬프트로 옮겨 두고, 감독·사진 모델은 그 문장을 쓴다
 const hasHangul = s => /[가-힣]/.test(s || '');
 function promptLine(e, c) {
-  if (!['character', 'location', 'background', 'prop', 'style'].includes(e.category) || !('prompt_en' in c)) return '';
+  if (!['character', 'location', 'background', 'prop', 'style', 'music'].includes(e.category) || !('prompt_en' in c)) return '';
+  const t = (S.bpTask || {})[c.id];
+  const req = t?.payload?.apply_reason && c.change_reason ? `요청 "${esc(c.change_reason.slice(0, 40))}"을(를) ` : '';
+  const state = !t ? '' : t.status === 'running' ? `<div class="row" style="gap:6px;margin-top:6px"><span class="spin"></span><span class="quiet">${req}작가실이 반영하는 중: ${esc(t.progress || '')}</span></div>`
+    : t.status === 'queued' ? `<div class="row" style="gap:6px;margin-top:6px">${pill('반영 대기', 'warn')}<span class="quiet">${req}작가실이 반영할 차례를 기다리는 중${t.not_before && new Date(t.not_before) > Date.now() ? ` (${Math.ceil((new Date(t.not_before) - Date.now()) / 60000)}분 뒤 시작)` : ''}. 에이전트가 다른 일(예: 컷 설계)을 하고 있으면 그 일이 끝난 뒤 바로 합니다. 제작 탭 현황에서 볼 수 있어요.</span></div>`
+    : t.status === 'failed' ? `<div class="msg err" style="margin-top:6px">${req}영어 프롬프트 반영 실패: ${esc(explainFail('bible_prompt', t.error).what)} ${esc(explainFail('bible_prompt', t.error).how)} <button class="btn small" data-bpretry="${esc(t.id)}">다시 시도</button></div>` : '';
+  if (state && t.status !== 'done') return state + (c.prompt_en ? `<details style="margin-top:6px"><summary class="quiet">지금 영어 프롬프트(반영 전)</summary><div class="bdesc" style="margin-top:4px">${esc(c.prompt_en)}</div></details>` : '');
   if (c.prompt_en) return `<details style="margin-top:6px"><summary class="quiet">영어 프롬프트 (감독·사진 모델이 쓰는 문장)</summary><div class="bdesc" style="margin-top:4px">${esc(c.prompt_en)}</div></details>`;
   if (hasHangul(c.description) || hasHangul(c.details)) return `<div class="row" style="gap:6px;margin-top:6px">${pill('영어 프롬프트 만드는 중', 'warn')}<span class="quiet">작가실이 한글 묘사를 영어로 옮기고 있습니다(1~2분)</span></div>`;
   return '';
@@ -5447,6 +5453,13 @@ async function viewBible(main) {
     .in('entry_id', entries.map(e => e.id)).order('version_no', { ascending: false }))
     .catch(() => q(S.sb.from('bible_versions').select('id,entry_id,version_no,description,details,voice_id,soul_id,image_paths,voice_path,change_reason,status,proposed_by,decided_at,created_at,devices(name)')
       .in('entry_id', entries.map(e => e.id)).order('version_no', { ascending: false }))) : [];
+  // 카드마다 영어 프롬프트 작업 상태(대기·진행·실패)를 보여 주려고: 이 시리즈의 최근 바이블 프롬프트 작업
+  S.bpTask = {};
+  const bpt = await q(S.sb.from('pipeline_tasks').select('id,status,progress,error,payload,created_at,not_before').eq('kind', 'bible_prompt').eq('series_id', S.seriesId)
+    .order('created_at', { ascending: false }).limit(200)).catch(() => []);
+  const ahead = await q(S.sb.from('pipeline_tasks').select('id', { count: 'exact', head: true }).in('status', ['queued', 'running'])).catch(() => null);
+  bpt.forEach(t => { const k = t.payload?.version_id; if (k && !S.bpTask[k]) S.bpTask[k] = t; });
+  S.bpAhead = ahead;
   const cur = id => versions.find(v => v.entry_id === id && v.status === 'active');
   const proposals = versions.filter(v => v.status === 'proposed');
   const urls = await signedUrls([...new Set(versions.filter(v => v.status === 'active' || v.status === 'proposed')
@@ -6065,7 +6078,7 @@ function openBibleEditor({ entry, base, urls, fromId }) {
       const sameText = description === (base?.description || '').trim() && ($('#bdet').value.trim() || '') === (base?.details || '').trim();
       if (reasonTxt && sameText && !autoDesc && !description.startsWith('(작가실이 사진을 보고 쓰는 중)')) {
         // 묘사는 그대로 두고 이유(요청)만 적었으면: 작가실이 요청을 묘사에 반영하고 영어 프롬프트를 새로 쓴다
-        await q(S.sb.from('pipeline_tasks').insert({ kind: 'bible_prompt', series_id: S.seriesId, payload: { version_id: v.id, entry_id: entryId, apply_reason: true } }));
+        // 작업은 DB가 바로 넣는다(적용되는 순간 트리거) — 여기서는 안내만
         toast(`v${v.version_no} 적용했습니다. 작가실이 "${reasonTxt.slice(0, 30)}"을(를) 묘사와 영어 프롬프트에 반영합니다(1~2분)`);
       } else if (autoDesc || description.startsWith('(작가실이 사진을 보고 쓰는 중)')) {
         await q(S.sb.from('pipeline_tasks').insert({ kind: 'photo_describe', series_id: S.seriesId, payload: { entry_id: entryId, version_id: v.id } }));
@@ -7053,6 +7066,9 @@ function openZoom(imgs, i) {
   document.body.appendChild(box); show();
 }
 document.addEventListener('click', ev => {
+  const rb = ev.target.closest('[data-bpretry]');
+  if (rb) { ev.preventDefault(); const t = Object.values(S.bpTask || {}).find(x => x.id === rb.dataset.bpretry);
+    if (t) retryTask({ ...t, kind: 'bible_prompt', series_id: S.seriesId }).then(() => { toast('다시 맡겼습니다'); go('bible'); }).catch(e => toast('오류: ' + errText(e))); return; }
   const im = ev.target.closest('img'); if (!im || !im.closest(ZOOM_SCOPE) || im.closest('#zoomBox')) return;
   ev.preventDefault(); ev.stopPropagation();   // 체크박스가 바뀌거나 새 창이 열리지 않게: 크게 보기만
   const group = im.closest('.pdgrid, .thumbs, .bimgs, .kfs, .card, .vdbox') || im.parentElement;
