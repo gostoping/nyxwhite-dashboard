@@ -308,7 +308,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.13.1"
+VERSION = "1.13.2"
 
 import base64
 import glob
@@ -2803,8 +2803,17 @@ def t_bible_suggest(t):
 - description: 한국어. 색감·대비·조명·렌즈·심도·카메라 움직임·질감·화면 비율 느낌을 구체적으로(실사 드라마, 세로 숏폼 기준).
 - details: 한국어. 금지 사항(화면 글자·워터마크·과한 필터 등)과 주의점.
 답 형식: <json>{"items": [{"name": "", "description": "", "details": ""}]}</json>"""
-    progress(f"작가실이 「{title}」 대본을 읽고 {'화별 배경음악 톤' if what == 'music' else '스타일·톤'}을 추천하는 중")
-    text, _ = claude("claude-opus-5-5", system, f"시리즈: {title}\n\n[대본]\n{scripts}", max_tokens=6000, stage="other",
+    hint = (p.get("hint") or "").strip()
+    if hint:
+        system += """
+[대표 제안 — 가장 먼저 반영]
+대표가 원하는 방향을 적었다. 대본과 맞지 않는 부분이 있어도 대표 제안을 우선하고, 제안이 비어 있는 부분만 대본을 읽고 채운다.
+제안에 나온 표현(악기·색·분위기·금지 사항)은 빠뜨리지 말고 description·details에 구체적으로 풀어 쓴다."""
+    known = [e.get("name") for e in ov.get("entries") or [] if e.get("category") == ("music" if what == "music" else "style")]
+    if p.get("redo") and known:
+        system += f"\n이미 있는 항목 이름: {', '.join(known)}. 같은 이름을 쓰면 새 수정안으로 올라간다(대표가 비교해 고른다)."
+    progress(f"작가실이 「{title}」 대본을 읽고 {'화별 배경음악 톤' if what == 'music' else '스타일·톤'}을 추천하는 중" + (" (대표 제안 반영)" if hint else ""))
+    text, _ = claude("claude-opus-5-5", system, f"시리즈: {title}\n\n[대표 제안]\n{hint or '(없음 — 대본을 읽고 추천)'}\n\n[대본]\n{scripts}", max_tokens=6000, stage="other",
                      note=f"작가실 추천: {'배경음악' if what == 'music' else '스타일·톤'}")
     items = []
     for it in pick_json(text).get("items") or []:
@@ -2813,7 +2822,7 @@ def t_bible_suggest(t):
         items.append({"category": "music" if what == "music" else "style", "name": it["name"][:80], "summary": it["description"][:200],
                       "description": it["description"], "details": it.get("details") or "",
                       "appears": [{"ep": int(n), "scene": None} for n in (it.get("eps") or []) if str(n).isdigit()],
-                      "reason": "작가실 추천(대본을 읽고)"})
+                      "reason": "작가실 추천(대표 제안 반영)" if hint else "작가실 추천(대본을 읽고)", "force_proposal": bool(p.get("redo"))})
     if not items:
         raise RuntimeError("추천안을 만들지 못했습니다")
     r = rpc("agent_bible_upsert", p_token=TOKEN, p_series=sid, p_items=items) or {}
@@ -2895,7 +2904,7 @@ def t_bible_prompt(t):
 - 눈에 보이는 고정 특징만: 인물은 나이대·국적 인상·성별·얼굴형·눈·코·입·피부·머리(길이·모양·색)·체형·키 인상·기본 분위기·대표 의상,
   장소·배경은 공간 구조·재질·색·시간대·빛·분위기, 소품은 모양·크기·재질·색·낡음, 스타일·톤은 색감·조명·카메라·질감, 배경음악은 장르·악기·템포(BPM 느낌)·분위기·세기 변화(가사 없는 연주곡).
 - 세부 사항에 '바뀌면 안 되는 특징'이 있으면 반드시 포함한다. 화마다 바뀌는 의상·상황·줄거리·성격·대사는 넣지 않는다.
-- 3~7문장, 현재형, 쉼표로 이어진 묘사 위주. 이름·실존 인물·배우·브랜드는 쓰지 않는다. 원문에 없는 것을 지어내지 않는다.
+- 한국어 원문의 내용을 하나도 빠뜨리지 말고 꼼꼼하게 옮긴다(색·재질·수치·금지 사항까지). 4~8문장, 현재형, 쉼표로 이어진 묘사 위주. 이름·실존 인물·배우·브랜드는 쓰지 않는다. 원문에 없는 것을 지어내지 않는다.
 답 형식: <json>{"prompt_en": ""}</json>"""
     user = (f"분류: {cat}\n이름(참고, 프롬프트에 쓰지 말 것): {info.get('name')}\n대본 속 역할: {info.get('summary') or '-'}\n"
             f"[묘사]\n{info.get('description') or '-'}\n[세부 사항]\n{info.get('details') or '-'}")
@@ -5078,7 +5087,7 @@ async function viewBible(main) {
   ${['style', 'music'].includes(S.bibleCat) ? `<div class="card" style="padding:10px 12px">
     <div class="row"><b>${S.bibleCat === 'music' ? '배경음악 톤' : '스타일·톤'}</b>
       <span class="quiet">${S.bibleCat === 'music' ? '화별로 원하는 음악 톤(적용 화 지정). 편집실 "🎵 이 화 음악 톤"에서 ElevenLabs로 바로 만들거나 Suno용 프롬프트를 복사합니다.' : '모든 화에 공통으로 붙는 화면 규칙(색감·조명·렌즈·질감·금지).'}</span>
-      <button class="btn small" id="bsugRe" style="margin-left:auto">작가실 추천 다시 받기</button></div>
+      <button class="btn small" id="bsugRe" style="margin-left:auto">내 제안 넣어 추천 다시 받기</button></div>
     <span class="ex">${S.bibleCat === 'music' ? '예: "1화 — 저음 피아노 단음, 느린 템포, 후반 현악 상승" · 적용 화 1' : '예: "따뜻한 시네마틱 색감, 얕은 심도, 손떨림 적은 핸드헬드, 화면 글자 금지"'}</span></div>` : ''}
   ${isSpon ? `<div class="card sponbox">
     <div class="row"><b style="font-size:15px">협찬 씬 (PPL)</b><span class="quiet">위 '설정' 줄의 + 협찬 소품 / + 협찬 장소로 추가합니다</span></div>
@@ -5239,20 +5248,32 @@ async function viewBible(main) {
   $('#hdrProp').onclick = () => openPropForm('prop');
   $('#hdrLoc').onclick = () => openPropForm('location');
   // 스타일·톤 / 배경음악: 있으면 그 분류로 이동, 없으면 작가실 추천 받기
-  const suggest = what => guard(async () => {
+  // 추천받기 칸: 대표 제안(한글 가능)을 적으면 작가실이 그걸 최우선으로 반영, 비우면 작가실 추천 그대로
+  const askSuggest = (what, again) => {
+    const isM = what === 'music', box = $('#bEditor');
+    box.innerHTML = `<div class="card" style="border-color:var(--accent)">
+      <b>${isM ? '배경음악 톤' : '스타일·톤'} 작가실 추천${again ? ' 다시' : ''} 받기</b>
+      <p class="quiet" style="margin:4px 0">원하는 방향이 있으면 적어 주세요. <b>한글로 편하게</b> 적어도 됩니다 — 작가실이 이 제안을 가장 먼저 반영해 추천안을 쓰고, 적용하면 AI가 읽기 좋게 꼼꼼한 영어 프롬프트로 바뀝니다. <b>비워 두면 작가실이 대본을 읽고 추천한 그대로</b> 올립니다.</p>
+      <textarea id="sgHint" style="min-height:90px" placeholder="${isM ? '예: 전체적으로 잔잔한 피아노 중심, 1화 후반 공항 장면만 현악으로 벅차게. 2화는 코믹하게 통통 튀는 리듬. 가사 있는 곡은 빼 줘' : '예: 따뜻하지만 살짝 바랜 필름 느낌, 태국 장면은 노란 햇빛, 한국 장면은 차가운 푸른 톤. 손떨림 적은 핸드헬드, 화면 글자 금지'}"></textarea>
+      <div class="row" style="margin-top:8px"><button class="btn primary" id="sgGo">추천받기</button><button class="btn" id="sgX">취소</button>
+        <span class="quiet">Claude 수백 원 · 1~2분 뒤 수정안으로 올라옵니다</span></div></div>`;
+    $('#sgX').onclick = () => { box.innerHTML = ''; };
+    $('#sgGo').onclick = guard(async () => {
+      const hint = $('#sgHint').value.trim();
+      await q(S.sb.from('pipeline_tasks').insert({ kind: 'bible_suggest', series_id: S.seriesId, payload: { series_id: S.seriesId, what, hint, redo: !!again } }));
+      S.bibleCat = isM ? 'music' : 'style';
+      toast(hint ? '제안을 반영해 작가실이 추천안을 씁니다' : '작가실이 대본을 읽고 추천안을 씁니다'); go('bible');
+    });
+    box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  };
+  const suggest = what => () => {
     const cat = what === 'music' ? 'music' : 'style';
     if (cnt(cat) || proposals.some(p => entryOf(p.entry_id)?.category === cat)) { S.bibleCat = cat; go('bible'); return; }
-    if (!confirm(`작가실이 대본을 읽고 ${what === 'music' ? '화별 배경음악 톤(메인 테마 + 화마다 1개)' : '전 회차 공통 스타일·톤'} 추천안을 올립니다(Claude 수백 원).\n올라오면 고쳐서 적용하세요.`)) return;
-    await q(S.sb.from('pipeline_tasks').insert({ kind: 'bible_suggest', series_id: S.seriesId, payload: { series_id: S.seriesId, what } }));
-    S.bibleCat = cat; toast('작가실에 맡겼습니다. 1~2분 뒤 수정안으로 올라옵니다'); go('bible');
-  });
+    askSuggest(what, false);
+  };
   $('#hdrStyle').onclick = suggest('style');
   $('#hdrMusic').onclick = suggest('music');
-  const sre = $('#bsugRe'); if (sre) sre.onclick = guard(async () => {
-    if (!confirm('작가실에게 추천안을 다시 받을까요? 이미 있는 이름의 항목은 건너뜁니다.')) return;
-    await q(S.sb.from('pipeline_tasks').insert({ kind: 'bible_suggest', series_id: S.seriesId, payload: { series_id: S.seriesId, what: S.bibleCat } }));
-    toast('작가실에 맡겼습니다');
-  });
+  const sre = $('#bsugRe'); if (sre) sre.onclick = () => askSuggest(S.bibleCat, true);
   main.querySelectorAll('[data-plc]').forEach(b => b.onclick = guard(async () => {
     const e = entryOf(b.dataset.plc); if (!e) return;
     const hint = prompt(`제작자가 대본을 읽고 '${e.name}'을(를) 넣으면 좋을 화·씬을 추천합니다. (Claude 수백 원)\n원하는 쓰임이 있으면 적어 주세요(비워도 됩니다).`, '');
@@ -8092,7 +8113,7 @@ const HELP = {
 <li><b>시리즈 고르기</b> · <b>+ 항목 추가</b> — 새 항목을 직접 등록합니다(분류를 골라 이름·묘사·사진).<span class="ex">예: + 항목 추가 → 캐릭터 · "민지" · "태국 오디션에서 얼굴로 합격한 연습생"</span></li>
 <li><b>대본에서</b> · 필요한 인물·장소·소품 찾기 — 작가실이 화별로 대본을 읽고 화면에 나와야 하는 것을 수정안으로 올립니다.<span class="ex">예: 1화에서 "심사위원", "방콕 오디션장", "보육원 팔찌" 등을 찾아 올림</span></li>
 <li><b>한꺼번에</b> · 사진 만들기 / 인물 목소리 만들기 — 사진이 없는 항목의 사진 후보, 목소리가 없는 인물의 목소리 후보를 한 번에.<span class="ex">예: "사진 만들기 (17)" → 17개 항목 후보 생성</span></li>
-<li><b>설정</b> · + 협찬 소품 / + 협찬 장소 / 스타일·톤 / 배경음악 — 스타일·톤과 배경음악은 처음 누르면 작가실이 대본을 읽고 <b>추천안</b>을 올립니다(수정안 → 고쳐서 적용). 이미 있으면 그 분류로 이동합니다.<span class="ex">예: "배경음악 · 추천받기" → "메인 테마" + "1화 — 저음 피아노…" 등 11건 → 고쳐서 적용</span></li>
+<li><b>설정</b> · + 협찬 소품 / + 협찬 장소 / 스타일·톤 / 배경음악 — 스타일·톤과 배경음악은 처음 누르면 <b>내 제안</b> 칸이 열립니다. 한글로 적으면 작가실이 그 제안을 가장 먼저 반영해 추천안을 쓰고, 비우면 대본을 읽고 추천한 그대로 올립니다(수정안 → 고쳐서 적용 → 꼼꼼한 영어 프롬프트로 자동 변환). 이미 있으면 그 분류로 이동하고, 거기서 "내 제안 넣어 추천 다시 받기".<span class="ex">예: 배경음악 제안 "잔잔한 피아노 중심, 공항 장면만 현악으로 벅차게" → 메인 테마 + 화별 톤 추천</span><span class="ex">예: "배경음악 · 추천받기" → "메인 테마" + "1화 — 저음 피아노…" 등 11건 → 고쳐서 적용</span></li>
 <li><b>분류 버튼</b> — 눌러서 그 분류만 봅니다. "협찬 씬"은 협찬으로 넣은 항목만 모아 봅니다.<span class="ex">예: 캐릭터 12 · 장소 9 · 협찬 씬 2</span></li>
 </ul>
 

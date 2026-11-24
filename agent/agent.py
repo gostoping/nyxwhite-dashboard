@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.13.1"
+VERSION = "1.13.2"
 
 import base64
 import glob
@@ -2505,8 +2505,17 @@ def t_bible_suggest(t):
 - description: 한국어. 색감·대비·조명·렌즈·심도·카메라 움직임·질감·화면 비율 느낌을 구체적으로(실사 드라마, 세로 숏폼 기준).
 - details: 한국어. 금지 사항(화면 글자·워터마크·과한 필터 등)과 주의점.
 답 형식: <json>{"items": [{"name": "", "description": "", "details": ""}]}</json>"""
-    progress(f"작가실이 「{title}」 대본을 읽고 {'화별 배경음악 톤' if what == 'music' else '스타일·톤'}을 추천하는 중")
-    text, _ = claude("claude-opus-5-5", system, f"시리즈: {title}\n\n[대본]\n{scripts}", max_tokens=6000, stage="other",
+    hint = (p.get("hint") or "").strip()
+    if hint:
+        system += """
+[대표 제안 — 가장 먼저 반영]
+대표가 원하는 방향을 적었다. 대본과 맞지 않는 부분이 있어도 대표 제안을 우선하고, 제안이 비어 있는 부분만 대본을 읽고 채운다.
+제안에 나온 표현(악기·색·분위기·금지 사항)은 빠뜨리지 말고 description·details에 구체적으로 풀어 쓴다."""
+    known = [e.get("name") for e in ov.get("entries") or [] if e.get("category") == ("music" if what == "music" else "style")]
+    if p.get("redo") and known:
+        system += f"\n이미 있는 항목 이름: {', '.join(known)}. 같은 이름을 쓰면 새 수정안으로 올라간다(대표가 비교해 고른다)."
+    progress(f"작가실이 「{title}」 대본을 읽고 {'화별 배경음악 톤' if what == 'music' else '스타일·톤'}을 추천하는 중" + (" (대표 제안 반영)" if hint else ""))
+    text, _ = claude("claude-opus-5-5", system, f"시리즈: {title}\n\n[대표 제안]\n{hint or '(없음 — 대본을 읽고 추천)'}\n\n[대본]\n{scripts}", max_tokens=6000, stage="other",
                      note=f"작가실 추천: {'배경음악' if what == 'music' else '스타일·톤'}")
     items = []
     for it in pick_json(text).get("items") or []:
@@ -2515,7 +2524,7 @@ def t_bible_suggest(t):
         items.append({"category": "music" if what == "music" else "style", "name": it["name"][:80], "summary": it["description"][:200],
                       "description": it["description"], "details": it.get("details") or "",
                       "appears": [{"ep": int(n), "scene": None} for n in (it.get("eps") or []) if str(n).isdigit()],
-                      "reason": "작가실 추천(대본을 읽고)"})
+                      "reason": "작가실 추천(대표 제안 반영)" if hint else "작가실 추천(대본을 읽고)", "force_proposal": bool(p.get("redo"))})
     if not items:
         raise RuntimeError("추천안을 만들지 못했습니다")
     r = rpc("agent_bible_upsert", p_token=TOKEN, p_series=sid, p_items=items) or {}
@@ -2597,7 +2606,7 @@ def t_bible_prompt(t):
 - 눈에 보이는 고정 특징만: 인물은 나이대·국적 인상·성별·얼굴형·눈·코·입·피부·머리(길이·모양·색)·체형·키 인상·기본 분위기·대표 의상,
   장소·배경은 공간 구조·재질·색·시간대·빛·분위기, 소품은 모양·크기·재질·색·낡음, 스타일·톤은 색감·조명·카메라·질감, 배경음악은 장르·악기·템포(BPM 느낌)·분위기·세기 변화(가사 없는 연주곡).
 - 세부 사항에 '바뀌면 안 되는 특징'이 있으면 반드시 포함한다. 화마다 바뀌는 의상·상황·줄거리·성격·대사는 넣지 않는다.
-- 3~7문장, 현재형, 쉼표로 이어진 묘사 위주. 이름·실존 인물·배우·브랜드는 쓰지 않는다. 원문에 없는 것을 지어내지 않는다.
+- 한국어 원문의 내용을 하나도 빠뜨리지 말고 꼼꼼하게 옮긴다(색·재질·수치·금지 사항까지). 4~8문장, 현재형, 쉼표로 이어진 묘사 위주. 이름·실존 인물·배우·브랜드는 쓰지 않는다. 원문에 없는 것을 지어내지 않는다.
 답 형식: <json>{"prompt_en": ""}</json>"""
     user = (f"분류: {cat}\n이름(참고, 프롬프트에 쓰지 말 것): {info.get('name')}\n대본 속 역할: {info.get('summary') or '-'}\n"
             f"[묘사]\n{info.get('description') or '-'}\n[세부 사항]\n{info.get('details') or '-'}")
