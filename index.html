@@ -306,7 +306,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.11.1"
+VERSION = "1.12.0"
 
 import base64
 import glob
@@ -1476,6 +1476,19 @@ def tts_line(voice_id, text, tags, model):
         raise RuntimeError(f"목소리 만들기 실패 {e.code}: {e.read()[:200]!r}") from None
 
 
+def el_music(prompt, seconds, model="music_v1"):
+    """ElevenLabs Music: 가사 없는 배경음악(mp3)을 만든다. 길이 3~600초."""
+    body = {"prompt": prompt[:2000], "music_length_ms": int(max(3, min(600, seconds)) * 1000), "model_id": model or "music_v1",
+            "force_instrumental": True}
+    req = urllib.request.Request("https://api.elevenlabs.io/v1/music?output_format=mp3_44100_128", data=json.dumps(body).encode(), method="POST",
+                                 headers={"xi-api-key": el_key(), "Content-Type": "application/json", "Accept": "audio/mpeg"})
+    try:
+        with urllib.request.urlopen(req, timeout=600) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"배경음악 만들기 실패 {e.code}: {e.read()[:300]!r}") from None
+
+
 def stt_words(path, model="scribe_v1"):
     """ElevenLabs 받아쓰기: 단어와 시간. 영상 소리 감수에 쓴다."""
     key = el_key()
@@ -1792,6 +1805,9 @@ def t_prep_cut(t):
         # ② 대사 미리 듣기
         lines = c.get("voice_lines") or parse_dialogue(c.get("dialogue"))
         for i, ln in enumerate(lines):
+            if (gen.get("dialogue_tool") or "elevenlabs") == "none":   # 설정: 대사 도구 '쓰지 않음'
+                ln["error"] = "설정에서 대사 도구를 '쓰지 않음'으로 해 두어 미리 듣기를 만들지 않았습니다"
+                continue
             vid, vname = voice_for(ctx, ln.get("speaker") or "")
             if not vid:
                 ln["error"] = "바이블에 이 인물의 목소리가 없습니다(바이블 → 목소리 디자인)"
@@ -2538,6 +2554,73 @@ def t_photo_describe(t):
     return f"{info.get('name')} 묘사 {len(desc)}자"
 
 
+@task("bgm")
+def t_bgm(t):
+    """편집실 '이 화 음악 톤' → ElevenLabs Music으로 가사 없는 배경음악을 만들어 저장소에 올린다(편집실에서 타임라인에 넣기)."""
+    p = t.get("payload") or {}
+    ep = t.get("episode_id")
+    prompt = (p.get("prompt") or "").strip()
+    if not prompt:
+        raise RuntimeError("음악 톤(프롬프트)이 비어 있습니다")
+    secs = int(p.get("seconds") or 60)
+    tool = p.get("tool") or "elevenlabs"
+    if tool != "elevenlabs":
+        raise RuntimeError(f"배경음악 도구 '{tool}'는 아직 자동 생성을 지원하지 않습니다(설정 → 제작 → 소리 도구)")
+    progress(f"ElevenLabs가 배경음악 {secs}초를 만드는 중")
+    data = el_music(prompt + " Instrumental only, no vocals, cinematic drama underscore that sits under dialogue.", secs, p.get("model") or "music_v1")
+    local = os.path.join(HOME, "work", f"bgm_{uuid.uuid4().hex[:8]}.mp3")
+    with open(local, "wb") as f:
+        f.write(data)
+    path = storage_upload(f"music/{p.get('series_id') or 'series'}/el_{uuid.uuid4().hex[:8]}.mp3", local, "audio/mpeg")
+    os.remove(local)
+    log_cost("audio", "elevenlabs", "music", {"seconds": secs}, episode_id=ep, note=f"배경음악: {p.get('name') or ''}", outcome="success")
+    notify("배경음악 도착", f"{p.get('name') or '이 화'} · {secs}초. 편집실 '이 화 음악 톤'에서 들어 보고 타임라인에 넣으세요")
+    return json.dumps({"path": path, "seconds": secs, "name": p.get("name") or "ElevenLabs 음악"}, ensure_ascii=False)
+
+
+@task("bible_suggest")
+def t_bible_suggest(t):
+    """작가실: 대본을 읽고 스타일·톤(전 회차 공통 화면 규칙) 또는 화별 배경음악 톤 추천안을 바이블 수정안으로 올린다."""
+    p = t.get("payload") or {}
+    sid = t.get("series_id") or p.get("series_id")
+    what = p.get("what") or "style"
+    ov = rpc("agent_bible_overview", p_token=TOKEN, p_series=sid) or {}
+    title = (ov.get("series") or {}).get("title", "")
+    eps = [e for e in ov.get("episodes") or [] if (e.get("text") or "").strip()]
+    if not eps:
+        return "읽을 대본이 없습니다"
+    budget = max(6000, 200000 // max(1, len(eps)))
+    scripts = "\n\n".join(f"[{x['number']}화 {x.get('title') or ''}]\n{(x.get('text') or '')[:budget]}" for x in eps)
+    if what == "music":
+        system = """너는 드라마 작가실의 음악 감독이다. 대본을 읽고 화별로 어울리는 배경음악 톤을 추천한다(가사 없는 연주곡, 대사 밑에 까는 음악).
+- 시리즈 공통 테마 1개(name: "메인 테마", eps: []) + 화마다 1개(name: "N화 — 한 줄 요약", eps: [N]). 감정이 크게 다른 구간이 있으면 화당 2개까지.
+- description: 한국어. 장르·악기·템포·분위기·세기 변화를 구체적으로(예: "저음 피아노 단음으로 시작, 느린 템포, 후반 현악이 서서히 올라오며 긴장").
+- details: 한국어. 어느 씬에서 어떻게 쓰면 좋은지, 피할 것(가사, 과한 드럼 등).
+답 형식: <json>{"items": [{"name": "", "description": "", "details": "", "eps": [1]}]}</json>"""
+    else:
+        system = """너는 드라마 작가실의 미술·촬영 감독이다. 대본을 읽고 모든 화에 공통으로 적용할 화면 스타일·톤을 추천한다.
+- 1~2개 항목. 첫 항목 name: "전 회차 공통 화면 스타일". 회상·미래처럼 톤이 확 다른 시점이 대본에 있으면 두 번째 항목(예: "회상 장면 톤").
+- description: 한국어. 색감·대비·조명·렌즈·심도·카메라 움직임·질감·화면 비율 느낌을 구체적으로(실사 드라마, 세로 숏폼 기준).
+- details: 한국어. 금지 사항(화면 글자·워터마크·과한 필터 등)과 주의점.
+답 형식: <json>{"items": [{"name": "", "description": "", "details": ""}]}</json>"""
+    progress(f"작가실이 「{title}」 대본을 읽고 {'화별 배경음악 톤' if what == 'music' else '스타일·톤'}을 추천하는 중")
+    text, _ = claude("claude-opus-5-5", system, f"시리즈: {title}\n\n[대본]\n{scripts}", max_tokens=6000, stage="other",
+                     note=f"작가실 추천: {'배경음악' if what == 'music' else '스타일·톤'}")
+    items = []
+    for it in pick_json(text).get("items") or []:
+        if not (it.get("name") and it.get("description")):
+            continue
+        items.append({"category": "music" if what == "music" else "style", "name": it["name"][:80], "summary": it["description"][:200],
+                      "description": it["description"], "details": it.get("details") or "",
+                      "appears": [{"ep": int(n), "scene": None} for n in (it.get("eps") or []) if str(n).isdigit()],
+                      "reason": "작가실 추천(대본을 읽고)"})
+    if not items:
+        raise RuntimeError("추천안을 만들지 못했습니다")
+    r = rpc("agent_bible_upsert", p_token=TOKEN, p_series=sid, p_items=items) or {}
+    notify(f"작가실 {'배경음악' if what == 'music' else '스타일·톤'} 추천 {len(items)}건", "바이블 탭(또는 지시 탭 적용 대기함)에서 고쳐서 적용해 주세요")
+    return f"추천 {len(items)}건 · 새 수정안 {r.get('proposals', 0)}건"
+
+
 @task("api_check")
 def t_api_check(t):
     """설정 → 실제 연결 점검: 진짜 호출을 아주 작게 한 번씩(합계 약 100~300원) 해서 경로·권한·응답 형식을 확인한다."""
@@ -3166,7 +3249,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"api_check": "실제 연결 점검", "bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
@@ -4782,14 +4865,23 @@ async function viewBible(main) {
       <div class="brow"><span class="blbl">한꺼번에</span><div class="bbtns">
         ${showPhotoBtn ? `<button class="btn small" id="bphotos" title="적용된 묘사는 있고 사진이 없는 항목의 사진 후보를 만듭니다. '직접 올리기' 항목은 빠집니다(인물은 Soul 2 실사)">${catLabel ? esc(catLabel) + ' ' : ''}사진 만들기 (${photoTodo.length})</button>` : ''}
         <button class="btn small" id="bcast" title="작가실이 대본을 읽고 인물마다 목소리 설명·시험 대사를 쓰고, ElevenLabs 후보 3개씩 만듭니다">인물 목소리 만들기</button></div></div>
+      <div class="brow"><span class="blbl">설정</span><div class="bbtns">
+        <button class="btn small" id="hdrProp" title="협찬(PPL) 소품을 사진과 함께 넣으면 작가실이 세게 보일 화·씬을 추천합니다">+ 협찬 소품</button>
+        <button class="btn small" id="hdrLoc" title="협찬(PPL) 장소를 사진과 함께 넣으면 작가실이 세게 보일 화·씬을 추천합니다">+ 협찬 장소</button>
+        <button class="btn small" id="hdrStyle" title="모든 화 공통 화면 규칙. 처음엔 작가실이 대본을 읽고 추천안을 올리고, 대표가 고쳐서 적용합니다">스타일·톤 ${cnt('style') ? `(${cnt('style')})` : '· 추천받기'}</button>
+        <button class="btn small" id="hdrMusic" title="화별 배경음악 톤. 처음엔 작가실이 추천안을 올리고, 대표가 고쳐서 적용합니다. 편집실에서 ElevenLabs로 바로 곡을 만들 수 있습니다">배경음악 ${cnt('music') ? `(${cnt('music')})` : '· 추천받기'}</button></div></div>
     </div>
     <div class="bcats">${[['all', `전체 ${entries.length}`], ...Object.entries(BIBLE_CAT).flatMap(([k, l]) => k === 'style'
         ? [['sponsor', `협찬 씬 ${entries.filter(x => x.origin === 'sponsor').length}`], [k, `${l} ${cnt(k)}`]] : [[k, `${l} ${cnt(k)}`]])].map(([k, l]) =>
       `<button class="btn small ${S.bibleCat === k ? 'primary' : ''} ${k === 'sponsor' ? 'spon' : ''}" data-bc="${k}">${esc(l)}</button>`).join('')}</div>
   </div>
+  ${['style', 'music'].includes(S.bibleCat) ? `<div class="card" style="padding:10px 12px">
+    <div class="row"><b>${S.bibleCat === 'music' ? '배경음악 톤' : '스타일·톤'}</b>
+      <span class="quiet">${S.bibleCat === 'music' ? '화별로 원하는 음악 톤(적용 화 지정). 편집실 "🎵 이 화 음악 톤"에서 ElevenLabs로 바로 만들거나 Suno용 프롬프트를 복사합니다.' : '모든 화에 공통으로 붙는 화면 규칙(색감·조명·렌즈·질감·금지).'}</span>
+      <button class="btn small" id="bsugRe" style="margin-left:auto">작가실 추천 다시 받기</button></div>
+    <span class="ex">${S.bibleCat === 'music' ? '예: "1화 — 저음 피아노 단음, 느린 템포, 후반 현악 상승" · 적용 화 1' : '예: "따뜻한 시네마틱 색감, 얕은 심도, 손떨림 적은 핸드헬드, 화면 글자 금지"'}</span></div>` : ''}
   ${isSpon ? `<div class="card sponbox">
-    <div class="row"><b style="font-size:15px">협찬 씬 (PPL)</b>
-      <button class="btn small primary" id="bloc">+ 협찬 장소</button><button class="btn small primary" id="bprop">+ 협찬 소품</button></div>
+    <div class="row"><b style="font-size:15px">협찬 씬 (PPL)</b><span class="quiet">위 '설정' 줄의 + 협찬 소품 / + 협찬 장소로 추가합니다</span></div>
     <ol style="margin:8px 0 0;padding-left:18px;line-height:1.7">
       <li><b>사진을 꼭 넣으세요.</b> 협찬 제품·매장 사진이 바이블 기준 사진이 되고, 장면 사진·영상이 그 모습 그대로 그려집니다. <span class="ex">예: 협찬 텀블러 정면·측면 사진 2장 → 모든 컷에서 같은 색·로고 위치</span></li>
       <li>추가하면 작가실이 대본을 읽고 <b>세게 보일</b> 화·씬과 보여 주는 방법(크게·화면 중앙·3초 이상)을 추천합니다. <span class="ex">예: "2화 S3 · 린이 텀블러를 두 손으로 들고 마시는 클로즈업 4초"</span></li>
@@ -4944,8 +5036,23 @@ async function viewBible(main) {
   };
   watchDescribe();
   // 소품 추가 · 넣을 곳 추천
-  const bpr = $('#bprop'); if (bpr) bpr.onclick = () => openPropForm('prop');
-  const blo = $('#bloc'); if (blo) blo.onclick = () => openPropForm('location');
+  $('#hdrProp').onclick = () => openPropForm('prop');
+  $('#hdrLoc').onclick = () => openPropForm('location');
+  // 스타일·톤 / 배경음악: 있으면 그 분류로 이동, 없으면 작가실 추천 받기
+  const suggest = what => guard(async () => {
+    const cat = what === 'music' ? 'music' : 'style';
+    if (cnt(cat) || proposals.some(p => entryOf(p.entry_id)?.category === cat)) { S.bibleCat = cat; go('bible'); return; }
+    if (!confirm(`작가실이 대본을 읽고 ${what === 'music' ? '화별 배경음악 톤(메인 테마 + 화마다 1개)' : '전 회차 공통 스타일·톤'} 추천안을 올립니다(Claude 수백 원).\n올라오면 고쳐서 적용하세요.`)) return;
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'bible_suggest', series_id: S.seriesId, payload: { series_id: S.seriesId, what } }));
+    S.bibleCat = cat; toast('작가실에 맡겼습니다. 1~2분 뒤 수정안으로 올라옵니다'); go('bible');
+  });
+  $('#hdrStyle').onclick = suggest('style');
+  $('#hdrMusic').onclick = suggest('music');
+  const sre = $('#bsugRe'); if (sre) sre.onclick = guard(async () => {
+    if (!confirm('작가실에게 추천안을 다시 받을까요? 이미 있는 이름의 항목은 건너뜁니다.')) return;
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'bible_suggest', series_id: S.seriesId, payload: { series_id: S.seriesId, what: S.bibleCat } }));
+    toast('작가실에 맡겼습니다');
+  });
   main.querySelectorAll('[data-plc]').forEach(b => b.onclick = guard(async () => {
     const e = entryOf(b.dataset.plc); if (!e) return;
     const hint = prompt(`제작자가 대본을 읽고 '${e.name}'을(를) 넣으면 좋을 화·씬을 추천합니다. (Claude 수백 원)\n원하는 쓰임이 있으면 적어 주세요(비워도 됩니다).`, '');
@@ -6498,6 +6605,15 @@ async function renderProdSettings() {
   const prices = await q(S.sb.from('price_book').select('model,usd').eq('provider', 'higgsfield').like('model', 'seedance-2.5-%'));
   const p = m => prices.find(x => x.model === m)?.usd;
   const opt = (v, cur, t) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${t}</option>`;
+  // 소리 도구: API 키가 등록된(연결된) 도구 중에서 고른다
+  const meta = await q(S.sb.from('app_secret_meta').select('name')).catch(() => []);
+  const has = n => meta.some(m => m.name === n);
+  const TOOLS = {
+    dialogue: [['elevenlabs', 'ElevenLabs (인물 목소리)', has('elevenlabs_api_key')], ['none', '쓰지 않음 (영상 생성 소리만)', true]],
+    music: [['elevenlabs', 'ElevenLabs Music (편집실에서 바로 생성)', has('elevenlabs_api_key')], ['upload', '직접 올리기 (Suno 등에서 받은 파일)', true]],
+  };
+  const toolSel = (id, kind, cur) => `<select id="${id}" style="width:auto">${TOOLS[kind].map(([v, l, ok]) =>
+    `<option value="${v}" ${v === cur ? 'selected' : ''} ${ok ? '' : 'disabled'}>${l}${ok ? '' : ' — API 키 미등록'}</option>`).join('')}</select>`;
   box.innerHTML = `<b>제작</b>
     <p class="quiet" style="margin:4px 0 8px">영상은 배경음악 없이 대사·현장음만 넣어 만들고, 씬 폴더에 <b>영상(무음) / 대사·현장음 / 배경음악 / 원본</b>으로 따로 저장합니다.</p>
     <div class="row" style="align-items:flex-end">
@@ -6508,6 +6624,10 @@ async function renderProdSettings() {
     <label class="ed-chk" style="margin-top:10px"><input type="checkbox" id="gPrep" ${G.auto_prep !== false ? 'checked' : ''}> 컷 설계가 끝나면 장면 사진·대사 미리 듣기를 자동으로 준비</label>
     <label>장면 사진 모델 (Higgsfield 경로)</label><input id="gImg" value="${esc(G.image_model || '')}" placeholder="auto = Nano Banana Pro 자동 탐색 (없으면 Grok Imagine)">
     <p class="quiet" style="margin:2px 0 0">기본(auto)은 Nano Banana Pro: 바이블 기준 사진(인물당 최대 3장, 모두 합쳐 8장)을 참고로 장면을 그립니다. 에이전트가 내 Higgsfield 키로 경로를 스스로 찾고, 못 찾으면 Grok Imagine 2.0을 씁니다. 바이블 인물 사진은 Soul 2로 만듭니다.</p>
+    <div class="row" style="align-items:flex-end;margin-top:6px">
+      <div><label>대사 도구 (대사 미리 듣기 · 소리 감수 기준 목소리)</label>${toolSel('gDlg', 'dialogue', G.dialogue_tool || 'elevenlabs')}</div>
+      <div><label>배경음악 도구</label>${toolSel('gMus', 'music', G.music_tool || 'elevenlabs')}</div></div>
+    <p class="quiet" style="margin:2px 0 0">설정 → API 키에 등록된(연결된) 도구만 고를 수 있습니다. 새 도구의 API를 연결하면 여기에 추가됩니다. 영상 속 대사 소리는 지금 Seedance가 영상과 함께 만들고, 고른 대사 도구의 목소리가 그 기준(미리 듣기·감수)이 됩니다.</p>
     <label>감수 불합격 컷 자동 재시도 (대표가 미리 승인하는 횟수)</label><select id="gRetry" style="width:auto">
       ${[0, 1, 2].map(n => opt(String(n), String(G.max_auto_retries || 0), n ? `${n}번까지 자동 (감독 수정 → 사진·목소리 준비 → 다시 생성)` : '자동 재시도 안 함 (대표가 하나씩 다시 생성)')).join('')}</select>
     <p class="quiet" style="margin:2px 0 0">자동 재시도도 영상 생성 비용이 듭니다. 횟수를 넘으면 지금처럼 대표 승인을 기다립니다.</p>
@@ -6519,7 +6639,7 @@ async function renderProdSettings() {
     <button class="btn primary" id="gSave">제작 설정 저장</button>`;
   $('#gSave').onclick = guard(async () => {
     await q(S.sb.from('app_settings').upsert([
-      { key: 'generation', value: { ...G, resolution: $('#gRes').value, aspect_ratio: $('#gAsp').value, auto_prep: $('#gPrep').checked, image_model: $('#gImg').value.trim(), max_auto_retries: Number($('#gRetry').value) }, updated_at: new Date().toISOString() },
+      { key: 'generation', value: { ...G, resolution: $('#gRes').value, aspect_ratio: $('#gAsp').value, auto_prep: $('#gPrep').checked, image_model: $('#gImg').value.trim(), max_auto_retries: Number($('#gRetry').value), dialogue_tool: $('#gDlg').value, music_tool: $('#gMus').value }, updated_at: new Date().toISOString() },
       { key: 'storage', value: { ...ST, windows_folder: $('#gWin').value.trim(), mac_folder: $('#gMac').value.trim(), server: 'windows' }, updated_at: new Date().toISOString() }]));
     toast('제작 설정을 저장했습니다 (새로 설계하는 컷부터 적용)');
   });
@@ -6987,12 +7107,32 @@ function edBind() {
     const box = $('#eToneBox'); if (box.innerHTML) { box.innerHTML = ''; return; }
     const rows = await q(S.sb.from('bible_entries').select('id,name,appears,bible_versions(description,details,prompt_en,status)').eq('series_id', S.seriesId).eq('category', 'music'))
       .catch(() => q(S.sb.from('bible_entries').select('id,name,appears,bible_versions(description,details,status)').eq('series_id', S.seriesId).eq('category', 'music')));
+    const gs = await q(S.sb.from('app_settings').select('value').eq('key', 'generation').maybeSingle()).catch(() => null);
+    const tool = gs?.value?.music_tool || 'elevenlabs';
+    const secs = Math.max(10, Math.min(300, Math.round(ED.L?.total || 60)));
+    const made = await q(S.sb.from('pipeline_tasks').select('id,status,result,progress,error,created_at').eq('kind', 'bgm').eq('episode_id', ED.ep.id).order('created_at', { ascending: false }).limit(6));
     const mine = rows.map(r => ({ ...r, v: (r.bible_versions || []).find(v => v.status === 'active') })).filter(r => r.v
       && (!(r.appears || []).length || r.appears.some(a => Number(a.ep) === Number(ED.ep.number))));
     box.innerHTML = `<div class="tonebox">${mine.length ? mine.map((r, i) => `<div><b>${esc(r.name)}</b> <span class="quiet">${(r.appears || []).length ? '이 화 전용' : '전체 화 공통'}</span>
         <div>${esc(r.v.description || '')}</div>${r.v.details ? `<div class="quiet">${esc(r.v.details)}</div>` : ''}
-        <button class="btn small" data-suno="${i}">Suno용 프롬프트 복사</button></div>`).join('')
-      : `<span class="quiet">이 화에 맞는 배경음악 톤이 바이블에 없습니다. 바이블 → + 항목 추가 → 분류 '배경음악'으로 적어 두세요. 예: "1화 오프닝 — 긴장감 있는 저음 피아노, 느린 템포"</span>`}</div>`;
+        <div class="row" style="gap:6px;margin-top:4px">${tool === 'elevenlabs' ? `<button class="btn small primary" data-elm="${i}">ElevenLabs로 만들기 (${secs}초 · 약 ${won(secs * 0.0025 * 1340)})</button>` : ''}
+        <button class="btn small" data-suno="${i}">Suno용 프롬프트 복사</button></div></div>`).join('')
+      : `<span class="quiet">이 화에 맞는 배경음악 톤이 바이블에 없습니다. 바이블 → 설정 줄의 "배경음악 · 추천받기"로 작가실 추천을 받거나 직접 적어 두세요. 예: "1화 오프닝 — 긴장감 있는 저음 피아노, 느린 템포"</span>`}
+      ${made.length ? `<div><b>만든 곡</b>${made.map(t => { let r = {}; try { r = JSON.parse(t.result || '{}'); } catch {}
+        return `<div class="row" style="gap:6px;margin-top:4px">${t.status === 'done' && r.path ? `<span>${esc(r.name || '음악')} · ${r.seconds || ''}초</span><button class="btn small" data-elput="${esc(r.path)}" data-len="${r.seconds || 60}" data-name="${esc(r.name || 'ElevenLabs 음악')}">타임라인에 넣기</button>`
+          : t.status === 'failed' ? `<span style="color:var(--bad)">실패: ${esc((t.error || '').slice(0, 120))}</span>` : `<span class="spin"></span><span class="quiet">${esc(t.progress || '만드는 중')}</span>`}</div>`; }).join('')}</div>` : ''}</div>`;
+    box.querySelectorAll('[data-elm]').forEach(b => b.onclick = guard(async () => {
+      const r = mine[+b.dataset.elm];
+      if (!confirm(`ElevenLabs로 "${r.name}" 톤의 배경음악 ${secs}초를 만듭니다(약 ${won(secs * 0.0025 * 1340)}).`)) return;
+      await q(S.sb.from('pipeline_tasks').insert({ kind: 'bgm', episode_id: ED.ep.id, payload: { prompt: r.v.prompt_en || r.v.description, seconds: secs, name: r.name, series_id: S.seriesId, tool, model: gs?.value?.music_model || 'music_v1' } }));
+      toast('만들기 시작했습니다. 1~3분 뒤 알림이 오면 이 칸을 다시 열어 넣으세요'); box.innerHTML = ''; $('#eTone').click();
+    }));
+    box.querySelectorAll('[data-elput]').forEach(b => b.onclick = guard(async () => {
+      const path = b.dataset.elput, len = +b.dataset.len || 60;
+      const { data } = await S.sb.storage.from('takes').createSignedUrl(path, 6 * 3600); if (data?.signedUrl) ED.urls[path] = data.signedUrl;
+      const m = { id: rid('m'), path, name: b.dataset.name.slice(0, 30), start: 0, in: 0, out: r3(Math.min(len, ED.L.total || len)), src_len: r3(len), gain: 0.4, fade_in: 1, fade_out: 2 };
+      edChange(tl => { tl.music.push(m); ED.sel = { type: 'music', id: m.id }; }); toast('음악 줄 맨 앞에 넣었습니다. 끌어서 위치를 옮기세요');
+    }));
     box.querySelectorAll('[data-suno]').forEach(b => b.onclick = () => {
       const r = mine[+b.dataset.suno]; const t = `${r.v.prompt_en || r.v.description}. Instrumental, no vocals, cinematic drama underscore, loopable.`;
       navigator.clipboard.writeText(t).then(() => toast('복사했습니다. Suno에 붙여 넣으세요'), () => toast(t));
@@ -7671,7 +7811,7 @@ const HELP = {
 <tr><td>대사 먼저 들리게</td><td>대사 줄 막대를 왼쪽으로</td><td>다음 컷 대사를 0.4초 먼저</td></tr>
 <tr><td>테이크 바꾸기</td><td>자세히 보기 → 테이크</td><td>C04를 2번 테이크로</td></tr></table>
 <h4>3. 음악</h4>
-<ul><li><b>🎵 이 화 음악 톤</b> — 바이블 '배경음악'에 적어 둔 이 화의 톤을 보여 주고 Suno용 프롬프트를 복사합니다.<span class="ex">예: "1화 — 긴장감 있는 저음 피아노, 느린 템포" → 복사 → Suno에서 곡 만들기</span></li>
+<ul><li><b>🎵 이 화 음악 톤</b> — 바이블 '배경음악'에 적어 둔 이 화의 톤을 보여 줍니다. 배경음악 도구가 ElevenLabs면 <b>ElevenLabs로 만들기</b>(화 길이만큼, 가사 없는 곡)로 바로 만들고, 다 되면 <b>타임라인에 넣기</b>. Suno를 쓰려면 프롬프트를 복사합니다.<span class="ex">예: "1화 — 저음 피아노, 느린 템포" → ElevenLabs로 만들기(130초 · 약 440원) → 타임라인에 넣기 → 40%로</span></li>
 <li><b>+ 음악</b>으로 mp3·wav를 올리고, 크기(대사 밑이면 30~50%)·페이드를 정합니다.<span class="ex">예: 오프닝 곡 40%, 시작 2초 페이드 인</span></li></ul>
 <h4>4. 자막</h4>
 <ul><li>자막 막대를 눌러 문장·시간을 고칩니다. 컷을 옮기면 함께 움직입니다.<span class="ex">예: "노래를 얼굴로 부르나요?" 0.3초 늦게</span></li>
@@ -7719,6 +7859,7 @@ const HELP = {
 <li><b>시리즈 고르기</b> · <b>+ 항목 추가</b> — 새 항목을 직접 등록합니다(분류를 골라 이름·묘사·사진).<span class="ex">예: + 항목 추가 → 캐릭터 · "민지" · "태국 오디션에서 얼굴로 합격한 연습생"</span></li>
 <li><b>대본에서</b> · 필요한 인물·장소·소품 찾기 — 작가실이 화별로 대본을 읽고 화면에 나와야 하는 것을 수정안으로 올립니다.<span class="ex">예: 1화에서 "심사위원", "방콕 오디션장", "보육원 팔찌" 등을 찾아 올림</span></li>
 <li><b>한꺼번에</b> · 사진 만들기 / 인물 목소리 만들기 — 사진이 없는 항목의 사진 후보, 목소리가 없는 인물의 목소리 후보를 한 번에.<span class="ex">예: "사진 만들기 (17)" → 17개 항목 후보 생성</span></li>
+<li><b>설정</b> · + 협찬 소품 / + 협찬 장소 / 스타일·톤 / 배경음악 — 스타일·톤과 배경음악은 처음 누르면 작가실이 대본을 읽고 <b>추천안</b>을 올립니다(수정안 → 고쳐서 적용). 이미 있으면 그 분류로 이동합니다.<span class="ex">예: "배경음악 · 추천받기" → "메인 테마" + "1화 — 저음 피아노…" 등 11건 → 고쳐서 적용</span></li>
 <li><b>분류 버튼</b> — 눌러서 그 분류만 봅니다. "협찬 씬"은 협찬으로 넣은 항목만 모아 봅니다.<span class="ex">예: 캐릭터 12 · 장소 9 · 협찬 씬 2</span></li>
 </ul>
 
@@ -7850,6 +7991,7 @@ const HELP = {
 <li><b>2단계 인증</b> — 꼭 켜 두세요.</li>
 <li><b>API 키</b> — Claude·Higgsfield·ElevenLabs. 연결 시험은 무료로 키만 확인. 키는 채팅에 붙이지 마세요.<span class="ex">예: Higgsfield "연결됨" 초록</span></li>
 <li><b>제작</b> — 해상도(처음엔 480p), 화면 비율, 장면 사진 모델(auto = Nano Banana Pro), 자동 재시도(0~2), 보관 폴더.<span class="ex">예: 480p · 9:16 · auto · 자동 재시도 1번</span></li>
+<li><b>소리 도구</b>(제작 칸) — 대사 도구와 배경음악 도구를 <b>API 키가 등록된 것 중에서</b> 고릅니다. 키가 없는 도구는 회색으로 보입니다.<span class="ex">예: 대사 ElevenLabs · 배경음악 ElevenLabs Music / 또는 배경음악 '직접 올리기(Suno)'</span></li>
 <li><b>실제 연결 점검</b>(제작 칸) — 진짜 호출을 한 번씩(약 100~300원) 해서 결과를 알려 줍니다. 집에서 에이전트를 켠 뒤 처음 한 번.<span class="ex">예: "OK 장면 사진 모델 경로: google/nano-banana-pro/edit"</span></li>
 <li><b>작가실</b> — 정리본 자동 확정. PPL 수정본은 켜져 있어도 항상 대표 확정.<span class="ex">예: 켬 → 정리본이 오면 바로 감독까지</span></li>
 <li><b>배포</b> — 묶음 크기·알림 수·시간.<span class="ex">예: 3화 묶음 · 알림 1번 · 18:00</span></li>

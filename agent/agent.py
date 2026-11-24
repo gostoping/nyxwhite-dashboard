@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.11.1"
+VERSION = "1.12.0"
 
 import base64
 import glob
@@ -1180,6 +1180,19 @@ def tts_line(voice_id, text, tags, model):
         raise RuntimeError(f"목소리 만들기 실패 {e.code}: {e.read()[:200]!r}") from None
 
 
+def el_music(prompt, seconds, model="music_v1"):
+    """ElevenLabs Music: 가사 없는 배경음악(mp3)을 만든다. 길이 3~600초."""
+    body = {"prompt": prompt[:2000], "music_length_ms": int(max(3, min(600, seconds)) * 1000), "model_id": model or "music_v1",
+            "force_instrumental": True}
+    req = urllib.request.Request("https://api.elevenlabs.io/v1/music?output_format=mp3_44100_128", data=json.dumps(body).encode(), method="POST",
+                                 headers={"xi-api-key": el_key(), "Content-Type": "application/json", "Accept": "audio/mpeg"})
+    try:
+        with urllib.request.urlopen(req, timeout=600) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"배경음악 만들기 실패 {e.code}: {e.read()[:300]!r}") from None
+
+
 def stt_words(path, model="scribe_v1"):
     """ElevenLabs 받아쓰기: 단어와 시간. 영상 소리 감수에 쓴다."""
     key = el_key()
@@ -1496,6 +1509,9 @@ def t_prep_cut(t):
         # ② 대사 미리 듣기
         lines = c.get("voice_lines") or parse_dialogue(c.get("dialogue"))
         for i, ln in enumerate(lines):
+            if (gen.get("dialogue_tool") or "elevenlabs") == "none":   # 설정: 대사 도구 '쓰지 않음'
+                ln["error"] = "설정에서 대사 도구를 '쓰지 않음'으로 해 두어 미리 듣기를 만들지 않았습니다"
+                continue
             vid, vname = voice_for(ctx, ln.get("speaker") or "")
             if not vid:
                 ln["error"] = "바이블에 이 인물의 목소리가 없습니다(바이블 → 목소리 디자인)"
@@ -2242,6 +2258,73 @@ def t_photo_describe(t):
     return f"{info.get('name')} 묘사 {len(desc)}자"
 
 
+@task("bgm")
+def t_bgm(t):
+    """편집실 '이 화 음악 톤' → ElevenLabs Music으로 가사 없는 배경음악을 만들어 저장소에 올린다(편집실에서 타임라인에 넣기)."""
+    p = t.get("payload") or {}
+    ep = t.get("episode_id")
+    prompt = (p.get("prompt") or "").strip()
+    if not prompt:
+        raise RuntimeError("음악 톤(프롬프트)이 비어 있습니다")
+    secs = int(p.get("seconds") or 60)
+    tool = p.get("tool") or "elevenlabs"
+    if tool != "elevenlabs":
+        raise RuntimeError(f"배경음악 도구 '{tool}'는 아직 자동 생성을 지원하지 않습니다(설정 → 제작 → 소리 도구)")
+    progress(f"ElevenLabs가 배경음악 {secs}초를 만드는 중")
+    data = el_music(prompt + " Instrumental only, no vocals, cinematic drama underscore that sits under dialogue.", secs, p.get("model") or "music_v1")
+    local = os.path.join(HOME, "work", f"bgm_{uuid.uuid4().hex[:8]}.mp3")
+    with open(local, "wb") as f:
+        f.write(data)
+    path = storage_upload(f"music/{p.get('series_id') or 'series'}/el_{uuid.uuid4().hex[:8]}.mp3", local, "audio/mpeg")
+    os.remove(local)
+    log_cost("audio", "elevenlabs", "music", {"seconds": secs}, episode_id=ep, note=f"배경음악: {p.get('name') or ''}", outcome="success")
+    notify("배경음악 도착", f"{p.get('name') or '이 화'} · {secs}초. 편집실 '이 화 음악 톤'에서 들어 보고 타임라인에 넣으세요")
+    return json.dumps({"path": path, "seconds": secs, "name": p.get("name") or "ElevenLabs 음악"}, ensure_ascii=False)
+
+
+@task("bible_suggest")
+def t_bible_suggest(t):
+    """작가실: 대본을 읽고 스타일·톤(전 회차 공통 화면 규칙) 또는 화별 배경음악 톤 추천안을 바이블 수정안으로 올린다."""
+    p = t.get("payload") or {}
+    sid = t.get("series_id") or p.get("series_id")
+    what = p.get("what") or "style"
+    ov = rpc("agent_bible_overview", p_token=TOKEN, p_series=sid) or {}
+    title = (ov.get("series") or {}).get("title", "")
+    eps = [e for e in ov.get("episodes") or [] if (e.get("text") or "").strip()]
+    if not eps:
+        return "읽을 대본이 없습니다"
+    budget = max(6000, 200000 // max(1, len(eps)))
+    scripts = "\n\n".join(f"[{x['number']}화 {x.get('title') or ''}]\n{(x.get('text') or '')[:budget]}" for x in eps)
+    if what == "music":
+        system = """너는 드라마 작가실의 음악 감독이다. 대본을 읽고 화별로 어울리는 배경음악 톤을 추천한다(가사 없는 연주곡, 대사 밑에 까는 음악).
+- 시리즈 공통 테마 1개(name: "메인 테마", eps: []) + 화마다 1개(name: "N화 — 한 줄 요약", eps: [N]). 감정이 크게 다른 구간이 있으면 화당 2개까지.
+- description: 한국어. 장르·악기·템포·분위기·세기 변화를 구체적으로(예: "저음 피아노 단음으로 시작, 느린 템포, 후반 현악이 서서히 올라오며 긴장").
+- details: 한국어. 어느 씬에서 어떻게 쓰면 좋은지, 피할 것(가사, 과한 드럼 등).
+답 형식: <json>{"items": [{"name": "", "description": "", "details": "", "eps": [1]}]}</json>"""
+    else:
+        system = """너는 드라마 작가실의 미술·촬영 감독이다. 대본을 읽고 모든 화에 공통으로 적용할 화면 스타일·톤을 추천한다.
+- 1~2개 항목. 첫 항목 name: "전 회차 공통 화면 스타일". 회상·미래처럼 톤이 확 다른 시점이 대본에 있으면 두 번째 항목(예: "회상 장면 톤").
+- description: 한국어. 색감·대비·조명·렌즈·심도·카메라 움직임·질감·화면 비율 느낌을 구체적으로(실사 드라마, 세로 숏폼 기준).
+- details: 한국어. 금지 사항(화면 글자·워터마크·과한 필터 등)과 주의점.
+답 형식: <json>{"items": [{"name": "", "description": "", "details": ""}]}</json>"""
+    progress(f"작가실이 「{title}」 대본을 읽고 {'화별 배경음악 톤' if what == 'music' else '스타일·톤'}을 추천하는 중")
+    text, _ = claude("claude-opus-5-5", system, f"시리즈: {title}\n\n[대본]\n{scripts}", max_tokens=6000, stage="other",
+                     note=f"작가실 추천: {'배경음악' if what == 'music' else '스타일·톤'}")
+    items = []
+    for it in pick_json(text).get("items") or []:
+        if not (it.get("name") and it.get("description")):
+            continue
+        items.append({"category": "music" if what == "music" else "style", "name": it["name"][:80], "summary": it["description"][:200],
+                      "description": it["description"], "details": it.get("details") or "",
+                      "appears": [{"ep": int(n), "scene": None} for n in (it.get("eps") or []) if str(n).isdigit()],
+                      "reason": "작가실 추천(대본을 읽고)"})
+    if not items:
+        raise RuntimeError("추천안을 만들지 못했습니다")
+    r = rpc("agent_bible_upsert", p_token=TOKEN, p_series=sid, p_items=items) or {}
+    notify(f"작가실 {'배경음악' if what == 'music' else '스타일·톤'} 추천 {len(items)}건", "바이블 탭(또는 지시 탭 적용 대기함)에서 고쳐서 적용해 주세요")
+    return f"추천 {len(items)}건 · 새 수정안 {r.get('proposals', 0)}건"
+
+
 @task("api_check")
 def t_api_check(t):
     """설정 → 실제 연결 점검: 진짜 호출을 아주 작게 한 번씩(합계 약 100~300원) 해서 경로·권한·응답 형식을 확인한다."""
@@ -2870,7 +2953,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"api_check": "실제 연결 점검", "bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
