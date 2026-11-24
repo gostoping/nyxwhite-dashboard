@@ -194,6 +194,7 @@
   .tonebox { display: grid; gap: 8px; padding: 8px 10px; margin: 6px 0; border: 1px dashed var(--line); border-radius: 8px; font-size: 13px; }
   .tooltab td { vertical-align: top; padding: 6px 8px; } .tooltab td:first-child { white-space: nowrap; color: var(--quiet); }
   .tooltab select { max-width: 340px; }
+  .ytbox { position: relative; width: 100%; max-width: 420px; aspect-ratio: 9 / 16; } .ytbox iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; border-radius: 8px; }
   /* 편집실 */
   .ed-empty { text-align: center; padding: 30px 16px; } .ed-empty .row { justify-content: center; }
   .ed-top { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; }
@@ -6910,6 +6911,8 @@ async function renderProdSettings() {
 // ------------------------------------------------------------------
 // 배포: 편집에서 OK한 완성본이 시리즈·화별로 모인다. 묶음(기본 3화) 단위로 예약·공개를 관리한다
 // ------------------------------------------------------------------
+// 유튜브 주소에서 영상 ID(11자) 꺼내기
+const ytId = u => { const m = String(u || '').match(/(?:youtu\.be\/|v=|shorts\/|embed\/)([\w-]{11})/); return m ? m[1] : null; };
 const REL_ST = { ready: ['배포 대기', 'accent'], scheduled: ['예약됨', 'warn'], published: ['공개됨', 'good'], hold: ['보류', ''] };
 async function viewRelease(main) {
   const series = await q(S.sb.from('series').select('id,title').order('created_at'));
@@ -6942,13 +6945,14 @@ async function viewRelease(main) {
   <p class="quiet">편집 탭에서 완성본에 <b>OK · 배포로 넘기기</b>를 누른 화가 여기 모입니다. 배포 담당 기준은 ${size}화 묶음 · 알림 ${R.notify_per_bundle || 1}번입니다(설정 → 배포).
     유튜브 자동 업로드는 아직 연결 전이라, 지금은 제목·설명·예약일을 정리하고 올린 뒤 공개 주소를 남기는 곳입니다.</p>
   <div class="card"><table>
-    <tr><th>화</th><th>편집</th><th>배포</th><th>묶음</th><th>예약·공개</th></tr>
+    <tr><th>화</th><th>편집</th><th>배포</th><th>묶음</th><th>예약·공개</th><th></th></tr>
     ${eps.map(e => { const r = relOf(e.id); return `<tr ${r ? `class="click" data-rel="${esc(e.id)}"` : ''}>
       <td><b>${e.number}화</b> ${esc(e.title || '')}</td>
       <td class="quiet">${r ? 'OK' : esc(editState(e))}</td>
       <td>${r ? pill(REL_ST[r.status][0], REL_ST[r.status][1]) : '<span class="quiet">-</span>'}</td>
       <td>${bundleNo(e) ? pill(`${bundleNo(e)}묶음`) : ''}</td>
-      <td class="quiet">${r?.published_at ? '공개 ' + esc(fmt(r.published_at)) : r?.planned_at ? '예약 ' + esc(fmt(r.planned_at)) : ''}</td></tr>`; }).join('')}
+      <td class="quiet">${r?.published_at ? '공개 ' + esc(fmt(r.published_at)) : r?.planned_at ? '예약 ' + esc(fmt(r.planned_at)) : ''}</td>
+      <td>${r && (ytId(r.published_url) || urls[rOf(r.render_id)?.files?.preview]) ? `<button class="btn small" data-play="${esc(e.id)}">▶ 보기</button>` : ''}</td></tr>`; }).join('')}
   </table></div>
   ${okEps.length ? '' : '<div class="card quiet">아직 OK된 화가 없습니다. 편집 탭에서 완성본을 내보낸 뒤 "OK · 배포로 넘기기"를 눌러 주세요.</div>'}
   <div id="relDetail"></div>`;
@@ -6956,11 +6960,16 @@ async function viewRelease(main) {
   const open = id => {
     S.relEp = id; const e = eps.find(x => x.id === id), r = relOf(id), rd = rOf(r.render_id);
     const v = rd?.files?.preview && urls[rd.files.preview];
+    const yt = ytId(r.published_url);
+    S.relView = S.relView && (S.relView === 'yt' ? yt : v) ? S.relView : yt ? 'yt' : 'file';
     const local = d => d ? new Date(new Date(d) - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '';
     $('#relDetail').innerHTML = `<div class="card" style="border-color:var(--accent)">
       <div class="row"><b style="font-size:16px">${e.number}화 ${esc(e.title || '')}</b>${pill(REL_ST[r.status][0], REL_ST[r.status][1])}${bundleNo(e) ? pill(`${bundleNo(e)}묶음`) : ''}
         <span class="quiet">OK ${esc(fmt(r.approved_at))}</span></div>
-      <div class="ed-result" style="margin-top:8px"><div>${v ? `<video controls playsinline preload="metadata" src="${esc(v)}" style="max-height:420px"></video>` : '<p class="quiet">미리보기 파일이 없습니다(완성본 폴더 확인)</p>'}</div>
+      ${yt && v ? `<div class="seg" style="margin-top:8px"><button data-rv="yt" class="${S.relView === 'yt' ? 'on' : ''}">공개된 유튜브</button><button data-rv="file" class="${S.relView === 'file' ? 'on' : ''}">완성본 파일</button></div>` : ''}
+      <div class="ed-result" style="margin-top:8px"><div>${S.relView === 'yt' && yt
+          ? `<div class="ytbox"><iframe src="https://www.youtube-nocookie.com/embed/${yt}?rel=0" title="${esc(e.number + '화')}" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe></div>`
+          : v ? `<video id="relVid" controls playsinline preload="metadata" src="${esc(v)}" style="max-height:480px;width:100%"></video>` : '<p class="quiet">미리보기 파일이 없습니다(용량이 커서 올리지 않았으면 완성본 폴더에서 보세요)</p>'}</div>
         <div>${rd?.files?.folder ? `<div class="quiet">완성본 폴더</div><div class="path-box">${esc(rd.files.folder)}</div>` : ''}</div></div>
       <label>제목</label><input id="rTitle" value="${esc(r.title || '')}">
       <label>설명</label><textarea id="rDesc" style="min-height:90px">${esc(r.description || '')}</textarea>
@@ -6970,6 +6979,7 @@ async function viewRelease(main) {
       <label>메모</label><input id="rNote" value="${esc(r.note || '')}">
       <div class="row" style="margin-top:10px"><button class="btn primary" id="rSave">저장</button><button class="btn" id="rClose">닫기</button></div></div>`;
     $('#rClose').onclick = () => { $('#relDetail').innerHTML = ''; S.relEp = null; };
+    $('#relDetail').querySelectorAll('[data-rv]').forEach(b => b.onclick = () => { S.relView = b.dataset.rv; open(id); });
     $('#rSave').onclick = guard(async () => {
       const st = $('#rSt').value, url = $('#rUrl').value.trim();
       await q(S.sb.from('releases').update({ title: $('#rTitle').value.trim() || null, description: $('#rDesc').value.trim() || null, status: url && st !== 'hold' ? 'published' : st,
@@ -6980,6 +6990,8 @@ async function viewRelease(main) {
     $('#relDetail').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   };
   main.querySelectorAll('[data-rel]').forEach(tr => tr.onclick = () => open(tr.dataset.rel));
+  main.querySelectorAll('[data-play]').forEach(b => b.onclick = ev => { ev.stopPropagation(); open(b.dataset.play);
+    setTimeout(() => { const vEl = $('#relVid'); if (vEl) vEl.play().catch(() => {}); }, 300); });
   if (S.relEp && relOf(S.relEp)) open(S.relEp);
 }
 
@@ -8086,6 +8098,7 @@ const HELP = {
 <ul>
 <li>목록의 <b>편집</b> 칸 — 아직 OK 전인 화의 편집 상태.<span class="ex">예: "완성본 있음(OK 전)" → 편집 탭에서 OK 누르기</span></li>
 <li><b>묶음</b> — 배포 기준(설정 → 배포, 기본 3화 묶음 · 알림 1번)대로 대기 중인 화를 순서대로 묶습니다.<span class="ex">예: 1~3화 = 1묶음(한 번에 올리고 알림 1번), 4~6화 = 2묶음</span></li>
+<li><b>▶ 보기</b>(목록 오른쪽) 또는 화를 누르면 그 화 영상을 바로 봅니다. 공개 주소가 유튜브면 <b>공개된 유튜브</b>와 <b>완성본 파일</b> 중 골라 봅니다.<span class="ex">예: 3화 ▶ 보기 → 유튜브에 올라간 그대로 재생</span></li>
 <li>화를 누르면 완성본 미리보기, 폴더, 제목·설명·예약 시각·상태.<span class="ex">예: 제목 "EP.01 얼굴로 노래하라고요?" · 예약 11/28 18:00</span></li>
 <li><b>공개 주소</b>를 넣으면 '공개됨'이 됩니다(유튜브 자동 업로드는 연결 예정).<span class="ex">예: https://youtu.be/abc123 입력 → 공개됨</span></li>
 <li>다른 완성본으로 바꾸려면 편집 탭에서 그 완성본의 OK를 다시.<span class="ex">예: 자막 고친 v8로 교체</span></li>
