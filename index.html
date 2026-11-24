@@ -210,6 +210,8 @@
   .zarrow { position: fixed; top: 50%; transform: translateY(-50%); font-size: 48px; line-height: 1; background: rgba(255,255,255,.12); color: #fff; border: 0; border-radius: 8px; padding: 6px 14px; cursor: pointer; }
   .zarrow.l { left: 12px; } .zarrow.r { right: 12px; }
   .pdimg img, .thumbs img, .bimgs img, .tmpimg img, .kf img { cursor: zoom-in; }
+  .rvbox { border: 1px dashed var(--line); border-radius: 8px; padding: 8px 10px; margin-top: 8px; font-size: 13px; background: var(--panel); }
+  .rvchk { margin: 4px 0 2px; padding-left: 4px; list-style: none; } .rvchk li { margin: 2px 0; } .rvchk li.missing, .rvchk li.conflict { color: var(--bad); }
   /* 편집실 */
   .ed-empty { text-align: center; padding: 30px 16px; } .ed-empty .row { justify-content: center; }
   .ed-top { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; }
@@ -324,7 +326,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.15.2"
+VERSION = "1.16.1"
 
 import base64
 import glob
@@ -774,7 +776,42 @@ def task(name):
     return wrap
 
 
-CURRENT = {"task": None}
+class _Current(threading.local):
+    """작업 상태는 스레드마다 따로(긴 일 줄과 짧은 일 줄이 함께 돌아도 진행 문구·비용 기록이 섞이지 않게)."""
+    def __init__(self):
+        self.d = {"task": None}
+
+    def get(self, k, default=None):
+        return self.d.get(k, default)
+
+    def __getitem__(self, k):
+        return self.d[k]
+
+    def __setitem__(self, k, v):
+        self.d[k] = v
+
+
+CURRENT = _Current()
+# 짧은 바이블 일은 긴 일(컷 설계·영상)과 따로 줄을 서서 바로 처리한다(컷 설계 중에도 고쳐쓰기 반영이 기다리지 않게)
+QUICK_KINDS = ["bible_prompt", "coord_review", "photo_describe"]
+QUICK = {"busy": None}
+
+
+def quick_lane():
+    while True:
+        try:
+            if not QUICK.get("paused"):
+                tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=QUICK_KINDS, p_platform=PLATFORM)
+                if tk and tk.get("id"):
+                    QUICK["busy"] = tk["kind"]
+                    try:
+                        run_task(tk)
+                    finally:
+                        QUICK["busy"] = None
+                    continue
+        except Exception as e:
+            log(f"짧은 일 줄 오류: {e}")
+        time.sleep(5)
 
 
 def progress(text):
@@ -2735,7 +2772,8 @@ def el_json(path, body=None, method="POST", timeout=180):
 
 # ---------------- 바이블 사진 디자인: Soul 2(실사 인물) + Soul ID(얼굴 고정)
 PHOTO_LOOK = ("Photorealistic photograph of a real person, shot on a full-frame camera with an 85mm lens, natural skin texture with pores, "
-              "soft natural light, realistic hair strands, no makeup filter, no illustration, no 3D render, no text.")
+              "soft natural light, realistic hair strands, no makeup filter, no illustration, no 3D render, "
+              "no text, no letters, no captions, no name tags, no subtitles, no watermark, no logo.")
 SET_SHOTS = [("정면 얼굴", "Head-and-shoulders portrait facing the camera, neutral expression, plain light grey studio background."),
              ("3/4 얼굴", "Three-quarter view portrait turned slightly to the left, gentle smile, plain light grey studio background."),
              ("전신·의상", "Full-body shot standing naturally, wearing the signature outfit, plain light grey studio background."),
@@ -2763,6 +2801,12 @@ def t_photo_design(t):
     if not d:
         raise RuntimeError("사진 디자인 요청을 찾지 못했습니다")
     name = d["entry_name"]
+    # 순서: 그 항목의 영어 프롬프트 반영·코디네이터 감수가 진행 중이면 그게 끝난 뒤에 만든다
+    if d.get("prompt_pending") and (t.get("attempts") or 1) < 12:
+        rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "queued"})
+        raise Retry(45, "바이블 영어 프롬프트 반영·감수가 먼저 끝나야 해서 기다리는 중(끝나면 바로 만듭니다)")
+    if d.get("use_bible") and d.get("prompt_en"):   # 대표가 묘사 칸을 손대지 않았으면 만들 때의 최신 영어 프롬프트
+        d["prompt"] = d["prompt_en"]
     if re.search(r"[가-힣]", d.get("prompt") or ""):
         # 한글 묘사는 작가실이 영어 프롬프트로 옮긴 뒤에 만든다(사진 모델은 영어가 정확)
         if d.get("prompt_en"):
@@ -3305,6 +3349,95 @@ def t_bible_prompt(t):
                            f"바이블 '{name}' 카드에서 한글 묘사를 자세히 적어 주세요(담을 것: {need}). {PROMPT_EXAMPLE.get(cat, '')}")
     rpc("agent_bible_set_prompt", p_token=TOKEN, p_version=info["version_id"], p_prompt=en)
     return f"{name} 영어 프롬프트 {len(en)}자 ({how})"
+
+
+@task("coord_review")
+def t_coord_review(t):
+    """코디네이터: 적용된 바이블 항목을 감수한다 — 대표 요청 반영, 묘사↔영어 프롬프트 일치, 대본과 어긋남.
+    영어 프롬프트만 틀렸으면 직접 보정하고, 묘사 자체를 바꿔야 하면 대표 확인 필요로 넘긴다. 결과는 바이블 카드에 기록."""
+    p = t.get("payload") or {}
+    info = rpc("agent_coord_info", p_token=TOKEN, p_version=p.get("version_id")) or {}
+    if not info:
+        return "대상 버전이 없습니다(삭제됨)"
+    if info.get("status") != "active":
+        return "이미 다른 버전으로 바뀌어 감수하지 않음"
+    name, cat = info.get("name"), info.get("category")
+    hangul = re.search(r"[가-힣]", (info.get("description") or "") + (info.get("details") or ""))
+    if (info.get("prompt_pending") or (hangul and not info.get("prompt_en"))) and (t.get("attempts") or 1) < 15:
+        raise Retry(45, f"{name}: 작가실이 영어 프롬프트를 반영하는 중이라 끝난 뒤 감수합니다")
+    prev = info.get("prev") or {}
+    reason = (info.get("change_reason") or "").strip()
+    owner_req = reason if info.get("proposed_by") == "대표" and not re.search(r"(사진을 보고|가져옴|얼굴 고정|Soul)", reason) else ""
+    owner_req = re.sub(r"\s*→ 작가실이 묘사·프롬프트에 반영:.*$", "", owner_req)
+    prompt = (info.get("prompt_en") or "").strip()
+    found = script_mentions(info.get("series_id"), name, info.get("summary"), limit=6000) if cat not in ("style", "music") else ""
+    system = f"""너는 드라마 제작팀의 코디네이터다. 시리즈 바이블 항목의 묘사·영어 프롬프트를 감수한다.
+확인할 것:
+1) 대표 요청(있으면)이 한글 묘사와 영어 프롬프트에 정확히 들어갔는가 — 요청을 항목별로 쪼개 하나씩.
+2) 영어 프롬프트가 한글 묘사·세부 사항의 눈에 보이는 고정 특징({PROMPT_NEEDS.get(cat, '눈에 보이는 특징')})을 빠짐없이, 어긋나지 않게 담았는가. 한글·이름·브랜드가 섞이지 않았는가.
+3) 대본 발췌(있으면)와 어긋나는 것(나이·성별·머리·옷·장소 구조 등)이 없는가.
+처리:
+- 영어 프롬프트만 틀리거나 빠졌으면 verdict "fix"와 fixed_prompt_en(고친 영어 프롬프트 전체, 4~8문장)을 준다. 묘사는 고치지 않는다.
+- 한글 묘사 자체가 요청과 다르거나 대본과 부딪히면 verdict "owner", owner_note에 무엇을 어떻게 고치면 되는지 한국어 한 줄.
+- 모두 맞으면 verdict "pass".
+checks는 항목마다: item(무엇을 봤는지, 한국어 짧게), status(ok|missing|conflict), where(request|description|prompt|script), note(근거 문구, 짧게).
+답 형식: <json>{{"verdict": "pass|fix|owner", "checks": [{{"item": "", "status": "ok", "where": "prompt", "note": ""}}], "fixed_prompt_en": "", "owner_note": "", "summary": "한국어 한 줄"}}</json>"""
+    user = (f"항목: {name} ({cat})\n대본 속 역할: {info.get('summary') or '-'}\n"
+            f"[대표 요청(고쳐쓰기 '바꾸는 이유·바꿀 내용')]\n{owner_req or '(없음)'}\n\n"
+            f"[바로 앞 버전 v{prev.get('version_no', '-')} 묘사]\n{prev.get('description') or '-'}\n[바로 앞 버전 영어 프롬프트]\n{prev.get('prompt_en') or '-'}\n\n"
+            f"[지금 v{info.get('version_no')} 묘사]\n{info.get('description') or '-'}\n[지금 세부 사항]\n{info.get('details') or '-'}\n"
+            f"[지금 영어 프롬프트]\n{prompt or '(없음 — 묘사를 그대로 씀)'}\n\n[대본에서 이 항목이 나오는 부분]\n{found or '(없음)'}")
+    # 기준 사진도 본다: 묘사와 맞는지, 글자·이름표·자막이 찍혀 있지 않은지, (인물) 같은 사람인지
+    blocks = []
+    for i, path in enumerate((info.get("image_paths") or [])[:4], 1):
+        tmp = os.path.join(HOME, "work", f"cv_{uuid.uuid4().hex[:6]}.img")
+        try:
+            fetch_to(storage_signed_url("bible", path, 3600), tmp)
+            blocks += photo_block_large(tmp, f"[기준 사진 {i}]")
+        except Exception as ex:
+            log(f"감수용 사진 받기 실패: {ex}")
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+    if blocks:
+        system += f"""
+4) 기준 사진({len(blocks) // 2}장)도 본다: 묘사·영어 프롬프트와 맞는가(나이·성별·머리·체형·의상, 장소 구조 등),
+   사진 안에 글자·이름표·자막·워터마크·로고가 찍혀 있지 않은가(예: 다른 사람 이름 같은 한글·영문 글자), {'모든 사진이 같은 사람인가, ' if cat == 'character' else ''}실사인가.
+   문제가 있으면 photo_verdict "redo"와 photo_issues(한국어, 사진 번호와 무엇이 문제인지)를 준다. 문제없으면 photo_verdict "ok".
+답 형식에 "photo_verdict": "ok|redo", "photo_issues": ["…"]를 함께 넣는다."""
+    progress(f"코디네이터가 {name} v{info.get('version_no')}을(를) 감수하는 중" + (f"(기준 사진 {len(blocks) // 2}장 포함)" if blocks else ""))
+    text, _ = claude("claude-sonnet-5-5", system, ([{"type": "text", "text": user}] + blocks) if blocks else user,
+                     max_tokens=4000, stage="other", note=f"코디네이터 감수: {name}")
+    d = safe_json(text)
+    verdict = d.get("verdict") if d.get("verdict") in ("pass", "fix", "owner") else None
+    if not verdict:
+        raise RuntimeError(f"코디네이터 답이 형식에 맞지 않았습니다(감수 기록 없음). 다시 시도하면 대부분 해결됩니다. 답 앞부분: {text.strip()[:120]!r}")
+    checks = [c for c in (d.get("checks") or []) if isinstance(c, dict)][:20]
+    after = None
+    if verdict == "fix":
+        after = clean_en(json.dumps({"prompt_en": d.get("fixed_prompt_en") or ""}))
+        if after:
+            rpc("agent_bible_set_prompt", p_token=TOKEN, p_version=info["version_id"], p_prompt=after)
+            for c in checks:
+                if c.get("status") in ("missing", "conflict") and c.get("where") == "prompt":
+                    c["status"] = "fixed"
+        else:
+            verdict = "owner"
+            d["owner_note"] = d.get("owner_note") or "영어 프롬프트를 고쳐야 하는데 보정안이 비었습니다. 다시 감수를 누르거나 묘사를 더 자세히 적어 주세요"
+    final = {"pass": "pass", "fix": "fixed", "owner": "owner"}[verdict]
+    photo_redo = bool(blocks) and d.get("photo_verdict") == "redo"
+    rpc("agent_bible_review_save", p_token=TOKEN, p={
+        "series_id": info.get("series_id"), "entry_id": info["entry_id"], "version_id": info["version_id"], "version_no": info.get("version_no"),
+        "verdict": final, "request": owner_req or None, "checks": checks, "prompt_before": prompt or None, "prompt_after": after,
+        "owner_note": (d.get("owner_note") or "")[:500] or None, "summary": (d.get("summary") or "")[:300],
+        "photo_redo": photo_redo, "photo_issues": [str(x)[:200] for x in (d.get("photo_issues") or [])][:8] if photo_redo else []})
+    if photo_redo:
+        notify(f"코디네이터: {name} 사진 다시 만들기 추천", "; ".join(map(str, (d.get("photo_issues") or [])[:3]))[:300]
+               + "\n바이블 카드의 '감수·반영 기록'에서 [다시 적용해서 사진 만들기]를 누르세요", "warning")
+    elif final == "owner":
+        notify(f"코디네이터: {name} 확인이 필요합니다", (d.get("owner_note") or d.get("summary") or "")[:300] + "\n바이블 카드의 '감수·반영 기록'에서 볼 수 있습니다", "warning")
+    return f"{name} v{info.get('version_no')} 감수: " + {"pass": "반영 확인", "fixed": "영어 프롬프트 보정", "owner": "대표 확인 필요"}[final] + (" · 사진 다시 만들기 추천" if photo_redo else "")
+
 
 
 @task("bible_place")
@@ -3866,20 +3999,20 @@ def fail_hint(e):
     return "다시 시도. 같은 원인으로 또 실패하면 원인 문구를 개발(Claude)에 전달"
 
 
-QUIET_FAIL = {"bible_prompt", "photo_describe", "bible_place", "photo_design", "prep_cut"}
-TASK_NAME = {"upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+QUIET_FAIL = {"coord_review", "bible_prompt", "photo_describe", "bible_place", "photo_design", "prep_cut"}
+TASK_NAME = {"coord_review": "코디네이터 감수", "upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
     """오래 걸리는 작업 중에도 15초마다 살아 있음 신호를 보내고, 간단한 명령은 바로 처리한다."""
-    def __init__(self, info):
-        self.info, self.stop, self.restart_after = info, threading.Event(), False
+    def __init__(self, info, task=None):
+        self.info, self.stop, self.restart_after, self.task = info, threading.Event(), False, task or {}
         self.th = threading.Thread(target=self.loop, daemon=True)
 
     def loop(self):
         while not self.stop.wait(BEAT_SECONDS):
             try:
-                t = CURRENT.get("task") or {}
+                t = self.task
                 hb = rpc("agent_heartbeat", p_token=TOKEN, p_platform=PLATFORM, p_version=VERSION, p_state="busy",
                          p_current_job=t.get("kind"), p_last_error=None, p_info=self.info)
                 for c in hb.get("commands") or []:
@@ -3920,9 +4053,14 @@ def main():
         try:
             info["latest_seen"] = LATEST_SEEN
             hb = rpc("agent_heartbeat", p_token=TOKEN, p_platform=PLATFORM, p_version=VERSION,
-                     p_state="error" if last_error else ("paused" if paused else "idle"),
-                     p_current_job=None, p_last_error=last_error, p_info=info)
+                     p_state="busy" if QUICK.get("busy") else ("error" if last_error else ("paused" if paused else "idle")),
+                     p_current_job=QUICK.get("busy"), p_last_error=last_error, p_info=info)
             DEVICE_ID, paused = hb.get("device_id"), bool(hb.get("paused"))
+            QUICK["paused"] = paused
+            if not QUICK.get("started"):   # 첫 연결이 된 뒤에 짧은 일 줄을 연다
+                QUICK["started"] = True
+                threading.Thread(target=quick_lane, daemon=True).start()
+                log("짧은 일 줄(바이블 반영·코디네이터 감수) 시작")
             last_error = None
             if os.path.exists(PENDING):  # 새 버전이 정상적으로 연결됨 → 업데이트 확정
                 os.remove(PENDING)
@@ -3933,7 +4071,7 @@ def main():
                 tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=sorted(TASKS), p_platform=PLATFORM)
                 if tk and tk.get("id"):
                     busy = True
-                    with Beat(info) as beat:
+                    with Beat(info, tk) as beat:
                         run_task(tk)
                     if beat.restart_after:
                         check_update(force=True)
@@ -3944,6 +4082,10 @@ def main():
                         busy = True
                         run_job(j)
         except Restart:
+            for _ in range(60):   # 짧은 일 줄이 하던 일을 마칠 때까지 잠깐(최대 2분) 기다린다
+                if not QUICK.get("busy"):
+                    break
+                time.sleep(2)
             log("재시작")
             sys.exit(0)  # 자동 시작 장치(맥 launchd / Windows 실행기)가 다시 켭니다
         except Exception as e:
@@ -3953,7 +4095,7 @@ def main():
                 log("토큰이 맞지 않습니다. 대시보드에서 토큰을 다시 발급하고 설치 명령을 다시 실행하세요.")
                 time.sleep(300)
                 continue
-        if not busy:
+        if not busy and not QUICK.get("busy"):
             try:
                 if check_update():
                     log("새 버전으로 재시작")
@@ -5416,6 +5558,60 @@ function promptLine(e, c) {
   if (hasHangul(c.description) || hasHangul(c.details)) return `<div class="row" style="gap:6px;margin-top:6px">${pill('영어 프롬프트 만드는 중', 'warn')}<span class="quiet">작가실이 한글 묘사를 영어로 옮기고 있습니다(1~2분)</span></div>`;
   return '';
 }
+// 코디네이터 감수·반영 기록: 카드마다 '반영 중/반영 완료'와 감수 결과(요청 항목별 확인, 프롬프트 보정 전후, 대표 확인 필요)를 남긴다
+const RV = { pass: ['반영 확인', 'good'], fixed: ['프롬프트 보정', 'accent'], owner: ['대표 확인 필요', 'bad'] };
+const CHK = { ok: '✓', fixed: '🔧', missing: '✗', conflict: '⚠' };
+function reviewBox(e, c) {
+  if (!['character', 'location', 'background', 'prop', 'style', 'music'].includes(e.category)) return '';
+  const bp = (S.bpTask || {})[c.id], cv = (S.cvTask || {})[e.id];
+  const list = (S.reviews || {})[e.id] || [];
+  const mine = list.find(r => r.version_id === c.id);
+  const reflecting = bp && ['queued', 'running'].includes(bp.status);
+  const reflect = reflecting ? `${bp.status === 'running' ? '<span class="spin"></span>' : ''}${pill('반영 중', 'warn')}<span class="quiet">${bp.status === 'running' ? esc(bp.progress || '작가실이 묘사·영어 프롬프트에 반영하는 중') : '반영할 차례를 기다리는 중'}</span>`
+    : bp && bp.status === 'done' ? `${pill('반영 완료', 'good')}<span class="quiet">${bp.payload?.apply_reason ? '요청을 묘사·영어 프롬프트에 반영했습니다' : '영어 프롬프트를 새로 썼습니다'}</span>`
+    : bp && bp.status === 'failed' ? `${pill('반영 실패', 'bad')}<span class="quiet">${esc(explainFail('bible_prompt', bp.error).what)}</span> <button class="btn small" data-bpretry="${esc(bp.id)}">다시 시도</button>` : '';
+  const cvOpen = cv && ['queued', 'running'].includes(cv.status);
+  const review = cvOpen ? `${cv.status === 'running' ? '<span class="spin"></span>' : ''}${pill(cv.status === 'running' ? '감수 중' : '감수 대기', 'warn')}<span class="quiet">${reflecting ? '반영이 끝나면 코디네이터가 감수합니다' : esc(cv.progress || '코디네이터가 곧 감수합니다')}</span>`
+    : mine ? `${pill(RV[mine.verdict][0], RV[mine.verdict][1])}<span class="quiet">v${mine.version_no || ''} · ${fmt(mine.created_at)}</span>`
+    : cv && cv.status === 'failed' ? `${pill('감수 실패', 'bad')}<span class="quiet">${esc(explainFail('coord_review', cv.error).what)}</span>`
+    : `<span class="quiet">아직 감수 기록이 없습니다</span>`;
+  const body = mine && !cvOpen ? `
+    ${mine.request ? `<div style="margin-top:4px"><b>대표 요청:</b> ${esc(mine.request)}</div>` : ''}
+    ${mine.summary ? `<div style="margin-top:2px">${esc(mine.summary)}</div>` : ''}
+    ${mine.owner_note ? `<div class="msg warn" style="margin:4px 0 0">대표님 확인: ${esc(mine.owner_note)} <button class="btn small" data-bfixreq="${esc(e.id)}">고쳐쓰기</button></div>` : ''}
+    ${(mine.checks || []).length ? `<ul class="rvchk">${mine.checks.map(k => `<li class="${esc(k.status)}">${CHK[k.status] || '·'} ${esc(k.item || '')}${k.note ? ` <span class="quiet">— ${esc(k.note)}</span>` : ''}</li>`).join('')}</ul>` : ''}
+    ${mine.photo_redo ? `<div class="msg warn" style="margin:6px 0 0"><b>기준 사진에 문제가 있습니다.</b> ${(mine.photo_issues || []).map(x => esc(x)).join(' / ')}
+      <div class="row" style="margin-top:6px"><button class="btn small primary" data-rvphoto="${esc(e.id)}">다시 적용해서 사진 만들기 (추천)</button>
+      <span class="quiet">지금 바이블 묘사·영어 프롬프트로 후보를 새로 만듭니다. 고른 뒤 바이블에 적용하면 기준 사진이 바뀝니다.</span></div></div>` : ''}
+    ${mine.prompt_after ? `<details><summary class="quiet">영어 프롬프트 보정 전·후</summary><div class="quiet" style="margin-top:4px">전: ${esc(mine.prompt_before || '-')}</div><div style="margin-top:4px">후: ${esc(mine.prompt_after)}</div></details>` : ''}` : '';
+  const older = list.filter(r => r !== mine);
+  return `<div class="rvbox"><div class="row" style="gap:6px"><b>감수·반영 기록</b><span class="quiet">코디네이터</span>
+      <button class="btn small" data-revagain="${esc(e.id)}" data-rv="${esc(c.id)}" style="margin-left:auto" ${cvOpen ? 'disabled' : ''}>다시 감수</button></div>
+    ${reflect ? `<div class="row" style="gap:6px;margin-top:4px">${reflect}</div>` : ''}
+    <div class="row" style="gap:6px;margin-top:4px">${review}</div>${body}
+    ${older.length ? `<details style="margin-top:4px"><summary class="quiet">이전 감수 ${older.length}건</summary>${older.slice(0, 10).map(r => `<div class="quiet" style="margin-top:3px">v${r.version_no || ''} · ${fmt(r.created_at)} · ${RV[r.verdict][0]}${r.request ? ` · 요청: ${esc(r.request)}` : ''}${r.summary ? ` — ${esc(r.summary)}` : ''}</div>`).join('')}</details>` : ''}</div>`;
+}
+document.addEventListener('click', ev => {
+  const b = ev.target.closest('[data-revagain]');
+  if (b) { ev.preventDefault(); b.disabled = true;
+    q(S.sb.from('pipeline_tasks').insert({ kind: 'coord_review', series_id: S.seriesId, payload: { entry_id: b.dataset.revagain, version_id: b.dataset.rv } }))
+      .then(() => { toast('코디네이터에게 감수를 맡겼습니다'); go('bible'); }).catch(e => toast('오류: ' + errText(e))); return; }
+  const ph = ev.target.closest('[data-rvphoto]');
+  if (ph) { ev.preventDefault();
+    const e = (S.bibleEntries || []).find(x => x.id === ph.dataset.rvphoto), c = (S.bibleCur || {})[ph.dataset.rvphoto];
+    if (!e || !c) return;
+    const isChar = e.category === 'character';
+    if (!confirm(`${e.name}: 지금 바이블 묘사·영어 프롬프트로 사진 후보 ${isChar ? '4장(Soul 2)' : '2장'}을 새로 만듭니다(Higgsfield 비용, 장당 수십~백여 원). 진행할까요?`)) return;
+    ph.disabled = true;
+    q(S.sb.from('photo_designs').insert({ entry_id: e.id, prompt: (c.prompt_en || c.description || '').slice(0, 1800), use_bible: true }).select('id').single())
+      .then(r => q(S.sb.from('pipeline_tasks').insert({ kind: 'photo_design', payload: { design_id: r.id } })))
+      .then(() => { toast('사진 후보를 만들고 있습니다. 카드의 사진 칸에서 골라 주세요'); go('bible'); }).catch(err => toast('오류: ' + errText(err)));
+    return; }
+  const gt = ev.target.closest('[data-goto]');
+  if (gt) { ev.preventDefault(); document.querySelector(`[data-card="${gt.dataset.goto}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
+  const f = ev.target.closest('[data-bfixreq]');
+  if (f) { ev.preventDefault(); document.querySelector(`[data-bedit="${f.dataset.bfixreq}"]`)?.click(); }
+});
 // 동일인: 이 카드가 누구와 같은지, 누가 이 사람과 같은지
 function sameAsLine(e, entries) {
   const to = e.same_as && entries.find(x => x.id === e.same_as);
@@ -5460,6 +5656,13 @@ async function viewBible(main) {
   const ahead = await q(S.sb.from('pipeline_tasks').select('id', { count: 'exact', head: true }).in('status', ['queued', 'running'])).catch(() => null);
   bpt.forEach(t => { const k = t.payload?.version_id; if (k && !S.bpTask[k]) S.bpTask[k] = t; });
   S.bpAhead = ahead;
+  S.cvTask = {}; S.reviews = {}; S.bibleEntries = entries; S.bibleCur = {};
+  versions.filter(v => v.status === 'active').forEach(v => { S.bibleCur[v.entry_id] = v; });
+  const cvt = await q(S.sb.from('pipeline_tasks').select('id,status,progress,error,payload,created_at,not_before').eq('kind', 'coord_review').eq('series_id', S.seriesId)
+    .order('created_at', { ascending: false }).limit(200)).catch(() => []);
+  cvt.forEach(t => { const k = t.payload?.entry_id; if (k && !S.cvTask[k]) S.cvTask[k] = t; });
+  const revs = await q(S.sb.from('bible_reviews').select('*').eq('series_id', S.seriesId).order('created_at', { ascending: false }).limit(500)).catch(() => []);
+  revs.forEach(r => { (S.reviews[r.entry_id] = S.reviews[r.entry_id] || []).push(r); });
   const cur = id => versions.find(v => v.entry_id === id && v.status === 'active');
   const proposals = versions.filter(v => v.status === 'proposed');
   const urls = await signedUrls([...new Set(versions.filter(v => v.status === 'active' || v.status === 'proposed')
@@ -5495,6 +5698,7 @@ async function viewBible(main) {
         <button class="btn small" id="bextract" title="작가실이 대본을 화별로 읽고 씬마다 필요한 인물·장소·배경·소품을 찾아 바이블 수정안으로 올립니다">필요한 인물·장소·소품 찾기</button></div></div>
       <div class="brow"><span class="blbl">한꺼번에</span><div class="bbtns">
         ${showPhotoBtn ? `<button class="btn small" id="bphotos" title="적용된 묘사는 있고 사진이 없는 항목의 사진 후보를 만듭니다. '직접 올리기' 항목은 빠집니다(인물은 Soul 2 실사)">${catLabel ? esc(catLabel) + ' ' : ''}사진 만들기 (${photoTodo.length})</button>` : ''}
+        <button class="btn small" id="bcoord" title="코디네이터가 지금 적용된 모든 항목의 묘사·영어 프롬프트·대본 일치를 감수하고 카드에 기록합니다(항목당 수십 원)">전체 감수 다시 하기</button>
         <button class="btn small" id="bcast" title="작가실이 대본을 읽고 인물마다 목소리 설명·시험 대사를 쓰고, ElevenLabs 후보 3개씩 만듭니다">인물 목소리 만들기</button></div></div>
       <div class="brow"><span class="blbl">설정</span><div class="bbtns">
         <button class="btn small" id="hdrProp" title="협찬(PPL) 소품을 사진과 함께 넣으면 작가실이 세게 보일 화·씬을 추천합니다">+ 협찬 소품</button>
@@ -5520,6 +5724,13 @@ async function viewBible(main) {
       <li>수정본을 확정하면 감독이 그 씬을 다시 설계합니다. 이미 만든 컷이 있으면 제작 탭에 "PPL 반영해 다시 설계" 안내가 뜹니다.</li>
     </ol></div>` : ''}
   <div id="bxBox"></div>
+  ${(() => { const bad = entries.map(e => ({ e, r: ((S.reviews || {})[e.id] || []).find(r => r.version_id === cur(e.id)?.id) })).filter(x => x.r && (x.r.verdict === 'owner' || x.r.photo_redo));
+    const open = Object.values(S.cvTask || {}).filter(t => ['queued', 'running'].includes(t.status)).length;
+    return bad.length || open ? `<div class="card" style="border-color:${bad.length ? 'var(--bad)' : 'var(--line)'}"><div class="row"><b>코디네이터 감수 결과</b>
+      ${open ? pill(`감수 중·대기 ${open}`, 'warn') : ''}${bad.length ? pill(`이상 ${bad.length}건`, 'bad') : pill('이상 없음', 'good')}</div>
+      ${bad.map(({ e, r }) => `<div class="row" style="gap:6px;margin-top:6px"><b>${esc(e.name)}</b>${r.photo_redo ? pill('사진 다시 만들기 추천', 'bad') : ''}${r.verdict === 'owner' ? pill('묘사 확인 필요', 'warn') : ''}
+        <span class="quiet">${esc((r.photo_issues || [])[0] || r.owner_note || r.summary || '')}</span>
+        <button class="btn small" data-goto="${esc(e.id)}" style="margin-left:auto">카드로</button></div>`).join('')}</div>` : ''; })()}
   <div id="bEditor" style="margin-top:12px"></div>
   ${shownProps.length < proposals.length ? `<p class="quiet" style="margin:14px 0 0">다른 분류의 수정안 ${proposals.length - shownProps.length}건은 '전체'나 그 분류 버튼을 누르면 보입니다.</p>` : ''}
   ${shownProps.length ? `<div class="row" style="margin-top:14px"><h3 style="margin:0">검토할 ${esc(catLabel)} 수정안 ${shownProps.length}건</h3>
@@ -5537,12 +5748,14 @@ async function viewBible(main) {
         <button class="btn danger small" data-brej="${esc(p.id)}">반려</button></div></div>`; }).join('')}` : ''}
   ${shown.length ? `<div class="bgrid">${shown.map(e => {
     const c = cur(e.id); const n = versions.filter(v => v.entry_id === e.id && v.status !== 'proposed').length;
-    return `<div class="card bcard ${hasPhotoSrc ? (e.photo_source === 'upload' ? 'ps-up' : 'ps-auto') : ''}" data-card="${esc(e.id)}">
+    const rvBad = c && ((S.reviews || {})[e.id] || []).find(r => r.version_id === c.id && (r.verdict === 'owner' || r.photo_redo));
+    return `<div class="card bcard ${hasPhotoSrc ? (e.photo_source === 'upload' ? 'ps-up' : 'ps-auto') : ''}" data-card="${esc(e.id)}" ${rvBad ? 'style="border-color:var(--bad)"' : ''}>
       <div class="row"><b style="font-size:16px">${esc(e.name)}</b>${pill(BIBLE_CAT[e.category])}${c ? pill('v' + c.version_no, 'accent') : pill('승인본 없음', 'bad')}</div>
       ${e.summary ? `<div class="quiet" style="margin-top:4px">${esc(e.summary)}</div>` : ''}
       ${e.origin === 'sponsor' ? `<div style="margin-top:4px">${pill('협찬 · PPL', 'warn')}</div>` : ''}
       ${e.category === 'music' ? `<div class="quiet" style="margin-top:6px">적용: ${(e.appears || []).length ? esc([...new Set(e.appears.map(a => a.ep))].sort((a, b) => a - b).join('·')) + '화' : '전체 화'}</div>` : ''}
       ${e.category === 'music' ? '' : appearsLine(e, c)}
+      ${c ? reviewBox(e, c) : ''}
       ${placementBox(e)}
       <div data-dsc="${esc(e.id)}"></div>
       ${c ? thumbs(c.image_paths, urls) : ''}
@@ -5797,6 +6010,14 @@ async function viewBible(main) {
     const n = await queuePhotos(entries, id => fresh.find(v => v.entry_id === id), new Set(list.map(p => p.entry_id)));
     toast(`${list.length}개 적용 · 사진 후보 ${n}건 만드는 중`); go('bible');
   });
+  $('#bcoord').onclick = guard(async () => {
+    const act = entries.filter(e => ['character', 'location', 'background', 'prop', 'style', 'music'].includes(e.category) && cur(e.id))
+      .filter(e => !['queued', 'running'].includes((S.cvTask || {})[e.id]?.status));
+    if (!act.length) return toast('감수할 항목이 없습니다(이미 감수 대기·진행 중)');
+    if (!confirm(`코디네이터가 적용 중인 ${act.length}개 항목을 처음부터 다시 감수합니다(묘사·영어 프롬프트·대본·기준 사진, 항목당 수십 원). 이상이 있는 항목은 카드에 표시되고 위에 모아 보여 드립니다.`)) return;
+    await q(S.sb.from('pipeline_tasks').insert(act.map(e => ({ kind: 'coord_review', series_id: S.seriesId, payload: { entry_id: e.id, version_id: cur(e.id).id } }))));
+    toast(`${act.length}개 항목 감수를 맡겼습니다`); go('bible');
+  });
   $('#bcast').onclick = guard(async () => {
     const chars = entries.filter(e => e.category === 'character');
     if (!chars.length) return toast('먼저 캐릭터를 바이블에 등록해 주세요 (+ 항목 추가)');
@@ -5868,9 +6089,13 @@ async function openPhotoDesign(entry, cur, fresh) {
     document.getElementById('pdGo-' + entry.id).onclick = guard(async () => {
       const p = document.getElementById('pdP-' + entry.id).value.trim();
       if (p.length < 20) return toast('묘사를 20자 이상 적어 주세요');
-      const r = await q(S.sb.from('photo_designs').insert({ entry_id: entry.id, prompt: p }).select('id').single());
+      const useBible = p === prompt.trim();   // 칸을 손대지 않았으면: 만들 때의 바이블 최신 영어 프롬프트로
+      const r = await q(S.sb.from('photo_designs').insert({ entry_id: entry.id, prompt: p, use_bible: useBible }).select('id').single())
+        .catch(() => q(S.sb.from('photo_designs').insert({ entry_id: entry.id, prompt: p }).select('id').single()));
       await q(S.sb.from('pipeline_tasks').insert({ kind: 'photo_design', payload: { design_id: r.id } }));
-      toast('사진 후보를 만들고 있습니다'); openPhotoDesign(entry, cur, false);
+      const pend = await q(S.sb.from('pipeline_tasks').select('id', { count: 'exact', head: true }).in('kind', ['bible_prompt', 'coord_review'])
+        .in('status', ['queued', 'running']).eq('payload->>entry_id', entry.id)).catch(() => null);
+      toast(pend ? '영어 프롬프트 반영·감수가 먼저 끝난 뒤, 반영된 프롬프트로 사진을 만듭니다' : '사진 후보를 만들고 있습니다'); openPhotoDesign(entry, cur, false);
     });
     const own = document.getElementById('pdOwn-' + entry.id);
     if (own) own.onclick = guard(async () => {
@@ -7032,7 +7257,7 @@ const CUT_STATUS = {
   designed: ['설계됨 · 승인 대기', 'accent'], approved: ['승인 · 생성 대기', 'warn'], generating: ['생성 중', 'warn'],
   reviewing: ['감수 중', 'warn'], passed: ['통과', 'good'], failed: ['불합격·실패', 'bad'], hold: ['보류', ''], cancelled: ['취소', ''],
 };
-const TASK_LABEL = { bible_prompt: '바이블 영어 프롬프트', bible_suggest: '작가실 추천(스타일·음악)', api_check: '실제 연결 점검', upscale: '1080p 업그레이드', bible_extract: '대본에서 필요 항목 찾기', photo_describe: '사진 보고 묘사 쓰기', bible_place: '넣을 화·씬 추천',photo_design: '사진 디자인', photo_set: '얼굴 학습', prep_cut: '사진·목소리 준비', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
+const TASK_LABEL = { coord_review: '코디네이터 감수', bible_prompt: '바이블 영어 프롬프트', bible_suggest: '작가실 추천(스타일·음악)', api_check: '실제 연결 점검', upscale: '1080p 업그레이드', bible_extract: '대본에서 필요 항목 찾기', photo_describe: '사진 보고 묘사 쓰기', bible_place: '넣을 화·씬 추천',photo_design: '사진 디자인', photo_set: '얼굴 학습', prep_cut: '사진·목소리 준비', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
 const PROD_STEPS = [['원고', '대본 탭에서 넣기'], ['작가실', '감정선 정리본'], ['컷 설계', '컷 나누기·대사 미리 듣기·장면 사진'], ['생성 승인', '대표가 컷별로'], ['영상·감수', 'Seedance + 영상감수'], ['씬 보관', '집 PC · OneDrive']];
 const usdKrw = (usd, rate) => usd == null ? '-' : won(usd * (rate || 1340));
 
@@ -7138,7 +7363,7 @@ function bindFailCards(root, tasks, after) {
 // ------------------------------------------------------------------
 // 제작 현황판: 모든 시리즈의 대기·진행 중인 일을 담당별로, 같은 일이 두 번 걸려 있으면 중복 표시
 // ------------------------------------------------------------------
-const DESK = [['작가실', ['writers_room', 'bible_extract', 'bible_prompt', 'bible_suggest', 'bible_place', 'photo_describe', 'voice_cast']],
+const DESK = [['코디네이터', ['coord_review']], ['작가실', ['writers_room', 'bible_extract', 'bible_prompt', 'bible_suggest', 'bible_place', 'photo_describe', 'voice_cast']],
   ['감독실', ['director', 'prep_cut']], ['영상 생성', ['generate', 'upscale']], ['감수', ['video_review']],
   ['사진·목소리', ['photo_design', 'photo_set', 'voice_design', 'voice_save', 'api_check']], ['편집·보관', ['assemble', 'edit_command', 'bgm', 'store']]];
 async function renderBoard() {
@@ -7200,7 +7425,6 @@ async function renderPicker(episodes) {
       <button class="btn small" id="pkAll" style="margin-left:auto">전체 선택</button><button class="btn small" id="pkNone">선택 해제</button></div>
     <div class="pkgrid">${episodes.map(e => { const s = st(e); return `<label class="pk ${S.pick[e.id] ? 'on' : ''}"><input type="checkbox" data-pk="${esc(e.id)}" ${S.pick[e.id] ? 'checked' : ''}>
       <b>${e.number}화</b> <span class="quiet">${esc((e.title || '').slice(0, 14))}</span>
-      <a class="quiet pkhold" data-pkhold="${esc(e.id)}" title="이 화 보류(기록 탭 보류함으로)">보류</a>
       <div class="quiet" style="font-size:12px">${s.busy.length ? `<span style="color:var(--warn)">진행 중: ${esc([...new Set(s.busy)].join(', '))}</span>` : s.cuts ? `컷 ${s.cuts} · 통과 ${s.passed}` : s.conf ? '대본 확정 · 컷 전' : s.raw ? '원고만' : '대본 없음'}</div></label>`; }).join('')}</div>
     ${held.length ? `<div class="row quiet" style="margin-top:6px">보류한 화: ${held.map(e => `<span>${e.number}화${e.hold_note ? ` (${esc(e.hold_note)})` : ''} <a href="#" data-pkun="${esc(e.id)}">꺼내기</a></span>`).join(' · ')}</div>` : ''}
     <div class="row" style="margin-top:8px"><button class="btn primary small" id="pkWr">선택한 화: 작가실 정리부터</button>
@@ -8920,6 +9144,20 @@ const HELP = {
 <li>수정안이 많으면 지시 탭 <b>적용 대기함</b>에서 한꺼번에 처리할 수도 있습니다.</li>
 </ol>
 
+<h4>코디네이터 — 감수·반영 기록</h4>
+<ul>
+<li>항목을 적용하거나 고쳐쓰면, <b>코디네이터</b>가 감수해 카드의 <b>감수·반영 기록</b>에 남깁니다. 고쳐쓰기의 "바꾸는 이유·바꿀 내용"에 적은 요청이 정확히 들어갔는지 확인할 수 있습니다.<span class="ex">예: 탄 v4 — 대표 요청 "눈매를 날카롭게, 은발로" · ✓ 은발 반영(묘사) · 🔧 날카로운 눈매(프롬프트에 빠져 보정) → [프롬프트 보정]</span></li>
+<li>순서: <b>반영 중</b>(작가실이 요청을 묘사·영어 프롬프트에 넣는 중) → <b>반영 완료</b> → <b>감수 대기/감수 중</b> → 결과.</li>
+<li>결과는 세 가지입니다.
+  <ul>
+  <li><b>반영 확인</b>: 모두 맞음.</li>
+  <li><b>프롬프트 보정</b>: 영어 프롬프트가 빠뜨린 것을 코디네이터가 고침. 전·후 문장을 볼 수 있습니다.</li>
+  <li><b>대표 확인 필요</b>: 한글 묘사 자체가 요청·대본과 어긋남. 무엇을 고치면 되는지 한 줄로 알려 주고, [고쳐쓰기]로 바로 열립니다.</li>
+  </ul></li>
+<li>코디네이터는 <b>기준 사진</b>도 봅니다: 묘사와 맞는지, 사진에 글자·이름표·자막(예: 다른 사람 이름)이 찍혀 있지 않은지, 같은 사람인지. 문제가 있으면 카드가 빨갛게 표시되고 <b>다시 적용해서 사진 만들기 (추천)</b> 버튼이 나옵니다. 바이블 위 "코디네이터 감수 결과"에 이상 항목이 모입니다.<span class="ex">예: 도윤 — 사진 2에 '김윤호' 이름표 글자, 사진 3은 다른 사람 → [다시 적용해서 사진 만들기]</span></li>
+<li><b>다시 감수</b>(카드), <b>전체 감수 다시 하기</b>(위 "한꺼번에" 줄)으로 언제든 다시 확인할 수 있습니다. 지난 감수는 "이전 감수"에 쌓입니다.</li>
+<li>사진 <b>새로 만들기</b>는 그 항목의 반영·감수가 진행 중이면 <b>그게 끝난 뒤</b> 반영된 프롬프트로 만듭니다.</li>
+</ul>
 <h4>⑥ 실사 사진·얼굴 고정 (캐릭터)</h4>
 <ol>
 <li><b>실사 사진 만들기·얼굴 고정</b> → 묘사 확인 → 후보 4장(Soul 2).<span class="ex">예: 민지 후보 4장 중 2번·4번이 같은 사람 느낌</span></li>

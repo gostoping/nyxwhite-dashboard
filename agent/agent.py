@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.15.2"
+VERSION = "1.16.1"
 
 import base64
 import glob
@@ -460,7 +460,42 @@ def task(name):
     return wrap
 
 
-CURRENT = {"task": None}
+class _Current(threading.local):
+    """작업 상태는 스레드마다 따로(긴 일 줄과 짧은 일 줄이 함께 돌아도 진행 문구·비용 기록이 섞이지 않게)."""
+    def __init__(self):
+        self.d = {"task": None}
+
+    def get(self, k, default=None):
+        return self.d.get(k, default)
+
+    def __getitem__(self, k):
+        return self.d[k]
+
+    def __setitem__(self, k, v):
+        self.d[k] = v
+
+
+CURRENT = _Current()
+# 짧은 바이블 일은 긴 일(컷 설계·영상)과 따로 줄을 서서 바로 처리한다(컷 설계 중에도 고쳐쓰기 반영이 기다리지 않게)
+QUICK_KINDS = ["bible_prompt", "coord_review", "photo_describe"]
+QUICK = {"busy": None}
+
+
+def quick_lane():
+    while True:
+        try:
+            if not QUICK.get("paused"):
+                tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=QUICK_KINDS, p_platform=PLATFORM)
+                if tk and tk.get("id"):
+                    QUICK["busy"] = tk["kind"]
+                    try:
+                        run_task(tk)
+                    finally:
+                        QUICK["busy"] = None
+                    continue
+        except Exception as e:
+            log(f"짧은 일 줄 오류: {e}")
+        time.sleep(5)
 
 
 def progress(text):
@@ -2421,7 +2456,8 @@ def el_json(path, body=None, method="POST", timeout=180):
 
 # ---------------- 바이블 사진 디자인: Soul 2(실사 인물) + Soul ID(얼굴 고정)
 PHOTO_LOOK = ("Photorealistic photograph of a real person, shot on a full-frame camera with an 85mm lens, natural skin texture with pores, "
-              "soft natural light, realistic hair strands, no makeup filter, no illustration, no 3D render, no text.")
+              "soft natural light, realistic hair strands, no makeup filter, no illustration, no 3D render, "
+              "no text, no letters, no captions, no name tags, no subtitles, no watermark, no logo.")
 SET_SHOTS = [("정면 얼굴", "Head-and-shoulders portrait facing the camera, neutral expression, plain light grey studio background."),
              ("3/4 얼굴", "Three-quarter view portrait turned slightly to the left, gentle smile, plain light grey studio background."),
              ("전신·의상", "Full-body shot standing naturally, wearing the signature outfit, plain light grey studio background."),
@@ -2449,6 +2485,12 @@ def t_photo_design(t):
     if not d:
         raise RuntimeError("사진 디자인 요청을 찾지 못했습니다")
     name = d["entry_name"]
+    # 순서: 그 항목의 영어 프롬프트 반영·코디네이터 감수가 진행 중이면 그게 끝난 뒤에 만든다
+    if d.get("prompt_pending") and (t.get("attempts") or 1) < 12:
+        rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "queued"})
+        raise Retry(45, "바이블 영어 프롬프트 반영·감수가 먼저 끝나야 해서 기다리는 중(끝나면 바로 만듭니다)")
+    if d.get("use_bible") and d.get("prompt_en"):   # 대표가 묘사 칸을 손대지 않았으면 만들 때의 최신 영어 프롬프트
+        d["prompt"] = d["prompt_en"]
     if re.search(r"[가-힣]", d.get("prompt") or ""):
         # 한글 묘사는 작가실이 영어 프롬프트로 옮긴 뒤에 만든다(사진 모델은 영어가 정확)
         if d.get("prompt_en"):
@@ -2991,6 +3033,95 @@ def t_bible_prompt(t):
                            f"바이블 '{name}' 카드에서 한글 묘사를 자세히 적어 주세요(담을 것: {need}). {PROMPT_EXAMPLE.get(cat, '')}")
     rpc("agent_bible_set_prompt", p_token=TOKEN, p_version=info["version_id"], p_prompt=en)
     return f"{name} 영어 프롬프트 {len(en)}자 ({how})"
+
+
+@task("coord_review")
+def t_coord_review(t):
+    """코디네이터: 적용된 바이블 항목을 감수한다 — 대표 요청 반영, 묘사↔영어 프롬프트 일치, 대본과 어긋남.
+    영어 프롬프트만 틀렸으면 직접 보정하고, 묘사 자체를 바꿔야 하면 대표 확인 필요로 넘긴다. 결과는 바이블 카드에 기록."""
+    p = t.get("payload") or {}
+    info = rpc("agent_coord_info", p_token=TOKEN, p_version=p.get("version_id")) or {}
+    if not info:
+        return "대상 버전이 없습니다(삭제됨)"
+    if info.get("status") != "active":
+        return "이미 다른 버전으로 바뀌어 감수하지 않음"
+    name, cat = info.get("name"), info.get("category")
+    hangul = re.search(r"[가-힣]", (info.get("description") or "") + (info.get("details") or ""))
+    if (info.get("prompt_pending") or (hangul and not info.get("prompt_en"))) and (t.get("attempts") or 1) < 15:
+        raise Retry(45, f"{name}: 작가실이 영어 프롬프트를 반영하는 중이라 끝난 뒤 감수합니다")
+    prev = info.get("prev") or {}
+    reason = (info.get("change_reason") or "").strip()
+    owner_req = reason if info.get("proposed_by") == "대표" and not re.search(r"(사진을 보고|가져옴|얼굴 고정|Soul)", reason) else ""
+    owner_req = re.sub(r"\s*→ 작가실이 묘사·프롬프트에 반영:.*$", "", owner_req)
+    prompt = (info.get("prompt_en") or "").strip()
+    found = script_mentions(info.get("series_id"), name, info.get("summary"), limit=6000) if cat not in ("style", "music") else ""
+    system = f"""너는 드라마 제작팀의 코디네이터다. 시리즈 바이블 항목의 묘사·영어 프롬프트를 감수한다.
+확인할 것:
+1) 대표 요청(있으면)이 한글 묘사와 영어 프롬프트에 정확히 들어갔는가 — 요청을 항목별로 쪼개 하나씩.
+2) 영어 프롬프트가 한글 묘사·세부 사항의 눈에 보이는 고정 특징({PROMPT_NEEDS.get(cat, '눈에 보이는 특징')})을 빠짐없이, 어긋나지 않게 담았는가. 한글·이름·브랜드가 섞이지 않았는가.
+3) 대본 발췌(있으면)와 어긋나는 것(나이·성별·머리·옷·장소 구조 등)이 없는가.
+처리:
+- 영어 프롬프트만 틀리거나 빠졌으면 verdict "fix"와 fixed_prompt_en(고친 영어 프롬프트 전체, 4~8문장)을 준다. 묘사는 고치지 않는다.
+- 한글 묘사 자체가 요청과 다르거나 대본과 부딪히면 verdict "owner", owner_note에 무엇을 어떻게 고치면 되는지 한국어 한 줄.
+- 모두 맞으면 verdict "pass".
+checks는 항목마다: item(무엇을 봤는지, 한국어 짧게), status(ok|missing|conflict), where(request|description|prompt|script), note(근거 문구, 짧게).
+답 형식: <json>{{"verdict": "pass|fix|owner", "checks": [{{"item": "", "status": "ok", "where": "prompt", "note": ""}}], "fixed_prompt_en": "", "owner_note": "", "summary": "한국어 한 줄"}}</json>"""
+    user = (f"항목: {name} ({cat})\n대본 속 역할: {info.get('summary') or '-'}\n"
+            f"[대표 요청(고쳐쓰기 '바꾸는 이유·바꿀 내용')]\n{owner_req or '(없음)'}\n\n"
+            f"[바로 앞 버전 v{prev.get('version_no', '-')} 묘사]\n{prev.get('description') or '-'}\n[바로 앞 버전 영어 프롬프트]\n{prev.get('prompt_en') or '-'}\n\n"
+            f"[지금 v{info.get('version_no')} 묘사]\n{info.get('description') or '-'}\n[지금 세부 사항]\n{info.get('details') or '-'}\n"
+            f"[지금 영어 프롬프트]\n{prompt or '(없음 — 묘사를 그대로 씀)'}\n\n[대본에서 이 항목이 나오는 부분]\n{found or '(없음)'}")
+    # 기준 사진도 본다: 묘사와 맞는지, 글자·이름표·자막이 찍혀 있지 않은지, (인물) 같은 사람인지
+    blocks = []
+    for i, path in enumerate((info.get("image_paths") or [])[:4], 1):
+        tmp = os.path.join(HOME, "work", f"cv_{uuid.uuid4().hex[:6]}.img")
+        try:
+            fetch_to(storage_signed_url("bible", path, 3600), tmp)
+            blocks += photo_block_large(tmp, f"[기준 사진 {i}]")
+        except Exception as ex:
+            log(f"감수용 사진 받기 실패: {ex}")
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+    if blocks:
+        system += f"""
+4) 기준 사진({len(blocks) // 2}장)도 본다: 묘사·영어 프롬프트와 맞는가(나이·성별·머리·체형·의상, 장소 구조 등),
+   사진 안에 글자·이름표·자막·워터마크·로고가 찍혀 있지 않은가(예: 다른 사람 이름 같은 한글·영문 글자), {'모든 사진이 같은 사람인가, ' if cat == 'character' else ''}실사인가.
+   문제가 있으면 photo_verdict "redo"와 photo_issues(한국어, 사진 번호와 무엇이 문제인지)를 준다. 문제없으면 photo_verdict "ok".
+답 형식에 "photo_verdict": "ok|redo", "photo_issues": ["…"]를 함께 넣는다."""
+    progress(f"코디네이터가 {name} v{info.get('version_no')}을(를) 감수하는 중" + (f"(기준 사진 {len(blocks) // 2}장 포함)" if blocks else ""))
+    text, _ = claude("claude-sonnet-5-5", system, ([{"type": "text", "text": user}] + blocks) if blocks else user,
+                     max_tokens=4000, stage="other", note=f"코디네이터 감수: {name}")
+    d = safe_json(text)
+    verdict = d.get("verdict") if d.get("verdict") in ("pass", "fix", "owner") else None
+    if not verdict:
+        raise RuntimeError(f"코디네이터 답이 형식에 맞지 않았습니다(감수 기록 없음). 다시 시도하면 대부분 해결됩니다. 답 앞부분: {text.strip()[:120]!r}")
+    checks = [c for c in (d.get("checks") or []) if isinstance(c, dict)][:20]
+    after = None
+    if verdict == "fix":
+        after = clean_en(json.dumps({"prompt_en": d.get("fixed_prompt_en") or ""}))
+        if after:
+            rpc("agent_bible_set_prompt", p_token=TOKEN, p_version=info["version_id"], p_prompt=after)
+            for c in checks:
+                if c.get("status") in ("missing", "conflict") and c.get("where") == "prompt":
+                    c["status"] = "fixed"
+        else:
+            verdict = "owner"
+            d["owner_note"] = d.get("owner_note") or "영어 프롬프트를 고쳐야 하는데 보정안이 비었습니다. 다시 감수를 누르거나 묘사를 더 자세히 적어 주세요"
+    final = {"pass": "pass", "fix": "fixed", "owner": "owner"}[verdict]
+    photo_redo = bool(blocks) and d.get("photo_verdict") == "redo"
+    rpc("agent_bible_review_save", p_token=TOKEN, p={
+        "series_id": info.get("series_id"), "entry_id": info["entry_id"], "version_id": info["version_id"], "version_no": info.get("version_no"),
+        "verdict": final, "request": owner_req or None, "checks": checks, "prompt_before": prompt or None, "prompt_after": after,
+        "owner_note": (d.get("owner_note") or "")[:500] or None, "summary": (d.get("summary") or "")[:300],
+        "photo_redo": photo_redo, "photo_issues": [str(x)[:200] for x in (d.get("photo_issues") or [])][:8] if photo_redo else []})
+    if photo_redo:
+        notify(f"코디네이터: {name} 사진 다시 만들기 추천", "; ".join(map(str, (d.get("photo_issues") or [])[:3]))[:300]
+               + "\n바이블 카드의 '감수·반영 기록'에서 [다시 적용해서 사진 만들기]를 누르세요", "warning")
+    elif final == "owner":
+        notify(f"코디네이터: {name} 확인이 필요합니다", (d.get("owner_note") or d.get("summary") or "")[:300] + "\n바이블 카드의 '감수·반영 기록'에서 볼 수 있습니다", "warning")
+    return f"{name} v{info.get('version_no')} 감수: " + {"pass": "반영 확인", "fixed": "영어 프롬프트 보정", "owner": "대표 확인 필요"}[final] + (" · 사진 다시 만들기 추천" if photo_redo else "")
+
 
 
 @task("bible_place")
@@ -3552,20 +3683,20 @@ def fail_hint(e):
     return "다시 시도. 같은 원인으로 또 실패하면 원인 문구를 개발(Claude)에 전달"
 
 
-QUIET_FAIL = {"bible_prompt", "photo_describe", "bible_place", "photo_design", "prep_cut"}
-TASK_NAME = {"upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+QUIET_FAIL = {"coord_review", "bible_prompt", "photo_describe", "bible_place", "photo_design", "prep_cut"}
+TASK_NAME = {"coord_review": "코디네이터 감수", "upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
     """오래 걸리는 작업 중에도 15초마다 살아 있음 신호를 보내고, 간단한 명령은 바로 처리한다."""
-    def __init__(self, info):
-        self.info, self.stop, self.restart_after = info, threading.Event(), False
+    def __init__(self, info, task=None):
+        self.info, self.stop, self.restart_after, self.task = info, threading.Event(), False, task or {}
         self.th = threading.Thread(target=self.loop, daemon=True)
 
     def loop(self):
         while not self.stop.wait(BEAT_SECONDS):
             try:
-                t = CURRENT.get("task") or {}
+                t = self.task
                 hb = rpc("agent_heartbeat", p_token=TOKEN, p_platform=PLATFORM, p_version=VERSION, p_state="busy",
                          p_current_job=t.get("kind"), p_last_error=None, p_info=self.info)
                 for c in hb.get("commands") or []:
@@ -3606,9 +3737,14 @@ def main():
         try:
             info["latest_seen"] = LATEST_SEEN
             hb = rpc("agent_heartbeat", p_token=TOKEN, p_platform=PLATFORM, p_version=VERSION,
-                     p_state="error" if last_error else ("paused" if paused else "idle"),
-                     p_current_job=None, p_last_error=last_error, p_info=info)
+                     p_state="busy" if QUICK.get("busy") else ("error" if last_error else ("paused" if paused else "idle")),
+                     p_current_job=QUICK.get("busy"), p_last_error=last_error, p_info=info)
             DEVICE_ID, paused = hb.get("device_id"), bool(hb.get("paused"))
+            QUICK["paused"] = paused
+            if not QUICK.get("started"):   # 첫 연결이 된 뒤에 짧은 일 줄을 연다
+                QUICK["started"] = True
+                threading.Thread(target=quick_lane, daemon=True).start()
+                log("짧은 일 줄(바이블 반영·코디네이터 감수) 시작")
             last_error = None
             if os.path.exists(PENDING):  # 새 버전이 정상적으로 연결됨 → 업데이트 확정
                 os.remove(PENDING)
@@ -3619,7 +3755,7 @@ def main():
                 tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=sorted(TASKS), p_platform=PLATFORM)
                 if tk and tk.get("id"):
                     busy = True
-                    with Beat(info) as beat:
+                    with Beat(info, tk) as beat:
                         run_task(tk)
                     if beat.restart_after:
                         check_update(force=True)
@@ -3630,6 +3766,10 @@ def main():
                         busy = True
                         run_job(j)
         except Restart:
+            for _ in range(60):   # 짧은 일 줄이 하던 일을 마칠 때까지 잠깐(최대 2분) 기다린다
+                if not QUICK.get("busy"):
+                    break
+                time.sleep(2)
             log("재시작")
             sys.exit(0)  # 자동 시작 장치(맥 launchd / Windows 실행기)가 다시 켭니다
         except Exception as e:
@@ -3639,7 +3779,7 @@ def main():
                 log("토큰이 맞지 않습니다. 대시보드에서 토큰을 다시 발급하고 설치 명령을 다시 실행하세요.")
                 time.sleep(300)
                 continue
-        if not busy:
+        if not busy and not QUICK.get("busy"):
             try:
                 if check_update():
                     log("새 버전으로 재시작")
