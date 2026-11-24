@@ -73,6 +73,7 @@
   .msg { padding: 10px 14px; border-radius: 8px; margin: 10px 0; }
   .msg.err { background: rgba(197,48,48,.12); color: var(--bad); }
   .msg.ok { background: rgba(31,138,76,.12); color: var(--good); }
+  .msg.warn { background: rgba(214,140,20,.13); color: var(--warn, #a36a00); }
   .center { max-width: 420px; margin: 8vh auto; }
   .split { display: grid; gap: 12px; grid-template-columns: 300px 1fr; }
   @media (max-width: 760px) {
@@ -4493,6 +4494,19 @@ function sameAsLine(e, entries) {
     ${from.length ? `${pill('동일인', 'accent')}<span class="quiet">${from.map(x => esc(x.name)).join(', ')}도 이 사람</span>` : ''}</div>`;
 }
 
+// '모두 적용 + 사진 만들기' 아래 도움말: 직접 올리기로 둔 항목은 사진을 만들지 않고 비워 둔다
+function applyHelp(list) {
+  const manual = list.filter(e => e.photo_source === 'upload' && PHOTO_CATS.includes(e.category));
+  return `<div class="card" style="margin:8px 0 0;padding:10px 12px;background:var(--panel);font-size:13px;line-height:1.6">
+    <b>누르면 이렇게 됩니다</b>
+    <ul style="margin:4px 0 0;padding-left:18px">
+      <li>대본에서 찾은 항목을 모두 바이블에 적용합니다. 묘사는 작가실이 대본을 읽고 쓴 것입니다.</li>
+      <li>사진 방식이 <b>자동으로 만들기</b>인 항목만 사진 후보를 만듭니다(인물은 Soul 2 실사 4장, 장소·배경·소품 2장). 카드에서 골라야 바이블 기준 사진이 됩니다.</li>
+      <li><b>직접 올리기</b>로 둔 항목은 사진을 만들지 않고 <b>비워 둡니다</b>${manual.length ? ` (지금 ${manual.length}개: ${manual.slice(0, 8).map(e => esc(e.name)).join(', ')}${manual.length > 8 ? ' 외' : ''})` : ''}. 카드의 "사진 올리기"로 넣어 주세요.</li>
+      <li><b>사진이 비어 있는 채로 영상을 만들면</b>, 작가실이 추천한(대본에서 읽고 쓴) 묘사만으로 <b>임의의 얼굴·장소·소품</b>이 그려집니다. 기준 사진이 없어서 컷마다 조금씩 달라질 수 있으니, 중요한 인물·소품은 제작 전에 사진을 넣거나 '자동으로 만들기'로 바꿔 두세요.</li>
+    </ul></div>`;
+}
+
 async function viewBible(main) {
   const series = await q(S.sb.from('series').select('id,title').order('created_at'));
   if (!S.seriesId || !series.some(s => s.id === S.seriesId)) S.seriesId = series[0]?.id || null;
@@ -4544,7 +4558,8 @@ async function viewBible(main) {
   <div id="bEditor" style="margin-top:12px"></div>
   ${shownProps.length < proposals.length ? `<p class="quiet" style="margin:14px 0 0">다른 분류의 수정안 ${proposals.length - shownProps.length}건은 '전체'나 그 분류 버튼을 누르면 보입니다.</p>` : ''}
   ${shownProps.length ? `<div class="row" style="margin-top:14px"><h3 style="margin:0">검토할 ${esc(catLabel)} 수정안 ${shownProps.length}건</h3>
-    ${extractProps.length ? `<button class="btn primary small" id="ballgo">대본 추출 ${esc(catLabel)} ${extractProps.length}건 모두 적용 + 사진 만들기</button>` : ''}</div>${shownProps.map(p => {
+    ${extractProps.length ? `<button class="btn primary small" id="ballgo">대본 추출 ${esc(catLabel)} ${extractProps.length}건 모두 적용 + 사진 만들기</button>` : ''}</div>
+    ${extractProps.length ? applyHelp(extractProps.map(p => entryOf(p.entry_id)).filter(Boolean)) : ''}${shownProps.map(p => {
     const e = entries.find(x => x.id === p.entry_id); const c = cur(p.entry_id);
     return `<div class="card" style="border-color:var(--warn)">
       <div class="row"><b>${esc(e?.name)} v${p.version_no} 수정안</b>${pill(BIBLE_CAT[e?.category] || '')}<span class="quiet">${esc(p.proposed_by)} · ${fmt(p.created_at)}</span></div>
@@ -4566,6 +4581,8 @@ async function viewBible(main) {
       ${c ? thumbs(c.image_paths, urls) : ''}
       ${c ? `<div class="bdesc">${esc(c.description)}</div>` : ''}
       ${c ? promptLine(e, c) : ''}
+      ${PHOTO_CATS.includes(e.category) && e.photo_source === 'upload' && !(c?.image_paths || []).length
+        ? `<div class="msg warn" style="margin-top:6px;font-size:12.5px">직접 올리기로 정했지만 아직 사진이 없습니다. 이대로 영상을 만들면 작가실이 쓴 묘사만으로 장면마다 임의의 ${esc(BIBLE_CAT[e.category] || '')}이(가) 그려집니다.</div>` : ''}
       ${sameAsLine(e, entries)}
       ${c?.details ? `<details style="margin-top:8px"><summary class="quiet">세부 사항</summary><pre class="doc" style="margin-top:6px">${esc(c.details)}</pre></details>` : ''}
       ${c?.soul_id ? `<div class="quiet" style="margin-top:6px">${pill('얼굴 고정됨', 'good')} Soul ID <code>${esc(c.soul_id.slice(0, 8))}</code></div>` : ''}
@@ -7276,6 +7293,7 @@ const HELP = {
 <li>"고쳐 쓰기"에서 사진을 넣으면 묘사 칸을 비워 둬도 됩니다. "실사 사진을 보고 묘사를 다시 쓰기"가 자동으로 켜집니다.</li>
 <li><b>묘사·세부 사항은 한글로 적어도 됩니다.</b> 적용되는 순간 작가실이 영어 고정 프롬프트로 한 번 옮겨 두고(1~2분, 카드의 "영어 프롬프트"), 감독은 컷 설계 때 이 영어 문장을 그대로 씁니다. 컷마다 따로 번역하지 않으니 얼굴·장소가 흔들리지 않습니다. 묘사를 고치면 영어 프롬프트도 다시 만들어집니다.</li>
 <li><b>동일인</b>(캐릭터 카드): '미래의 남자'처럼 같은 사람의 다른 시점·호칭이면 그 사람(예: 탄)을 고르세요. 감독이 같은 사람으로 다루고, 목소리를 물려받고, 이 카드에 사진이 없으면 그 사람 사진을 참고합니다. 외모는 각 카드 묘사를 따릅니다(어린 시절·성형 전후처럼 달라도 됨). 없으면 '없음'.</li>
+<li><b>대본 추출 모두 적용 + 사진 만들기</b>: '자동으로 만들기' 항목만 사진 후보를 만들고, '직접 올리기' 항목은 비워 둡니다. 비운 채로 영상을 만들면 작가실이 대본에서 쓴 묘사만으로 임의의 인물·장소·소품이 그려지고, 기준 사진이 없어 컷마다 달라질 수 있습니다. 카드에 노란 안내가 뜹니다.</li>
 <li><b>넣을 곳 추천받기</b>는 배경·소품에만 있습니다. PPL·협찬을 염두에 두고 잘 보이는 화·씬을 고릅니다.</li>
 <li>분류에 <b>배경</b>이 있습니다. 장소(인물이 연기하는 공간)와 별도로 창밖 풍경, 도시 야경, 하늘, 무대 뒤 스크린처럼 화면 뒤에 보이는 것을 넣습니다.</li>
 </ul>
