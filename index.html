@@ -6872,6 +6872,7 @@ const qtyText = q => !q ? '' : [q.seconds && `${q.seconds}초`, q.images && `${q
   q.input_tokens && `입력 ${Number(q.input_tokens).toLocaleString()}`, q.output_tokens && `출력 ${Number(q.output_tokens).toLocaleString()}`].filter(Boolean).join(' · ');
 const groupBy = (rows, key) => rows.reduce((m, r) => { const k = key(r) ?? '-'; (m[k] = m[k] || []).push(r); return m; }, {});
 
+const PROVIDER = { higgsfield: 'Higgsfield (영상·장면 사진·인물 사진·얼굴 학습)', elevenlabs: 'ElevenLabs (대사·목소리·배경음악)', anthropic: 'Claude (AI 직원)', manual: '직접 입력', other: '기타' };
 function buildInvoice(events, meta) {
   const by = o => events.filter(e => e.outcome === o);
   const success = by('success'), failed = by('failed'), pending = by('pending'), hold = by('hold');
@@ -6892,6 +6893,12 @@ function buildInvoice(events, meta) {
       cut_id: e.cut_id, stage: STAGE[e.stage] || e.stage, attempt_no: e.attempt_no, reason: e.failure_reason,
       cause: CAUSE[e.failure_cause] || '', krw: e.krw, at: e.occurred_at })),
     pending_by_stage: stageRows(pending), hold_by_stage: stageRows(hold),
+    // 회사별: Higgsfield(영상·사진·얼굴 학습) / ElevenLabs(목소리·음악) / Claude(AI 직원) / 직접 입력 — 대기 중(감수 전) 금액도 함께
+    by_provider: Object.entries(groupBy(events.filter(e => e.provider !== 'local'), r => r.source === 'manual' ? 'manual' : (r.provider || 'other'))).map(([k, rs]) => ({
+      provider: k, label: PROVIDER[k] || k, count: rs.length, krw: sum(rs), pending: sum(rs.filter(r => r.outcome === 'pending')),
+      noprice: rs.filter(r => r.usd == null && r.krw == null).length,
+      stages: Object.entries(groupBy(rs, r => r.stage)).map(([s, xs]) => `${STAGE[s] || s} ${xs.length}건 ${won(sum(xs))}`).join(' · '),
+    })).sort((a, b) => b.krw - a.krw),
     has_edit: events.some(e => e.stage === 'edit'), revenue: meta.revenue ?? null,
   };
 }
@@ -6912,9 +6919,12 @@ function invoiceHtml(d) {
       <div class="card stat"><div class="n" style="color:var(--bad)">${won(t.leak)}</div><div class="l">실패로 버려진 비용 · 누수율 ${(t.leak_rate * 100).toFixed(1)}%</div></div>
       <div class="card stat"><div class="n">${t.per_cut != null ? won(t.per_cut) : '-'}</div><div class="l">완성 컷당 순수 제작비 (${t.success_cuts}컷)</div></div>
     </div>
+    ${(d.by_provider || []).length ? `<h3>회사별 사용액</h3><table><tr><th>회사</th><th style="text-align:right">건수</th><th class="hide-m">내역</th><th style="text-align:right">금액</th></tr>${d.by_provider.map(p => `
+      <tr><td><b>${esc(p.label)}</b>${p.noprice ? `<br><span class="quiet" style="color:var(--warn)">단가 미입력 ${p.noprice}건(0원으로 계산) — 아래 단가표에 넣어 주세요</span>` : ''}</td>
+      <td style="text-align:right">${p.count}</td><td class="quiet hide-m">${esc(p.stages)}</td>
+      <td style="text-align:right;white-space:nowrap">${won(p.krw)}${p.pending ? `<br><span class="quiet">그중 감수 대기 ${won(p.pending)}</span>` : ''}</td></tr>`).join('')}</table>` : ''}
     <h3>1. 순수 제작비: 이것만 만들었을 때의 비용</h3>
     ${stageTable(d.success_by_stage)}
-    ${d.has_edit ? '' : '<p class="quiet">편집(쌤컷)·맥 로컬 처리(자막·음량·업스케일): 0원 (무료 프로그램, 전기료 제외)</p>'}
     <h3>2. 추가 비용: 실패해서 다시 만든 비용</h3>
     <div class="split" style="grid-template-columns:1fr 1fr">
       <div><b class="quiet">원인별</b>${d.failed_by_cause.length ? `<table>${d.failed_by_cause.map(r => `<tr><td>${esc(r.cause)}</td>
@@ -6945,13 +6955,13 @@ async function viewCosts(main) {
     q(S.sb.from('episodes').select('id,number,title,series(title)').order('number')),
     q(S.sb.from('cost_settings').select('krw_per_usd').eq('id', 1).maybeSingle()),
     q(S.sb.from('price_book').select('*').order('provider').order('model')),
-  ]);
+  ]).then(([a, b, c]) => [a, b, c.filter(p => p.provider !== 'local')]);
   const fx = Number(settings?.krw_per_usd || 1340);
   S.costEp = S.costEp || 'all'; S.costOut = S.costOut || 'all'; S.costPage = S.costPage || 0;
   if (S.costEp !== 'all' && !eps.some(e => e.id === S.costEp)) S.costEp = 'all';
   let qy = S.sb.from('cost_events').select('*').order('occurred_at', { ascending: false }).limit(5000);
   if (S.costEp !== 'all') qy = qy.eq('episode_id', S.costEp);
-  const events = await q(qy);
+  const events = (await q(qy)).filter(e => e.provider !== 'local');   // 편집·맥 로컬 처리(무료)는 비용에서 뺀다
   const ep = eps.find(e => e.id === S.costEp);
   const fin = ep ? await q(S.sb.from('episode_finance').select('*').eq('episode_id', ep.id).maybeSingle()) : null;
   const finals = ep ? await q(S.sb.from('final_invoices').select('id,label,created_at,snapshot').eq('episode_id', ep.id).order('created_at', { ascending: false })) : [];
