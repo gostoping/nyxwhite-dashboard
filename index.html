@@ -317,7 +317,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.14.2"
+VERSION = "1.14.3"
 
 import base64
 import glob
@@ -2974,38 +2974,114 @@ def t_api_check(t):
     return report
 
 
-@task("bible_prompt")
-def t_bible_prompt(t):
-    """작가실: 한국어로 적힌 바이블 묘사·세부 사항을 영상·사진 모델용 영어 고정 프롬프트로 한 번 옮겨 둔다."""
-    p = t.get("payload") or {}
-    info = rpc("agent_bible_photo_info", p_token=TOKEN, p_version=p.get("version_id")) or {}
-    if not info:
-        return "대상 버전이 없습니다(삭제됨)"
-    if info.get("status") not in ("active", "proposed"):
-        return "이미 다른 버전으로 바뀌었습니다"
-    cat = info.get("category")
-    system = """너는 드라마 작가실의 프롬프트 담당이다. 시리즈 바이블 항목의 묘사(한국어가 섞여 있음)를 영상·사진 생성 모델에 그대로 넣을 영어 고정 프롬프트로 옮긴다.
-- 눈에 보이는 고정 특징만: 인물은 나이대·국적 인상·성별·얼굴형·눈·코·입·피부·머리(길이·모양·색)·체형·키 인상·기본 분위기·대표 의상,
-  장소·배경은 공간 구조·재질·색·시간대·빛·분위기, 소품은 모양·크기·재질·색·낡음, 스타일·톤은 색감·조명·카메라·질감, 배경음악은 장르·악기·템포(BPM 느낌)·분위기·세기 변화(가사 없는 연주곡).
-- 세부 사항에 '바뀌면 안 되는 특징'이 있으면 반드시 포함한다. 화마다 바뀌는 의상·상황·줄거리·성격·대사는 넣지 않는다.
-- 한국어 원문의 내용을 하나도 빠뜨리지 말고 꼼꼼하게 옮긴다(색·재질·수치·금지 사항까지). 4~8문장, 현재형, 쉼표로 이어진 묘사 위주. 이름·실존 인물·배우·브랜드는 쓰지 않는다. 원문에 없는 것을 지어내지 않는다.
-답 형식: <json>{"prompt_en": ""}</json>"""
-    user = (f"분류: {cat}\n이름(참고, 프롬프트에 쓰지 말 것): {info.get('name')}\n대본 속 역할: {info.get('summary') or '-'}\n"
-            f"[묘사]\n{info.get('description') or '-'}\n[세부 사항]\n{info.get('details') or '-'}")
-    progress(f"{info.get('name')}: 작가실이 영어 프롬프트로 옮기는 중")
-    text, _ = claude("claude-opus-5-5", system, user, max_tokens=3000, stage="other", note=f"바이블 영어 프롬프트: {info.get('name')}")
-    en = (pick_json(text).get("prompt_en") or "").strip()
+PROMPT_NEEDS = {
+    "character": "나이대, 성별, 국적 인상, 얼굴형, 눈·코·입, 피부톤, 머리(길이·모양·색), 체형·키 인상, 대표 의상",
+    "location": "공간 종류와 크기, 구조(창·문·가구 배치), 바닥·벽 재질과 색, 시간대, 빛(자연광·조명 색), 분위기",
+    "background": "풍경 종류, 거리감, 날씨, 시간대, 빛과 색감",
+    "prop": "물건 종류, 모양, 크기, 재질, 색, 무늬, 낡은 정도",
+    "style": "전체 색감, 조명, 카메라 느낌(렌즈·움직임), 화면 질감",
+    "music": "장르, 악기, 템포, 분위기, 세기 변화",
+}
+PROMPT_EXAMPLE = {
+    "character": "예: 20대 초반 한국 여성, 갸름한 얼굴, 쌍꺼풀 없는 큰 눈, 맑은 피부, 어깨까지 오는 검은 생머리, 마른 체형에 키 160cm 정도, 평소 흰 셔츠에 청바지",
+    "location": "예: 10평 남짓한 연습실, 한쪽 벽 전체가 거울, 회색 나무 바닥, 밤, 천장 형광등 하나만 켜져 약간 푸른빛, 조용하고 쓸쓸한 분위기",
+    "background": "예: 창밖으로 보이는 서울 야경, 멀리 남산타워, 맑은 밤, 주황빛 가로등",
+    "prop": "예: 손바닥만 한 낡은 은색 목걸이, 둥근 펜던트 안에 작은 사진, 체인이 군데군데 검게 변색",
+    "style": "예: 차갑고 푸른 색감, 낮은 대비, 손에 든 카메라처럼 살짝 흔들림, 필름 같은 거친 질감",
+    "music": "예: 저음 피아노 단음으로 시작, 느린 템포, 후반에 현악이 서서히 올라오며 긴장",
+}
+
+
+def safe_json(text):
+    try:
+        d = pick_json(text)
+        return d if isinstance(d, dict) else {}
+    except Exception:   # 답에 JSON이 없거나 깨짐: 빈 것으로 보고 다음 단계로
+        return {}
+
+
+def clean_en(text):
+    en = (safe_json(text).get("prompt_en") or "").strip()
     if not en:   # JSON이 깨졌으면 "prompt_en": "…" 부분이나 본문을 그대로 쓴다
         m = re.search(r'"prompt_en"\s*:\s*"(.+?)"\s*[,}]', text, re.S)
         en = (m.group(1) if m else re.sub(r"</?json>|```\w*", "", text)).strip()
     # 이름 등 한글이 섞여 있으면 괄호째 지우고, 남은 한글 단어도 뺀다(영어 문장만 남김)
     en = re.sub(r"\s*[\(\[][^\)\]]*[가-힣][^\)\]]*[\)\]]", "", en)
     en = re.sub(r"[가-힣]+", "", en)
-    en = re.sub(r"\s{2,}", " ", en).strip(" ,.;") + "."
-    if len(en) < 30:
-        raise RuntimeError(f"영어 프롬프트가 비어 있거나 너무 짧습니다(작가실 답: {text[:160]!r}). 묘사가 너무 짧으면 내용을 보강해 주세요")
+    en = re.sub(r"\s{2,}", " ", en).strip(" ,.;")
+    return en + "." if len(en) >= 30 and len(re.findall(r"[A-Za-z]{2,}", en)) >= 6 else ""
+
+
+def script_mentions(sid, name, summary, limit=12000):
+    """대본 전체에서 그 항목 이름(괄호 앞 부분)이 나오는 줄과 앞뒤 줄을 모은다."""
+    ov = rpc("agent_bible_overview", p_token=TOKEN, p_series=sid) or {}
+    keys = [k for k in {re.sub(r"\s*\(.*?\)", "", name or "").strip(), (name or "").strip()} if len(k) >= 1]
+    out = []
+    for e in ov.get("episodes") or []:
+        lines = (e.get("text") or "").splitlines()
+        hit = set()
+        for i, ln in enumerate(lines):
+            if any(k in ln for k in keys):
+                hit.update(range(max(0, i - 2), min(len(lines), i + 3)))
+        if hit:
+            out.append(f"[{e.get('number')}화]\n" + "\n".join(lines[i] for i in sorted(hit)))
+    return "\n\n".join(out)[:limit]
+
+
+@task("bible_prompt")
+def t_bible_prompt(t):
+    """작가실: 한국어로 적힌 바이블 묘사·세부 사항을 영상·사진 모델용 영어 고정 프롬프트로 옮겨 둔다.
+    1) 묘사로 옮기기 → 2) 실패하면 한 번 더(더 엄격하게) →
+    3) 그래도 안 되면: AI가 쓴 묘사면 대본에서 그 항목이 나오는 부분을 읽고 채움 / 대표가 쓴 묘사면 무엇이 빠졌는지 한글로 알려 줌."""
+    p = t.get("payload") or {}
+    info = rpc("agent_bible_photo_info", p_token=TOKEN, p_version=p.get("version_id")) or {}
+    if not info:
+        return "대상 버전이 없습니다(삭제됨)"
+    if info.get("status") not in ("active", "proposed"):
+        return "이미 다른 버전으로 바뀌었습니다"
+    cat, name = info.get("category"), info.get("name")
+    rules = f"""- 눈에 보이는 고정 특징만. 이 분류({cat})에서 담을 것: {PROMPT_NEEDS.get(cat, '눈에 보이는 특징')}.
+- 세부 사항에 '바뀌면 안 되는 특징'이 있으면 반드시 포함한다. 화마다 바뀌는 상황·줄거리·성격·대사는 넣지 않는다.
+- 4~8문장, 현재형, 쉼표로 이어진 묘사 위주. 이름·실존 인물·배우·브랜드는 쓰지 않는다. 한글은 한 글자도 쓰지 않는다."""
+    system = f"""너는 드라마 작가실의 프롬프트 담당이다. 시리즈 바이블 항목의 묘사(한국어가 섞여 있음)를 영상·사진 생성 모델에 그대로 넣을 영어 고정 프롬프트로 옮긴다.
+{rules}
+- 한국어 원문의 내용을 하나도 빠뜨리지 말고 꼼꼼하게 옮긴다(색·재질·수치·금지 사항까지). 원문에 없는 것을 지어내지 않는다.
+- 원문이 너무 짧거나 모호해 위 특징을 거의 알 수 없으면 prompt_en을 비우고, missing에 빠진 것을 한국어로 구체적으로 적는다.
+답 형식: <json>{{"prompt_en": "", "missing": ["빠진 것(한국어)"]}}</json>"""
+    user = (f"분류: {cat}\n이름(참고, 프롬프트에 쓰지 말 것): {name}\n대본 속 역할: {info.get('summary') or '-'}\n"
+            f"[묘사]\n{info.get('description') or '-'}\n[세부 사항]\n{info.get('details') or '-'}")
+    progress(f"{name}: 작가실이 영어 프롬프트로 옮기는 중")
+    text, _ = claude("claude-opus-5-5", system, user, max_tokens=3000, stage="other", note=f"바이블 영어 프롬프트: {name}")
+    en, missing = clean_en(text), safe_json(text).get("missing") or []
+    if not en:   # 2) 한 번 더: 형식을 더 단순하게
+        progress(f"{name}: 한 번 더 시도하는 중")
+        text, _ = claude("claude-opus-5-5", system, user + "\n\n[중요] 지난번 답이 형식에 맞지 않았다. 설명 없이 <json> 하나만, 영어 문장으로.",
+                         max_tokens=3000, stage="other", note=f"바이블 영어 프롬프트(다시): {name}")
+        en = clean_en(text)
+        missing = safe_json(text).get("missing") or missing
+    how = "묘사로 옮김"
+    owner_wrote = (info.get("proposed_by") == "대표") and "자동" not in (info.get("change_reason") or "")
+    if not en and not owner_wrote:   # 3-a) AI가 쓴 묘사 → 대본에서 채운다
+        sid = info.get("series_id") or t.get("series_id")
+        found = script_mentions(sid, name, info.get("summary")) if sid else ""
+        progress(f"{name}: 묘사가 부족해 대본에서 '{name}'이(가) 나오는 부분을 읽고 채우는 중")
+        text, _ = claude("claude-opus-5-5", system.replace("원문에 없는 것을 지어내지 않는다.",
+                         "묘사가 부족하므로 아래 대본 발췌에서 드러나는 특징으로 채우고, 대본에도 없으면 이 드라마의 역할·분위기에 맞게 자연스럽게 정해 채운다(비우지 않는다)."),
+                         user + f"\n\n[대본에서 '{name}'이(가) 나오는 부분]\n{found or '(대본에서 이름을 찾지 못함)'}",
+                         max_tokens=3000, stage="other", note=f"바이블 영어 프롬프트(대본에서 채움): {name}")
+        en = clean_en(text)
+        how = "묘사가 부족해 대본에서 채움" if en else how
+    if not en:
+        need = PROMPT_NEEDS.get(cat, "눈에 보이는 특징")
+        miss = ", ".join(str(m) for m in missing[:6]) if missing else need
+        if owner_wrote:
+            raise RuntimeError(f"대표님이 쓴 묘사로는 영어 프롬프트를 만들지 못했습니다(두 번 시도). 묘사가 짧거나 모호합니다. "
+                               f"빠진 것: {miss}. 바이블 '{name}' 카드 → 내용 고치기에서 한글로 자세히 적어 주세요(고치면 자동으로 다시 돕니다). "
+                               f"{PROMPT_EXAMPLE.get(cat, '')}")
+        raise RuntimeError(f"묘사와 대본 모두에서 '{name}'의 영어 프롬프트를 만들지 못했습니다(세 번 시도). "
+                           f"바이블 '{name}' 카드에서 한글 묘사를 자세히 적어 주세요(담을 것: {need}). {PROMPT_EXAMPLE.get(cat, '')}")
     rpc("agent_bible_set_prompt", p_token=TOKEN, p_version=info["version_id"], p_prompt=en)
-    return f"{info.get('name')} 영어 프롬프트 {len(en)}자"
+    return f"{name} 영어 프롬프트 {len(en)}자 ({how})"
 
 
 @task("bible_place")
@@ -3545,9 +3621,26 @@ def run_task(tk):
         rpc("agent_task_update", p_token=TOKEN, p_id=tk["id"], p_status="failed", p_error=str(e)[:1500], p_retry_in=retry)
         # 바이블 보조 작업은 하나하나 알림을 울리지 않는다: 지시 탭 적용 대기함 '실패'에 원인과 함께 모이고 거기서 다시 시도
         if kind not in QUIET_FAIL and (kind in ("writers_room", "director") or retry is None):
-            notify(f"작업 실패: {TASK_NAME.get(kind, kind)}", f"원인: {str(e)[:260]}\n지시 탭 적용 대기함 '실패'에서 다시 시도할 수 있습니다", "warning")
+            notify(f"작업 실패: {TASK_NAME.get(kind, kind)}", f"원인: {str(e)[:260]}\n이렇게 하세요: {fail_hint(str(e))}\n(제작 탭 빨간 상자·지시 탭 '실패'에서 바로 다시 시도할 수 있습니다)", "warning")
     finally:
         CURRENT["task"] = None
+
+
+def fail_hint(e):
+    """실패 알림에 붙일 '대표가 할 일' 한 줄(대시보드 explainFail과 같은 기준)."""
+    rules = [(r"확정된 대본이 없", "대본 탭에서 정리본(또는 원고)을 확정한 뒤 다시 시도"),
+             (r"키가 없|401|403|Unauthorized|invalid.*key", "설정 → API 키를 다시 넣고 '연결 시험' 후 다시 시도"),
+             (r"402|잔액|credit|insufficient|quota|balance", "원인에 적힌 서비스(Higgsfield·ElevenLabs·Claude) 충전 후 다시 시도"),
+             (r"429|rate.?limit|overloaded|529", "몇 분 뒤 다시 시도(서비스가 잠시 붐빔)"),
+             (r"시간 초과|timeout|timed out", "다시 시도, 계속되면 에이전트 탭에서 그 컴퓨터 재시작"),
+             (r"nsfw|safety|moderation", "컷 카드 '감독에게 수정 요청'으로 표현을 순화한 뒤 다시 생성"),
+             (r"ffmpeg", "에이전트 탭에서 그 컴퓨터 재시작 후 다시 시도"),
+             (r"묘사", "바이블에서 그 항목 묘사를 한글로 자세히 고치기(고치면 자동으로 다시 돎)"),
+             (r"JSON|형식|만들지 못했", "다시 시도(대부분 해결). 두 번 이상 같으면 원인 문구를 개발에 전달")]
+    for pat, how in rules:
+        if re.search(pat, e, re.I):
+            return how
+    return "다시 시도. 같은 원인으로 또 실패하면 원인 문구를 개발(Claude)에 전달"
 
 
 QUIET_FAIL = {"bible_prompt", "photo_describe", "bible_place", "photo_design", "prep_cut"}
@@ -6676,6 +6769,9 @@ const usdKrw = (usd, rate) => usd == null ? '-' : won(usd * (rate || 1340));
 function explainFail(kind, err) {
   const e = String(err || '');
   const R = (what, how, acts) => ({ what, how, acts });
+  if (/대표님이 쓴 묘사로는/.test(e)) return R('대표님이 바이블에 쓴 묘사가 짧거나 모호해서, 두 번 시도했지만 영어 프롬프트를 만들지 못했습니다.', (e.match(/빠진 것:[^.]*\./) || [''])[0] + ' 바이블에서 그 항목 카드 → 내용 고치기로 한글로 자세히 적어 주세요. 고치면 자동으로 다시 돕니다. ' + (e.match(/예: .*/) || [''])[0], ['bible']);
+  if (/묘사와 대본 모두에서/.test(e)) return R('묘사도 짧고 대본에도 이 항목의 생김새가 거의 없어 영어 프롬프트를 만들지 못했습니다(세 번 시도).', '바이블에서 그 항목 묘사를 한글로 자세히 적어 주세요. ' + (e.match(/\(담을 것:[^)]*\)/) || [''])[0], ['bible', 'retry']);
+  if (/묘사|프롬프트/.test(e)) return R('바이블 묘사를 영어 프롬프트로 옮기지 못했습니다(예전 방식에서 난 실패).', '다시 시도하면 새 방식으로 돕니다: 한 번 더 시도 → 그래도 안 되면 대본에서 그 항목이 나오는 부분을 읽고 채움. 대표님이 직접 쓴 묘사면 빠진 것을 알려 드립니다.', ['retry', 'bible']);
   if (/확정된 대본이 없/.test(e)) return R('이 화에 확정된 대본이 없어 감독이 읽을 대본이 없습니다.', '대본 탭에서 정리본(또는 원고)을 확정한 뒤 다시 시도하세요. 또는 "작가실 정리 실행"을 누르면 정리 → 확정 → 컷 설계까지 이어집니다.', ['scripts', 'retry']);
   if (/읽을 원고가 없/.test(e)) return R('이 화에 원고가 없습니다.', '대본 탭에서 원고를 넣으세요.', ['scripts']);
   if (/키가 없|API 키|401|403|Unauthorized|invalid.*key|missing_permissions/i.test(e)) return R('AI 서비스 키가 없거나 권한이 없습니다.', '설정 → API 키에서 해당 키를 다시 넣고 "연결 시험"을 누른 뒤 다시 시도하세요.', ['settings', 'retry']);
@@ -6687,7 +6783,6 @@ function explainFail(kind, err) {
   if (/ffmpeg|영상 도구/.test(e)) return R('컴퓨터의 영상 도구(ffmpeg)에 문제가 있습니다.', '에이전트 탭에서 그 컴퓨터를 재시작한 뒤 다시 시도하세요.', ['agents', 'retry']);
   if (/폴더가 이 컴퓨터에 없|찾지 못했습니다: \/|No such file/.test(e)) return R('파일이 이 작업을 받은 컴퓨터에 없습니다.', '완성본·원본이 있는 컴퓨터(보통 집 PC)가 켜져 있는지 확인하고 다시 시도하세요.', ['agents', 'retry']);
   if (/목소리가 없|voice/i.test(e)) return R('바이블에 이 인물의 목소리가 정해지지 않았습니다.', '바이블에서 "인물 목소리 만들기"로 목소리를 정한 뒤 다시 시도하세요.', ['bible', 'retry']);
-  if (/묘사|프롬프트/.test(e)) return R('바이블 묘사를 영어 프롬프트로 옮기지 못했습니다.', '바이블에서 그 항목 묘사를 조금 더 구체적으로 고치면 자동으로 다시 돕니다. 아니면 다시 시도.', ['bible', 'retry']);
   return R('작업이 실패했습니다.', '먼저 다시 시도하세요. 같은 원인으로 또 실패하면 이 원인 문구를 Claude(개발)에게 알려 주세요.', ['retry']);
 }
 const FAIL_ACT = { retry: '다시 시도', scripts: '대본 탭 열기', settings: '설정 열기', bible: '바이블 열기', agents: '에이전트 열기', production: '제작 탭 열기' };
