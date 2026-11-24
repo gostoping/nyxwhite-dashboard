@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.10.4"
+VERSION = "1.11.0"
 
 import base64
 import glob
@@ -580,6 +580,11 @@ def lessons_text(ctx, limit=30):
     return "\n".join(rows) or "(아직 없음)"
 
 
+def continuity_text(ctx):
+    rows = [f"- {x.get('name')}: {x.get('state')}" + (f" (씬 {x['scene_no']})" if x.get("scene_no") else "") for x in (ctx.get("prev_continuity") or [])]
+    return "\n".join(rows) or "(첫 화이거나 기록 없음)"
+
+
 def notes_text(ctx):
     rows = [f"- {('씬 ' + str(n['scene_no'])) if n.get('scene_no') else '화 전체'} [{'필수' if n.get('priority') == 'must' else '참고'}"
             f"{' · 중요 장면' if n.get('important') else ''}] {n.get('content')}" for n in (ctx.get("notes") or [])]
@@ -772,10 +777,18 @@ def t_director(t):
 [대표 연출 메모 — 필수는 반드시 반영]
 {notes_text(ctx)}
 
+[직전 화가 끝났을 때 상태 — 이 화 첫 등장은 여기서 이어진다(대본에 바뀐다는 말이 없으면 헤어·의상·상처·소지품 유지)]
+{continuity_text(ctx)}
+
+[연속성 기록]
+JSON 최상위에 "end_state"도 함께 준다: 이 화가 끝났을 때 주요 인물·소품의 상태(헤어·의상·상처·화장·들고 있는 물건·장소).
+형식: "end_state": [{{"name": "바이블 이름 그대로", "scene_no": 마지막 등장 씬, "state": "한국어 한 줄"}}]. 다음 화 감독이 이어 받는다.
+
 [대본]
 {script['content']}"""
     text, _ = claude(dmodel, director_system(ctx), user, max_tokens=24000, stage="cut_card", episode_id=ep, note="감독 컷 설계")
-    cuts = pick_json(text).get("cuts") or []
+    plan = pick_json(text)
+    cuts = plan.get("cuts") or []
     if scenes:
         cuts = [c for c in cuts if int(c.get("scene_no") or 0) in set(int(s) for s in scenes)]
     if not cuts:
@@ -811,6 +824,12 @@ def t_director(t):
     for sc, cs in sorted(by_scene.items()):
         n += rpc("agent_save_cuts", p_token=TOKEN, p_episode=ep, p_version=script["id"], p_scene=sc, p_cuts=cs) or 0
     total = sum(c.get("est_usd") or 0 for c in cuts)
+    if not scenes and plan.get("end_state"):
+        try:
+            k = rpc("agent_add_continuity", p_token=TOKEN, p_episode=ep, p_items=plan["end_state"], p_source="감독(컷 설계)")
+            log(f"연속성 기록 {k}건(이 화가 끝났을 때 상태)")
+        except Exception as ex:
+            log(f"연속성 기록 실패: {ex}")
     if setting(ctx, "generation", "auto_prep", True):
         for sc in sorted(by_scene):
             rpc("agent_add_task", p_token=TOKEN, p={"kind": "prep_cut", "episode_id": ep, "scene_no": sc, "payload": {}})
@@ -849,8 +868,12 @@ def director_revise(t, cut_id):
         "frame_last": new.get("frame_last") or {}, "use_end_frame": bool(new.get("use_end_frame")), "continue_prev": bool(new.get("continue_prev")), "prep_status": "none",
         "review": {"verdict": "revised", "issues": [], "fix": "대표 요청·영상 감수 반영"}})
     if setting(ctx, "generation", "auto_prep", True):
-        rpc("agent_add_task", p_token=TOKEN, p={"kind": "prep_cut", "episode_id": ep, "scene_no": cut.get("scene_no"), "cut_id": cut_id, "payload": {"force": True}})
-    notify(f"{cut.get('code')} 수정 완료", "사진·목소리를 다시 준비한 뒤 제작 탭에서 생성 승인을 눌러 주세요")
+        rpc("agent_add_task", p_token=TOKEN, p={"kind": "prep_cut", "episode_id": ep, "scene_no": cut.get("scene_no"), "cut_id": cut_id,
+                                               "payload": {"force": True, "auto_retry": bool((t.get("payload") or {}).get("auto_retry"))}})
+    if (t.get("payload") or {}).get("auto_retry"):
+        notify(f"{cut.get('code')} 자동 재시도", "감수 불합격이라 감독이 고쳤고, 사진·목소리를 다시 준비한 뒤 자동으로 다시 생성합니다", "info")
+    else:
+        notify(f"{cut.get('code')} 수정 완료", "사진·목소리를 다시 준비한 뒤 제작 탭에서 생성 승인을 눌러 주세요")
     return f"{cut.get('code')} 프롬프트 수정"
 
 
@@ -1589,7 +1612,17 @@ def t_prep_cut(t):
                 pass
         if fixed and not p.get("second_pass"):
             rpc("agent_add_task", p_token=TOKEN, p={"kind": "prep_cut", "episode_id": ep, "scene_no": c["scene_no"], "cut_id": c["id"],
-                                                   "payload": {"force": True, "second_pass": True}})
+                                                   "payload": {"force": True, "second_pass": True, "auto_retry": bool(p.get("auto_retry"))}})
+        elif p.get("auto_retry"):
+            # 자동 재시도: 대표가 설정에서 미리 승인한 횟수 안이면 바로 다시 생성(한도는 DB가 확인)
+            try:
+                rpc("agent_update_cut", p_token=TOKEN, p_id=c["id"], p={"status": "approved"})
+                rpc("agent_add_task", p_token=TOKEN, p={"kind": "generate", "episode_id": ep, "scene_no": c["scene_no"], "cut_id": c["id"],
+                                                       "payload": {"auto_retry": True}})
+                log(f"{code} 자동 재시도: 다시 생성합니다")
+            except Exception as ex:
+                rpc("agent_update_cut", p_token=TOKEN, p_id=c["id"], p={"status": "designed"})
+                log(f"{code} 자동 재시도 못 함(대표 승인 필요): {ex}")
         done.append(f"{code}:{'다시 준비' if fixed else status}")
     ready = sum(1 for d in done if d.endswith(":ready"))
     if not t.get("cut_id") or p.get("second_pass"):
@@ -1865,7 +1898,49 @@ voice_consistency(같은 인물 목소리 높이·음색이 목표 미리 듣기
         except Exception:
             pass
     notify(f"{cut['code']} {'통과' if passed else '불합격'} ({score}점)", (rv.get("summary") or "")[:300], "info" if passed else "warning")
+    try:
+        if passed:
+            auto_rough_cut(ep)
+        else:
+            maybe_auto_retry(ctx, ep, cut, take, rv)
+    except Exception as ex:
+        log(f"감수 뒤 이어 하기 실패: {ex}")
     return verdict, score
+
+
+def maybe_auto_retry(ctx, ep, cut, take, rv):
+    """설정 '자동 재시도 횟수' 안이면 감독이 감수 의견으로 고치고 → 사진·목소리 준비 → 다시 생성까지 자동으로."""
+    mx = int(setting(ctx, "generation", "max_auto_retries", 0) or 0)
+    n = int(take.get("take_no") or 1)
+    if mx <= 0 or n > mx:
+        return
+    rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"fix_request": f"[자동 재시도 {n}/{mx}] " + (rv.get("fix_for_director") or rv.get("summary") or "")[:500]})
+    rpc("agent_add_task", p_token=TOKEN, p={"kind": "director", "episode_id": ep, "scene_no": cut.get("scene_no"), "cut_id": cut["id"],
+                                           "payload": {"cut_id": cut["id"], "auto_retry": True}})
+    log(f"{cut['code']} 불합격 → 자동 재시도 {n}/{mx}")
+
+
+def auto_rough_cut(ep):
+    """한 화의 모든 컷이 통과하면 기본 타임라인(통과 영상 순서대로 + 대사 자막)으로 가편집 미리보기를 자동으로 만든다.
+    대표가 이미 편집을 시작한 화는 건드리지 않는다(DB가 확인)."""
+    cuts = rpc("agent_list_cuts", p_token=TOKEN, p_episode=ep, p_scene=None) or []
+    live = [c for c in cuts if c.get("status") != "hold"]
+    if not live or any(not c.get("best_take_id") for c in live):
+        return
+    clips, subs = [], []
+    for i, c in enumerate(sorted(live, key=lambda x: (int(x.get("scene_no") or 0), int(x.get("cut_no") or 0)))):
+        tk = rpc("agent_get_take", p_token=TOKEN, p_id=c["best_take_id"]) or {}
+        ln = float(tk.get("seconds") or c.get("seconds") or 5)
+        cid = f"c{uuid.uuid4().hex[:6]}"
+        clips.append({"id": cid, "cut_id": c["id"], "take_id": c["best_take_id"], "in": 0, "out": ln, "src_len": ln, "gap": 0, "voice_offset": 0, "voice_gain": 1})
+        lines = [re.sub(r"\([^)]*\)|\[[^\]]*\]", "", re.sub(r"^\s*[^:：]{1,12}[:：]\s*", "", l)).strip() for l in str(c.get("dialogue") or "").split("\n")]
+        lines = [l for l in lines if l]
+        span = max(0.6, (ln - 0.3) / max(1, len(lines)))
+        for k, text in enumerate(lines):
+            subs.append({"id": f"s{uuid.uuid4().hex[:6]}", "clip_id": cid, "rs": round(0.15 + k * span, 3), "re": round(min(ln, 0.15 + (k + 1) * span - 0.05), 3), "text": text})
+    rid = rpc("agent_rough_cut", p_token=TOKEN, p_episode=ep, p_timeline={"clips": clips, "music": [], "subs": subs, "settings": {}})
+    if rid:
+        notify("가편집본 자동 생성", f"모든 컷({len(clips)}개)이 감수를 통과해 가편집 미리보기를 만들고 있습니다. 편집 탭에서 다듬고 완성본을 내보내 주세요")
 
 
 @task("video_review")
@@ -2165,6 +2240,66 @@ def t_photo_describe(t):
     rpc("agent_bible_set_description", p_token=TOKEN, p_version=info["version_id"], p_description=desc, p_details=(d.get("details") or "").strip())
     notify(f"{info.get('name')} 묘사 작성 완료", "바이블 탭에서 사진을 보고 쓴 묘사를 확인해 주세요")
     return f"{info.get('name')} 묘사 {len(desc)}자"
+
+
+@task("api_check")
+def t_api_check(t):
+    """설정 → 실제 연결 점검: 진짜 호출을 아주 작게 한 번씩(합계 약 100~300원) 해서 경로·권한·응답 형식을 확인한다."""
+    p = t.get("payload") or {}
+    out = []
+    def step(name, fn):
+        progress(f"점검 중: {name}")
+        try:
+            out.append(f"OK  {name}: {fn()}")
+        except Exception as ex:
+            out.append(f"실패 {name}: {str(ex)[:200]}")
+    def claude_ping():
+        text, _ = claude("claude-opus-5-5", "한 단어로만 답한다.", "연결 확인. '확인'이라고만 답해.", max_tokens=20, stage="other", note="실제 연결 점검")
+        return text.strip()[:20]
+    step("Claude", claude_ping)
+    def nano():
+        try:
+            os.remove(os.path.join(HOME, "hf_models.json"))
+        except OSError:
+            pass
+        m = resolve_image_model({})
+        return m + (" (Nano Banana Pro 경로 찾음)" if m != GROK_IMAGE else " (Nano Banana Pro 경로를 못 찾아 Grok Imagine 사용)")
+    step("장면 사진 모델 경로", nano)
+    def soul():
+        u = soul_images("A Korean woman in her 20s, plain grey background, natural light. " + PHOTO_LOOK, n=1, aspect="3:4")[0]
+        path = upload_from_url(u, f"api_check/{uuid.uuid4().hex[:8]}.jpg")
+        log_cost("keyframe", "higgsfield", SOUL2, {"images": 1}, note="실제 연결 점검", outcome="success")
+        return f"사진 1장 받음 → {path}"
+    step("Soul 2 실사 인물 사진", soul)
+    def scene():
+        m = resolve_image_model({})
+        st = hf_submit_wait(m, {"prompt": "A small cozy cafe interior, natural light, photorealistic, no people, no text.", "aspect_ratio": "9:16"}, "점검 사진")
+        urls = find_image_urls(st.get("images") or st)
+        if not urls:
+            raise RuntimeError(f"사진 주소 없음: {str(st)[:150]}")
+        log_cost("keyframe", "higgsfield", "nano-banana-pro" if "nano-banana-pro" in m else m, {"images": 1}, note="실제 연결 점검", outcome="success")
+        return f"{m} 사진 1장 받음"
+    step("장면 사진 생성", scene)
+    vid = p.get("voice_id")
+    if vid:
+        mp3 = os.path.join(HOME, "work", "check_tts.mp3")
+        def tts():
+            data = tts_line(vid, "연결 확인입니다. 잘 들리나요?", "[excited]", "eleven_v3")
+            with open(mp3, "wb") as f:
+                f.write(data)
+            return f"{len(data) // 1024}KB 음성 받음"
+        step("ElevenLabs 대사 읽기(TTS)", tts)
+        def stt():
+            text, words = stt_words(mp3, "scribe_v1")
+            return f"받아쓰기: {text[:40]}"
+        if os.path.exists(mp3):
+            step("ElevenLabs 받아쓰기(STT)", stt)
+    else:
+        out.append("건너뜀 ElevenLabs: 바이블에 목소리가 정해진 인물이 없어 대사 읽기·받아쓰기는 확인하지 못했습니다")
+    ok = sum(1 for x in out if x.startswith("OK"))
+    report = "\n".join(out)
+    notify(f"실제 연결 점검 {ok}/{len(out)} 통과", report[:900], "info" if ok == len(out) else "warning")
+    return report
 
 
 @task("bible_prompt")
@@ -2735,7 +2870,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"api_check": "실제 연결 점검", "bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
