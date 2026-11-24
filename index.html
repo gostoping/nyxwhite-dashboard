@@ -8479,12 +8479,36 @@ async function renderPicker(episodes) {
   const [vers, cuts, open] = await Promise.all([
     q(S.sb.from('script_versions').select('episode_id,status').in('episode_id', ids)),
     q(S.sb.from('production_cuts').select('episode_id,status').in('episode_id', ids).neq('status', 'cancelled')),
-    q(S.sb.from('pipeline_tasks').select('episode_id,kind').in('episode_id', ids).in('status', ['queued', 'running'])),
+    q(S.sb.from('pipeline_tasks').select('episode_id,kind,status').in('episode_id', ids).in('status', ['queued', 'running'])),
   ]);
+  const tgtRow = await q(S.sb.from('app_settings').select('value').eq('key', 'cut_target').maybeSingle()).catch(() => null);
   const st = e => { const v = vers.filter(x => x.episode_id === e.id), c = cuts.filter(x => x.episode_id === e.id), o = open.filter(x => x.episode_id === e.id);
-    return { raw: v.length, conf: v.some(x => x.status === 'confirmed'), cuts: c.length, passed: c.filter(x => x.status === 'passed').length, busy: o.map(x => TASK_LABEL[x.kind] || x.kind) }; };
+    const dir = o.filter(x => x.kind === 'director');
+    return { raw: v.length, conf: v.some(x => x.status === 'confirmed'), cuts: c.length, passed: c.filter(x => x.status === 'passed').length, busy: o.map(x => TASK_LABEL[x.kind] || x.kind),
+      designing: dir.some(x => x.status === 'running'), waiting: dir.length && !dir.some(x => x.status === 'running') }; };
+  // 컷 설계 범위: 화마다 어디까지 왔는지 한 줄로(예: 1~3화, 5화)
+  const rng = ns => { ns = [...ns].sort((a, b) => a - b); const out = []; for (let i = 0; i < ns.length; i++) { let j = i; while (j + 1 < ns.length && ns[j + 1] === ns[j] + 1) j++; out.push(i === j ? `${ns[i]}` : `${ns[i]}~${ns[j]}`); i = j; } return out.length ? out.join(', ') + '화' : '없음'; };
+  const target = Number((tgtRow?.value || {})[S.seriesId]) || 0;
+  const scope = target ? episodes.filter(e => e.number <= target) : episodes;
+  const grp = { designing: [], waiting: [], done: [], ready: [], notyet: [] };
+  scope.forEach(e => { const s = st(e); grp[s.designing ? 'designing' : s.waiting ? 'waiting' : s.cuts ? 'done' : s.conf ? 'ready' : 'notyet'].push(e.number); });
+  const maxNo = Math.max(0, ...all.map(e => e.number));
   S.pick = S.pick || {};
   box.innerHTML = `<div class="card">
+    <div class="row"><b>컷 설계 범위</b>
+      <span class="quiet">대본에 올린 화: ${all.length ? `${rng(all.map(e => e.number))} (${all.length}개 화)` : '없음'}</span>
+      <span class="row" style="margin-left:auto;gap:6px"><span class="quiet">목표:</span>
+        <input id="pkTgt" type="number" min="1" max="${maxNo || 999}" value="${target || ''}" placeholder="전체" style="width:70px">
+        <span class="quiet">화까지 만들기</span><button class="btn small" id="pkTgtSave">저장</button></span></div>
+    <div class="quiet" style="margin:4px 0 6px">${target ? `목표 <b>1~${target}화</b> 기준` : '목표를 정하지 않아 <b>대본에 올린 모든 화</b> 기준'}입니다. 컷 설계는 <b>화마다 따로</b> 진행됩니다(감독 1번 = 1개 화).</div>
+    <div class="row" style="gap:6px;flex-wrap:wrap">
+      ${pill('설계 중: ' + rng(grp.designing), grp.designing.length ? 'warn' : '')}
+      ${pill('설계 차례 기다림: ' + rng(grp.waiting), grp.waiting.length ? 'warn' : '')}
+      ${pill('설계 끝: ' + rng(grp.done), grp.done.length ? 'good' : '')}
+      ${pill('대본 확정 · 아직 설계 안 함: ' + rng(grp.ready), grp.ready.length ? 'accent' : '')}
+      ${pill('대본 확정 전: ' + rng(grp.notyet))}
+      ${grp.ready.length ? `<button class="btn small" id="pkTgtPick">아직 설계 안 한 ${rng(grp.ready)} 고르기</button>` : ''}</div></div>
+  <div class="card">
     <div class="row"><b>제작할 화 고르기</b><span class="quiet">대본에 올린 화를 모두 만들지 않아도 됩니다. 만들 화만 고르세요.</span>
       <button class="btn small" id="pkAll" style="margin-left:auto">전체 선택</button><button class="btn small" id="pkNone">선택 해제</button></div>
     <div class="pkgrid">${episodes.map(e => { const s = st(e); return `<label class="pk ${S.pick[e.id] ? 'on' : ''}"><input type="checkbox" data-pk="${esc(e.id)}" ${S.pick[e.id] ? 'checked' : ''}>
@@ -8508,6 +8532,13 @@ async function renderPicker(episodes) {
   box.querySelectorAll('[data-pkun]').forEach(a => a.onclick = guard(async ev => {
     ev.preventDefault(); await q(S.sb.rpc('owner_hold', { p_kind: 'episode', p_id: a.dataset.pkun, p_on: false })); toast('꺼냈습니다'); go('production');
   }));
+  $('#pkTgtSave').onclick = guard(async () => {
+    const n = Math.max(0, Math.floor(+$('#pkTgt').value || 0));
+    const cur = (await q(S.sb.from('app_settings').select('value').eq('key', 'cut_target').maybeSingle()).catch(() => null))?.value || {};
+    await q(S.sb.from('app_settings').upsert({ key: 'cut_target', value: { ...cur, [S.seriesId]: n || null }, updated_at: new Date().toISOString() }));
+    toast(n ? `목표를 1~${n}화로 저장했습니다` : '목표를 지웠습니다(모든 화 기준)'); renderPicker(all);
+  });
+  const tp = $('#pkTgtPick'); if (tp) tp.onclick = () => { S.pick = {}; episodes.filter(e => grp.ready.includes(e.number)).forEach(e => { S.pick[e.id] = true; }); renderPicker(all); };
   $('#pkAll').onclick = () => { episodes.forEach(e => { S.pick[e.id] = true; }); renderPicker(all); };
   $('#pkNone').onclick = () => { S.pick = {}; renderPicker(all); };
   const start = kind => guard(async () => {
@@ -8563,6 +8594,7 @@ async function viewProduction(main) {
     const playing = [...document.querySelectorAll('#prodPane video, #prodPane audio')].some(m => !m.paused);
     if (S.prodBusy && !playing && !document.querySelector('#prodPane :is(input,textarea,select):focus')) renderProduction(episodes.find(e => e.id === S.episodeId), true).catch(() => {});
     renderBoard().catch(() => {});
+    if (!document.querySelector('#prodPick :is(input[type=number]):focus') && (S.prodTick = (S.prodTick || 0) + 1) % 2 === 0) renderPicker(episodes).catch(() => {});   // 화별 현황도 16초마다
   }, 8000);
 }
 
@@ -8620,7 +8652,7 @@ async function renderProduction(ep, quietRefresh = false) {
       `<div class="step ${i < step ? 'done' : i === step ? 'now' : ''}"><div class="dot">${i + 1}</div><div class="t">${t}</div><div class="d">${d}</div></div>`).join('')}</div>
     <div class="row" style="margin-top:12px">
       <button class="btn ${step <= 1 ? 'primary' : ''}" id="pWr" ${versions.length ? '' : 'disabled'}>작가실 정리 실행</button>
-      <button class="btn ${step === 2 ? 'primary' : ''}" id="pDir" ${confirmed ? '' : 'disabled'}>감독: 컷 설계${cuts.length ? ' 다시' : ''}</button>
+      <button class="btn ${step === 2 ? 'primary' : ''}" id="pDir" ${confirmed ? '' : 'disabled'}>감독: ${ep.number}화 컷 설계${cuts.length ? ' 다시' : ''}</button>
       ${passed ? `<button class="btn ${step >= 4 ? 'primary' : ''}" id="pEdit">편집실 열기 (통과 ${passed}컷)</button>` : ''}
       ${designedCost ? `<button class="btn ${step === 3 ? 'primary' : ''}" id="pApproveAll">승인 대기 컷 전체 생성 (예상 ${usdKrw(designedCost, rate)})</button>` : ''}
       <span class="quiet" style="margin-left:auto">${confirmed ? `대본 v${confirmed.version_no} 확정` : drafts.length ? `초안 ${drafts.length}개 · 확정본 없음` : '원고 없음'}
@@ -8633,7 +8665,7 @@ async function renderProduction(ep, quietRefresh = false) {
   </div>
 
   ${failedNow.length ? `<div class="card" style="border-color:var(--bad)"><div class="row"><b>${esc(seriesTitle)} ${ep.number}화 — 해결이 필요한 실패 ${failedNow.length}건</b></div>${failedNow.map(failCard).join('')}</div>` : ''}
-  ${openTasks.length || tasks.length ? `<div class="card"><div class="row"><b>${esc(seriesTitle)} ${ep.number}화 진행 중인 일</b><span class="quiet">8초마다 새로 고침</span></div>
+  ${openTasks.length || tasks.length ? `<div class="card"><div class="row"><b>${esc(seriesTitle)} ${ep.number}화 진행 중인 일</b><span class="quiet">지금 보고 있는 ${ep.number}화의 일만 · 다른 화는 위 '컷 설계 범위'와 '제작 현황' · 8초마다 새로 고침</span></div>
     <table>${tasks.slice(0, openTasks.length ? Math.max(openTasks.length, 3) : 4).map(t => `<tr>
       <td style="white-space:nowrap">${pill(TASK_LABEL[t.kind] || t.kind, t.status === 'failed' ? 'bad' : t.status === 'done' ? 'good' : 'warn')}</td>
       <td>${t.status === 'running' ? '<span class="spin"></span>' : ''}${esc(t.status === 'failed' ? (t.error || '실패') : t.status === 'done' ? (t.result || '완료') : (t.progress || (t.status === 'queued' ? '에이전트 대기 중' : '처리 중')))}</td>
@@ -8699,6 +8731,12 @@ function prepBlock(c, urls) {
   </div>`;
 }
 
+// 컷 코드 풀이: E01-S01-C04 → "1화 · 1씬 · 4번째 컷"
+function codeMeaning(c) {
+  const m = String(c.code || '').match(/E(\d+)\D*S(\d+)\D*C(\d+)/i);
+  const [e, s, n] = m ? [+m[1], +m[2], +m[3]] : [null, +c.scene_no, +c.cut_no];
+  return `${e ? e + '화 · ' : ''}${s}씬 · ${n}번째 컷`;
+}
 function cutCard(c, ts, urls, rate) {
   const [label, kind] = CUT_STATUS[c.status] || [c.status, ''];
   const shown = ts.find(t => t.id === c.best_take_id) || ts.filter(t => t.files?.preview || t.files?.poster).at(-1);
@@ -8710,7 +8748,7 @@ function cutCard(c, ts, urls, rate) {
     <div class="media">${u ? `<video src="${esc(u)}" ${poster ? `poster="${esc(poster)}"` : ''} controls preload="none" playsinline></video>`
       : poster ? `<img src="${esc(poster)}">` : `<div class="ph">${c.status === 'generating' ? `<span class="spin"></span> 생성 중<br><span style="font-size:11px">⏱ ${esc(etaText('generate'))}</span>` : `${c.seconds}초`}</div>`}</div>
     <div class="body">
-      <div class="row"><b>${esc(c.code || `C${c.cut_no}`)}</b>${pill(label, kind)}<span class="quiet">${c.seconds}초 · ${esc(c.resolution)}</span>
+      <div class="row"><b title="${esc(codeMeaning(c))}">${esc(c.code || `C${c.cut_no}`)}</b><span class="quiet" style="font-size:12px">${esc(codeMeaning(c))}</span>${pill(label, kind)}<span class="quiet">${c.seconds}초 · ${esc(c.resolution)}</span>
         ${shown?.score != null ? pill(shown.score + '점', shown.verdict === 'pass' ? 'good' : 'bad') : ''}</div>
       <div class="sum">${esc(c.summary || '')}</div>
       ${c.dialogue ? `<div class="dlg">${esc(c.dialogue)}</div>` : ''}
