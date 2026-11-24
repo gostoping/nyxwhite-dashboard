@@ -337,7 +337,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.19.4"
+VERSION = "1.19.6"
 
 import base64
 import glob
@@ -2919,10 +2919,18 @@ def t_photo_design(t):
             if en:
                 d["prompt"] = en
     try:
-        if d["category"] == "character":
+        cm = (d.get("model") or (d.get("generation") or {}).get("char_photo_model") or "soul2")
+        if d["category"] == "character" and cm == "soul2":
             progress(f"{name} 실사 인물 사진 후보를 만드는 중 (Soul 2)")
             urls = soul_images(d["prompt"] + " " + PHOTO_LOOK, n=4, aspect="3:4")
             model = SOUL2
+        elif d["category"] == "character":   # 다른 모델(나노바나나 프로·Grok)로 후보 4장을 동시에 — 고른 사진으로 얼굴 학습(Soul ID)은 그대로
+            model = resolve_image_model({"image_model": cm}) if cm not in ("nano", "grok") else (resolve_image_model({"image_model": "auto"}) if cm == "nano" else GROK_IMAGE)
+            progress(f"{name} 실사 인물 사진 후보 4장을 동시에 만드는 중 ({'나노바나나 프로' if cm == 'nano' else 'Grok Imagine' if cm == 'grok' else model})")
+            res = parallel([(lambda: hf_image(d["prompt"] + " Head-and-shoulders portrait, plain light grey background. " + PHOTO_LOOK, [], "3:4", model)) for _ in range(4)], workers=4)
+            urls = [u for u in res if isinstance(u, str) and u]
+            if not urls:
+                raise RuntimeError(f"인물 사진 후보 실패({model}): {res[0]}")
         else:
             model = resolve_image_model(d.get("generation") or {})
             progress(f"{name} 사진 후보를 만드는 중")
@@ -3511,11 +3519,11 @@ def design_check(did):
     if not blocks:
         raise RuntimeError("확인할 사진을 받지 못했습니다(저장소 연결 문제). 다시 시도해 주세요")
     system = f"""너는 드라마 제작팀의 코디네이터다. 생성된 {'인물' if cat == 'character' else '바이블'} 사진 후보를 프롬프트와 한 장씩 비교한다.
-장마다 확인: 1) 프롬프트의 나이·성별·국적 인상·얼굴·머리(길이·색)·체형·의상(장소·소품이면 구조·재질·색)과 맞는가
+장마다 확인: 1) {'인물은 얼굴(나이 인상·성별·국적 인상·이목구비)과 몸(체형·몸 비율·몸매)만 프롬프트와 맞는지 본다. 의상·액세서리·헤어스타일·배경·조명·포즈는 장면마다 바뀌므로 보지 않고 문제로 삼지 않는다' if cat == 'character' else '프롬프트의 구조·재질·색·크기와 맞는가'}
 2) 사진 안에 글자가 찍혀 있지 않은가 — 이름표·사원증·명찰·자막·간판·워터마크·로고(예: '김도연' 같은 이름). 하나라도 있으면 문제
 3) {'후보끼리 같은 사람으로 쓸 수 있는가(세트면 모두 같은 사람인가), ' if cat == 'character' else ''}실사 사진인가(그림·3D 아님)
 match: "ok"(그대로 써도 됨) | "issue"(문제 있음). issues는 한국어로 짧게, 글자가 보이면 그 글자를 text에.
-그리고 다음 생성이 더 나아지게: 문제의 원인이 프롬프트에 있으면(모호함·빠진 특징·글자를 부르는 표현: 사원증·명찰·유니폼 로고 등) prompt_improved에 고친 영어 프롬프트 전체를,
+그리고 다음 생성이 더 나아지게: 문제의 원인이 프롬프트에 있으면(모호함·빠진 특징·글자를 부르는 표현: 사원증·명찰·유니폼 로고 등) prompt_improved에 고친 영어 프롬프트 전체를{'(인물은 얼굴·몸 묘사만 다듬고 의상·배경 지시는 새로 넣지 않는다)' if cat == 'character' else ''},
 avoid에 생성 모델에 넣을 금지 사항(영어 짧은 구, 예: "no ID badge", "no lanyard", "not older than 25")을 준다.
 문제가 바이블 묘사 자체와 다르게 나온 탓이 아니라 프롬프트가 부족한 탓이면 fix_bible_prompt를 true로.
 답 형식: <json>{{"images": [{{"no": 1, "match": "ok", "issues": [], "text": ""}}], "best": [1], "summary": "한국어 한 줄(몇 장이 쓸 만한지)",
@@ -3604,7 +3612,7 @@ checks는 항목마다: item(무엇을 봤는지, 한국어 짧게), status(ok|m
                 os.remove(tmp)
     if blocks:
         system += f"""
-4) 기준 사진({len(blocks) // 2}장)도 본다: 묘사·영어 프롬프트와 맞는가(나이·성별·머리·체형·의상, 장소 구조 등),
+4) 기준 사진({len(blocks) // 2}장)도 본다: {'인물은 얼굴(나이 인상·성별·이목구비)과 몸(체형·비율·몸매)만 묘사와 맞는지(의상·액세서리·헤어스타일·배경은 장면마다 바뀌니 보지 않음)' if cat == 'character' else '묘사·영어 프롬프트와 맞는가(구조·재질·색)'},
    사진 안에 글자·이름표·자막·워터마크·로고가 찍혀 있지 않은가(예: 다른 사람 이름 같은 한글·영문 글자), {'모든 사진이 같은 사람인가, ' if cat == 'character' else ''}실사인가.
    문제가 있으면 photo_verdict "redo"와 photo_issues(한국어, 사진 번호와 무엇이 문제인지)를 준다. 문제없으면 photo_verdict "ok".
 답 형식에 "photo_verdict": "ok|redo", "photo_issues": ["…"]를 함께 넣는다."""
@@ -6654,6 +6662,11 @@ async function openPhotoDesign(entry, cur, fresh) {
       ? (pdTask.not_before && new Date(pdTask.not_before) > Date.now() ? `잠시 대기: ${esc(pdTask.progress || '')}` : `에이전트가 집어 가길 기다리는 중(요청 ${agoText(pdTask.created_at)})${stuckWhy(pdTask) ? ` — <b>${esc(stuckWhy(pdTask).why)}</b> <button class="btn small" data-agupdate="1">에이전트 지금 업데이트</button>` : ''}`)
     : pdTask.status === 'running' ? `${esc(pdTask.progress || '처리 중')}${pdTask.devices?.name ? ` · ${esc(pdTask.devices.name)}` : ''}`
     : pdTask.status === 'failed' ? `실패: ${esc(explainFail(pdTask.kind, pdTask.error).what)} ${esc(explainFail(pdTask.kind, pdTask.error).how)}` : '';
+  const tries = await q(S.sb.from('photo_designs').select('id', { count: 'exact', head: true }).eq('entry_id', entry.id).neq('status', 'dismissed')).catch(() => null);
+  const MODEL_NM = { soul2: 'Soul 2', nano: '나노바나나 프로', grok: 'Grok Imagine' };
+  const otherModels = isChar ? `<div class="row" style="gap:6px;margin-top:6px"><span class="quiet">다른 모델로 후보 다시 만들기:</span>${Object.entries(MODEL_NM).filter(([k]) => k !== (d.model || 'soul2'))
+    .map(([k, nm]) => `<button class="btn small" data-pdmodel="${k}">${nm}</button>`).join('')}<span class="quiet">(고른 사진으로 얼굴 고정은 그대로 됩니다)</span></div>` : '';
+  const wmNote = /워터마크|watermark|로고|logo/i.test(JSON.stringify(d.review?.items || []) + (d.error || '')) ? `<div class="msg warn" style="margin:6px 0 0"><b>워터마크가 계속 나온다면:</b> 사진 구석의 <b>Higgsfield 로고</b>라면 Higgsfield <b>무료 계정</b>이라 모든 모델에 찍힙니다(유료 요금제에서는 안 찍힘) — 모델을 바꿔도 같으니 Higgsfield 요금제를 확인하세요. 잡지·간판 같은 다른 글자라면 아래 "다른 모델로" 다시 만들기를 권합니다.</div>` : '';
   const pdCheck = await q(S.sb.from('pipeline_tasks').select('id,status').eq('kind', 'coord_review').eq('payload->>design_id', d.id).order('created_at', { ascending: false }).limit(1)).catch(() => []);
   const rvLine = ['ready', 'set_ready'].includes(d.status) ? (d.review ? `<div class="msg ${(d.review.items || []).some(r => !r.ok) ? 'warn' : ''}" style="margin:6px 0">코디네이터 확인: ${esc(d.review.summary || '')}
       ${(d.review.items || []).filter(r => !r.ok).map(r => `<div class="quiet">사진 ${(d.review.items || []).indexOf(r) + 1}: ${esc((r.issues || []).join(' / '))}${r.text ? ` (글자: ${esc(r.text)})` : ''}</div>`).join('')}
@@ -6669,6 +6682,8 @@ async function openPhotoDesign(entry, cur, fresh) {
       ${pdState ? `<br><span class="quiet">지금 상태: ${pdState}</span>` : ''}</p>` : ''}
     ${d.status === 'failed' ? `<div class="msg err">${esc(explainFail(pdTask?.kind || 'photo_design', d.error || pdTask?.error).what)} ${esc(explainFail(pdTask?.kind || 'photo_design', d.error || pdTask?.error).how)}
       <div class="quiet" style="margin-top:4px;white-space:pre-wrap">원인 원문: ${esc(d.error || pdTask?.error || '기록 없음')}</div></div>` : ''}
+    ${tries ? `<div class="quiet" style="font-size:12px">이 인물 사진 요청 <b>${tries}번째</b> · 이번 모델: ${esc(MODEL_NM[d.model || 'soul2'] || d.model || 'Soul 2')}</div>` : ''}
+    ${['ready', 'failed', 'set_ready'].includes(d.status) ? wmNote + otherModels : ''}
     ${d.status === 'ready' ? `<p class="quiet" style="margin:4px 0">${isChar ? '같은 사람으로 쓸 사진을 1~4장 고르세요(여러 장이면 얼굴이 더 안정적). 사진을 누르면 크게 보고, 크게 본 채로 고를 수 있습니다. 고르기는 체크칸.' : '바이블에 넣을 사진을 고르세요.'}</p>
       ${rvLine}<div class="pdgrid">${(d.previews || []).map(x => img(x, true)).join('')}</div>
       <div class="row" style="margin-top:8px"><button class="btn small primary" id="pdPick-${entry.id}">${isChar ? '이 얼굴로 학습 + 기준 사진 만들기' : '바이블에 적용'}</button>
@@ -6679,6 +6694,13 @@ async function openPhotoDesign(entry, cur, fresh) {
       <div class="row" style="margin-top:8px"><button class="btn small primary" id="pdLink-${entry.id}">바이블에 적용${(() => { const all = [...(d.chosen || []), ...(d.ref_set || [])], k = okOnly(d, all).length; return k < all.length ? ` (⚠ ${all.length - k}장 빼고 ${k}장)` : ''; })()}</button>
         <span class="quiet">⚠ 사진은 자동으로 빼고 적용합니다. 쓸 만한 사진이 너무 적거나 얼굴이 다르면 "새로 만들기"(코디네이터가 고친 프롬프트로)</span></div>` : ''}</div>`;
   document.getElementById('pdNew-' + entry.id).onclick = () => openPhotoDesign(entry, cur, true);
+  box.querySelectorAll('[data-pdmodel]').forEach(b => b.onclick = guard(async () => {
+    const m = b.dataset.pdmodel;
+    if (!confirm(`${entry.name}: ${MODEL_NM[m]}(으)로 실사 사진 후보 4장을 새로 만듭니다(Higgsfield 비용). 고른 사진으로 얼굴 학습은 그대로 됩니다.`)) return;
+    const r = await q(S.sb.from('photo_designs').insert({ entry_id: entry.id, prompt: (cur?.prompt_en || cur?.description || d.prompt || '').slice(0, 1800), use_bible: true, model: m }).select('id').single());
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'photo_design', payload: { design_id: r.id } }));
+    toast(`${MODEL_NM[m]}(으)로 후보를 만들고 있습니다`); openPhotoDesign(entry, cur, false);
+  }));
   const toBible = async list => {
     const out = [];
     for (const x of list) {
@@ -9832,11 +9854,13 @@ const HELP = {
   <li><b>프롬프트 보정</b>: 영어 프롬프트가 빠뜨린 것을 코디네이터가 고침. 전·후 문장을 볼 수 있습니다.</li>
   <li><b>대표 확인 필요</b>: 한글 묘사 자체가 요청·대본과 어긋남. 무엇을 고치면 되는지 한 줄로 알려 주고, [고쳐쓰기]로 바로 열립니다.</li>
   </ul></li>
+<li>인물 사진 감수는 <b>얼굴과 몸(체형·비율·몸매)만</b> 봅니다. 의상·액세서리·헤어스타일·배경은 장면마다 바뀌므로 감수에서 문제로 삼지 않습니다.</li>
 <li>코디네이터는 <b>기준 사진</b>도 봅니다: 묘사와 맞는지, 사진에 글자·이름표·자막(예: 다른 사람 이름)이 찍혀 있지 않은지, 같은 사람인지. 문제가 있으면 카드가 빨갛게 표시되고 <b>다시 적용해서 사진 만들기 (추천)</b> 버튼이 나옵니다. 바이블 위 "코디네이터 감수 결과"에 이상 항목이 모입니다.<span class="ex">예: 도윤 — 사진 2에 '김윤호' 이름표 글자, 사진 3은 다른 사람 → [다시 적용해서 사진 만들기]</span></li>
 <li><b>다시 감수</b>(카드), <b>전체 감수 다시 하기</b>(위 "한꺼번에" 줄)으로 언제든 다시 확인할 수 있습니다. 지난 감수는 "이전 감수"에 쌓입니다.</li>
 <li><b>사진을 직접 넣으면</b> 코디네이터가 바로(짧은 일 줄) 사진을 보고 한글 묘사·세부 사항·영어 프롬프트를 꼼꼼히 쓰고, 이어서 감수까지 합니다. 사진을 안 넣으면 대본에서 가져온 추천 묘사로 작가실이 영어 프롬프트를 씁니다.<span class="ex">예: 도윤 사진 3장 업로드 → "20대 후반 한국 남성, 쌍꺼풀 없는 가는 눈, 짧은 흑발 투블럭…" + 영어 프롬프트 → 감수: 반영 확인</span></li>
 <li><b>사진 후보 확인 → 다음 후보 개선</b>: 코디네이터가 후보에서 찾은 문제(사원증 글자·나이·다른 사람 등)는 고친 프롬프트와 금지 사항("no ID badge" 등)으로 정리돼 <b>다음 "새로 만들기"에 자동 반영</b>됩니다. 프롬프트가 부족했던 탓이면 바이블 영어 프롬프트도 고치고 감수 기록에 남깁니다.</li>
 <li><b>고르지 않아도 진행</b>: 후보 칸의 "코디네이터 추천(2·3번)으로 학습", 감수 결과 칸의 <b>코디네이터 추천으로 학습 시작</b>(인물 여럿 한꺼번에), 얼굴 학습이 끝나면 <b>기준 사진 모두 바이블에 적용</b>(한 번에).</li>
+<li><b>모델 바꾸기</b>: 인물 사진 칸에 "이 인물 사진 요청 N번째 · 이번 모델"이 보이고, 결과가 계속 마음에 안 들면 <b>다른 모델로 후보 다시 만들기</b>(Soul 2 · 나노바나나 프로 · Grok Imagine)를 누르세요. 어느 모델로 만든 사진이든 고르면 Soul ID 얼굴 고정은 그대로 됩니다. 사진 구석의 Higgsfield 로고 워터마크는 모델이 아니라 Higgsfield 무료 계정 때문입니다(유료 요금제에서는 없음).</li>
 <li><b>얼굴이 고정된 인물</b>은 사진 후보 칸이 다시 나타나지 않습니다. 얼굴을 바꾸려면 <b>고쳐쓰기</b>에서 묘사를 고치고 "저장한 뒤 실사 사진 후보 4장 새로 만들기"를 체크하세요.</li>
 <li>사진 <b>새로 만들기</b>는 그 항목의 반영·감수가 진행 중이면 <b>그게 끝난 뒤</b> 반영된 프롬프트로 만듭니다.</li>
 </ul>

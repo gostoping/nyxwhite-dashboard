@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.19.4"
+VERSION = "1.19.6"
 
 import base64
 import glob
@@ -2592,10 +2592,18 @@ def t_photo_design(t):
             if en:
                 d["prompt"] = en
     try:
-        if d["category"] == "character":
+        cm = (d.get("model") or (d.get("generation") or {}).get("char_photo_model") or "soul2")
+        if d["category"] == "character" and cm == "soul2":
             progress(f"{name} 실사 인물 사진 후보를 만드는 중 (Soul 2)")
             urls = soul_images(d["prompt"] + " " + PHOTO_LOOK, n=4, aspect="3:4")
             model = SOUL2
+        elif d["category"] == "character":   # 다른 모델(나노바나나 프로·Grok)로 후보 4장을 동시에 — 고른 사진으로 얼굴 학습(Soul ID)은 그대로
+            model = resolve_image_model({"image_model": cm}) if cm not in ("nano", "grok") else (resolve_image_model({"image_model": "auto"}) if cm == "nano" else GROK_IMAGE)
+            progress(f"{name} 실사 인물 사진 후보 4장을 동시에 만드는 중 ({'나노바나나 프로' if cm == 'nano' else 'Grok Imagine' if cm == 'grok' else model})")
+            res = parallel([(lambda: hf_image(d["prompt"] + " Head-and-shoulders portrait, plain light grey background. " + PHOTO_LOOK, [], "3:4", model)) for _ in range(4)], workers=4)
+            urls = [u for u in res if isinstance(u, str) and u]
+            if not urls:
+                raise RuntimeError(f"인물 사진 후보 실패({model}): {res[0]}")
         else:
             model = resolve_image_model(d.get("generation") or {})
             progress(f"{name} 사진 후보를 만드는 중")
@@ -3184,11 +3192,11 @@ def design_check(did):
     if not blocks:
         raise RuntimeError("확인할 사진을 받지 못했습니다(저장소 연결 문제). 다시 시도해 주세요")
     system = f"""너는 드라마 제작팀의 코디네이터다. 생성된 {'인물' if cat == 'character' else '바이블'} 사진 후보를 프롬프트와 한 장씩 비교한다.
-장마다 확인: 1) 프롬프트의 나이·성별·국적 인상·얼굴·머리(길이·색)·체형·의상(장소·소품이면 구조·재질·색)과 맞는가
+장마다 확인: 1) {'인물은 얼굴(나이 인상·성별·국적 인상·이목구비)과 몸(체형·몸 비율·몸매)만 프롬프트와 맞는지 본다. 의상·액세서리·헤어스타일·배경·조명·포즈는 장면마다 바뀌므로 보지 않고 문제로 삼지 않는다' if cat == 'character' else '프롬프트의 구조·재질·색·크기와 맞는가'}
 2) 사진 안에 글자가 찍혀 있지 않은가 — 이름표·사원증·명찰·자막·간판·워터마크·로고(예: '김도연' 같은 이름). 하나라도 있으면 문제
 3) {'후보끼리 같은 사람으로 쓸 수 있는가(세트면 모두 같은 사람인가), ' if cat == 'character' else ''}실사 사진인가(그림·3D 아님)
 match: "ok"(그대로 써도 됨) | "issue"(문제 있음). issues는 한국어로 짧게, 글자가 보이면 그 글자를 text에.
-그리고 다음 생성이 더 나아지게: 문제의 원인이 프롬프트에 있으면(모호함·빠진 특징·글자를 부르는 표현: 사원증·명찰·유니폼 로고 등) prompt_improved에 고친 영어 프롬프트 전체를,
+그리고 다음 생성이 더 나아지게: 문제의 원인이 프롬프트에 있으면(모호함·빠진 특징·글자를 부르는 표현: 사원증·명찰·유니폼 로고 등) prompt_improved에 고친 영어 프롬프트 전체를{'(인물은 얼굴·몸 묘사만 다듬고 의상·배경 지시는 새로 넣지 않는다)' if cat == 'character' else ''},
 avoid에 생성 모델에 넣을 금지 사항(영어 짧은 구, 예: "no ID badge", "no lanyard", "not older than 25")을 준다.
 문제가 바이블 묘사 자체와 다르게 나온 탓이 아니라 프롬프트가 부족한 탓이면 fix_bible_prompt를 true로.
 답 형식: <json>{{"images": [{{"no": 1, "match": "ok", "issues": [], "text": ""}}], "best": [1], "summary": "한국어 한 줄(몇 장이 쓸 만한지)",
@@ -3277,7 +3285,7 @@ checks는 항목마다: item(무엇을 봤는지, 한국어 짧게), status(ok|m
                 os.remove(tmp)
     if blocks:
         system += f"""
-4) 기준 사진({len(blocks) // 2}장)도 본다: 묘사·영어 프롬프트와 맞는가(나이·성별·머리·체형·의상, 장소 구조 등),
+4) 기준 사진({len(blocks) // 2}장)도 본다: {'인물은 얼굴(나이 인상·성별·이목구비)과 몸(체형·비율·몸매)만 묘사와 맞는지(의상·액세서리·헤어스타일·배경은 장면마다 바뀌니 보지 않음)' if cat == 'character' else '묘사·영어 프롬프트와 맞는가(구조·재질·색)'},
    사진 안에 글자·이름표·자막·워터마크·로고가 찍혀 있지 않은가(예: 다른 사람 이름 같은 한글·영문 글자), {'모든 사진이 같은 사람인가, ' if cat == 'character' else ''}실사인가.
    문제가 있으면 photo_verdict "redo"와 photo_issues(한국어, 사진 번호와 무엇이 문제인지)를 준다. 문제없으면 photo_verdict "ok".
 답 형식에 "photo_verdict": "ok|redo", "photo_issues": ["…"]를 함께 넣는다."""
