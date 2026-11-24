@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.19.7"
+VERSION = "1.20.0"
 
 import base64
 import glob
@@ -2662,18 +2662,27 @@ def t_photo_set(t):
         src = [storage_signed_url(x.get("bucket") or "takes", x["path"], 7200) for x in chosen if x.get("path")]
         if not src:
             raise RuntimeError("고른 사진이 없습니다")
-        progress(f"{name} 얼굴 학습 중 (Soul ID, 수 분 걸림)")
-        soul_id = soul_train(f"{d.get('series_title') or 'NYX'} · {name}", src)
-        log_cost("keyframe", "higgsfield", "soul-id-training", {"calls": 1}, note=f"얼굴 학습: {name}", outcome="success")
+        use_nano = (d.get("model") or (d.get("generation") or {}).get("char_photo_model") or "soul2") != "soul2"
+        if use_nano:   # 나노바나나 프로: 얼굴 학습 없이, 고른 사진을 참고 사진으로 같은 얼굴의 기준 사진을 바로 만든다(빠름)
+            soul_id = "nano-ref"
+            nmodel = resolve_image_model({"image_model": "auto"}) if (d.get("model") or (d.get("generation") or {}).get("char_photo_model")) in (None, "nano") else (
+                GROK_IMAGE if (d.get("model") or (d.get("generation") or {}).get("char_photo_model")) == "grok" else resolve_image_model({"image_model": "auto"}))
+        else:
+            progress(f"{name} 얼굴 학습 중 (Soul ID, 수 분 걸림)")
+            soul_id = soul_train(f"{d.get('series_title') or 'NYX'} · {name}", src)
+            log_cost("keyframe", "higgsfield", "soul-id-training", {"calls": 1}, note=f"얼굴 학습: {name}", outcome="success")
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "training", "soul_id": soul_id})
         look = (d.get("prompt_en") or d.get("description") or d.get("prompt") or "")[:900]   # 사진 모델에는 영어 프롬프트
         outfit = (d.get("details") or "")[:500]
         progress(f"{name} 기준 사진 {len(SET_SHOTS)}장을 동시에 만드는 중")
 
         def shot_fn(i, label, shot):
-            return lambda: {"label": label, "path": upload_from_url(
-                soul_images(f"{look} {outfit if label == '전신·의상' else ''} {shot} {PHOTO_LOOK}", n=1, aspect="3:4", soul_id=soul_id)[0],
-                f"photos/{did}/set_{i + 1}_{uuid.uuid4().hex[:6]}.jpg")}
+            text = f"{look} {outfit if label == '전신·의상' else ''} {shot} {PHOTO_LOOK}"
+            if use_nano:
+                gen = lambda: hf_image(text + " Keep exactly the same person (face, age, body proportions) as in the reference photos.", src[:4], "3:4", nmodel)
+            else:
+                gen = lambda: soul_images(text, n=1, aspect="3:4", soul_id=soul_id)[0]
+            return lambda: {"label": label, "path": upload_from_url(gen(), f"photos/{did}/set_{i + 1}_{uuid.uuid4().hex[:6]}.jpg")}
         res = parallel([shot_fn(i, lb, sh) for i, (lb, sh) in enumerate(SET_SHOTS)], workers=len(SET_SHOTS))
         ref_set = []
         for (label, _), r in zip(SET_SHOTS, res):
@@ -2681,14 +2690,14 @@ def t_photo_set(t):
                 log(f"기준 사진 실패({label}): {r}")
             else:
                 ref_set.append(r)
-        log_cost("keyframe", "higgsfield", SOUL2, {"images": len(ref_set)}, note=f"기준 사진 세트: {name}", outcome="success")
+        log_cost("keyframe", "higgsfield", "nano-banana-pro" if use_nano else SOUL2, {"images": len(ref_set)}, note=f"기준 사진 세트: {name}", outcome="success")
     except Exception as e:
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
         raise
     rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "set_ready", "soul_id": soul_id, "ref_set": ref_set})
     rpc("agent_add_task", p_token=TOKEN, p={"kind": "coord_review", "payload": {"design_id": did, "entry_id": d.get("entry_id"), "series_id": d.get("series_id")}})
     notify(f"{name} 얼굴 고정 완료", f"같은 얼굴 기준 사진 {len(ref_set)}장을 바이블 탭에서 확인하고 적용해 주세요")
-    return f"{name} Soul ID + 기준 사진 {len(ref_set)}장"
+    return f"{name} {'나노바나나 프로 참고 사진 고정' if use_nano else 'Soul ID'} + 기준 사진 {len(ref_set)}장"
 
 
 @task("voice_design")
