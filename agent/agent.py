@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.19.1"
+VERSION = "1.19.2"
 
 import base64
 import glob
@@ -2560,8 +2560,13 @@ def t_photo_design(t):
         # 한글 묘사는 작가실이 영어 프롬프트로 옮긴 뒤에 만든다(사진 모델은 영어가 정확)
         if d.get("prompt_en"):
             d["prompt"] = d["prompt_en"]
-        elif (t.get("attempts") or 1) < 6:
-            raise Retry(90, "작가실이 한글 묘사를 영어 프롬프트로 옮기는 중이라 잠시 뒤에 만듭니다")
+        else:   # 기다리지 않고 바로 영어로 옮긴다(몇 초)
+            progress(f"{name}: 한글 묘사를 영어 프롬프트로 바로 옮기는 중")
+            txt, _ = claude("claude-sonnet-5-5", "드라마 인물·장소 사진 생성용 영어 프롬프트로 옮긴다. 눈에 보이는 특징만, 4~6문장, 이름·브랜드·한글 금지. 답은 <json>{\"prompt_en\": \"\"}</json>",
+                            d.get("prompt") or "", max_tokens=1200, stage="other", note=f"사진용 영어 프롬프트: {name}")
+            en = clean_en(txt)
+            if en:
+                d["prompt"] = en
     try:
         if d["category"] == "character":
             progress(f"{name} 실사 인물 사진 후보를 만드는 중 (Soul 2)")

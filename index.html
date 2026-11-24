@@ -337,7 +337,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.19.1"
+VERSION = "1.19.2"
 
 import base64
 import glob
@@ -2887,8 +2887,13 @@ def t_photo_design(t):
         # 한글 묘사는 작가실이 영어 프롬프트로 옮긴 뒤에 만든다(사진 모델은 영어가 정확)
         if d.get("prompt_en"):
             d["prompt"] = d["prompt_en"]
-        elif (t.get("attempts") or 1) < 6:
-            raise Retry(90, "작가실이 한글 묘사를 영어 프롬프트로 옮기는 중이라 잠시 뒤에 만듭니다")
+        else:   # 기다리지 않고 바로 영어로 옮긴다(몇 초)
+            progress(f"{name}: 한글 묘사를 영어 프롬프트로 바로 옮기는 중")
+            txt, _ = claude("claude-sonnet-5-5", "드라마 인물·장소 사진 생성용 영어 프롬프트로 옮긴다. 눈에 보이는 특징만, 4~6문장, 이름·브랜드·한글 금지. 답은 <json>{\"prompt_en\": \"\"}</json>",
+                            d.get("prompt") or "", max_tokens=1200, stage="other", note=f"사진용 영어 프롬프트: {name}")
+            en = clean_en(txt)
+            if en:
+                d["prompt"] = en
     try:
         if d["category"] == "character":
             progress(f"{name} 실사 인물 사진 후보를 만드는 중 (Soul 2)")
@@ -5790,7 +5795,7 @@ function promptLine(e, c) {
 const RV = { pass: ['반영 확인', 'good'], fixed: ['프롬프트 보정', 'accent'], owner: ['대표 확인 필요', 'bad'] };
 const CHK = { ok: '✓', fixed: '🔧', missing: '✗', conflict: '⚠' };
 function reviewBox(e, c) {
-  if (!['character', 'location', 'background', 'prop', 'style', 'music'].includes(e.category)) return '';
+  if (!(e.category === 'character' || e.origin === 'sponsor')) return '';   // 감수는 인물·협찬만
   const bp = (S.bpTask || {})[c.id], cv = (S.cvTask || {})[e.id];
   const list = (S.reviews || {})[e.id] || [];
   const mine = list.find(r => r.version_id === c.id);
@@ -5849,7 +5854,7 @@ document.addEventListener('click', ev => {
   if (gt) { ev.preventDefault(); document.querySelector(`[data-card="${gt.dataset.goto}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
   const ra = ev.target.closest('[data-rvall], [data-rvbad]');
   if (ra) { ev.preventDefault();
-    const ids = ra.dataset.rvbad ? ra.dataset.rvbad.split(',') : (S.bibleEntries || []).filter(e => ['character', 'location', 'background', 'prop', 'style', 'music'].includes(e.category) && e.essential !== false && (S.bibleCur || {})[e.id]).map(e => e.id);
+    const ids = ra.dataset.rvbad ? ra.dataset.rvbad.split(',') : (S.bibleEntries || []).filter(e => (e.category === 'character' || e.origin === 'sponsor') && (S.bibleCur || {})[e.id]).map(e => e.id);
     const todo = ids.filter(id => (S.bibleCur || {})[id] && !['queued', 'running'].includes((S.cvTask || {})[id]?.status));
     if (!todo.length) return toast('감수할 항목이 없습니다(이미 감수 대기·진행 중)');
     if (!confirm(`코디네이터가 ${todo.length}개 항목을 ${ra.dataset.rvbad ? '다시' : '처음부터'} 감수합니다(기준 사진 포함, 항목당 수십 원).`)) return;
@@ -6176,7 +6181,7 @@ async function viewBible(main) {
         const tr = ds.filter(x => x.e.category === 'character' && x.d.status === 'ready' && designPicks(x.d).length).length;
         return `${tr ? `<button class="btn small" data-bulktrain="1" title="사진을 고르지 않은 인물은 코디네이터가 추천한 사진으로 얼굴 학습을 시작합니다">코디네이터 추천으로 학습 시작 (${tr})</button>` : ''}
           ${ap ? `<button class="btn small primary" data-bulkapply="1" title="얼굴 학습이 끝난 기준 사진 세트(와 고르지 않은 장소·소품의 추천 사진)를 한 번에 바이블에 적용합니다">기준 사진 모두 바이블에 적용 (${ap})</button>` : ''}`; })()}
-      <button class="btn small primary" data-rvall="1" title="적용 중인 모든 항목을 묘사·영어 프롬프트·대본·기준 사진(사진과 프롬프트 일치, 글자·이름표)까지 다시 감수합니다">전체 감수하기</button></span></div>
+      <button class="btn small primary" data-rvall="1" title="적용 중인 모든 항목을 묘사·영어 프롬프트·대본·기준 사진(사진과 프롬프트 일치, 글자·이름표)까지 다시 감수합니다">전체 감수하기 (인물·협찬)</button></span></div>
       ${(() => { const op = entries.filter(e => ['prop', 'location', 'background'].includes(e.category)); const ne = op.filter(e => e.essential === false).length;
         const ch = entries.filter(e => e.category === 'character').length, sp = op.length - ne;
         return `<p style="margin:6px 0 0;font-size:13px"><b>필수: 인물 ${ch}명${sp ? ` · 협찬 ${sp}개` : ''}</b>${ne ? ` · 묘사로 적용 ${ne}개(장소·소품·배경)` : ''} — 인물과 협찬만 사진을 만들어 고정하고 감수합니다. 장소·소품·배경은 사진 없이 묘사(영어 프롬프트)로 바로 적용되고, 제작하며 나온 장면 사진이 참고 사진으로 바이블에 쌓입니다.</p>`; })()}
@@ -6468,7 +6473,7 @@ async function viewBible(main) {
     toast(`${list.length}개 적용 · 사진 후보 ${n}건 만드는 중`); go('bible');
   });
   ($('#bcoord') || {}).onclick = guard(async () => {
-    const act = entries.filter(e => ['character', 'location', 'background', 'prop', 'style', 'music'].includes(e.category) && e.essential !== false && cur(e.id))
+    const act = entries.filter(e => (e.category === 'character' || e.origin === 'sponsor') && cur(e.id))
       .filter(e => !['queued', 'running'].includes((S.cvTask || {})[e.id]?.status));
     if (!act.length) return toast('감수할 항목이 없습니다(이미 감수 대기·진행 중)');
     if (!confirm(`코디네이터가 적용 중인 ${act.length}개 항목을 처음부터 다시 감수합니다(묘사·영어 프롬프트·대본·기준 사진, 항목당 수십 원). 이상이 있는 항목은 카드에 표시되고 위에 모아 보여 드립니다.`)) return;
