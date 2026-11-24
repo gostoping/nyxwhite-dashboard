@@ -333,7 +333,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.17.1"
+VERSION = "1.17.2"
 
 import base64
 import glob
@@ -2821,9 +2821,9 @@ def t_photo_design(t):
         raise RuntimeError("사진 디자인 요청을 찾지 못했습니다")
     name = d["entry_name"]
     # 순서: 그 항목의 영어 프롬프트 반영·코디네이터 감수가 진행 중이면 그게 끝난 뒤에 만든다
-    if d.get("prompt_pending") and (t.get("attempts") or 1) < 12:
+    if d.get("prompt_pending") and (t.get("attempts") or 1) < 10:   # 최대 약 3분만 기다리고, 그 뒤엔 지금 프롬프트로 만든다
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "queued"})
-        raise Retry(45, "바이블 영어 프롬프트 반영·감수가 먼저 끝나야 해서 기다리는 중(끝나면 바로 만듭니다)")
+        raise Retry(20, "바이블 영어 프롬프트 반영이 끝나길 기다리는 중(최대 3분, 끝나면 바로 만듭니다)")
     if d.get("use_bible") and d.get("prompt_en"):   # 대표가 묘사 칸을 손대지 않았으면 만들 때의 최신 영어 프롬프트
         d["prompt"] = d["prompt_en"]
     lr = d.get("last_review") or {}   # 지난 후보에서 코디네이터가 찾은 문제를 이번 프롬프트에 반영
@@ -6464,6 +6464,7 @@ async function openPhotoDesign(entry, cur, fresh) {
   }
   const busy = ['queued', 'training'].includes(d.status);
   await loadEta();
+  if (!S.agentsNow) S.agentsNow = await q(S.sb.from('agent_status').select('device_id,version,info,last_seen_at,state,current_job,devices(name)')).catch(() => []);
   const [pl, pk] = PD_STATUS[d.status] || [d.status, ''];
   // 코디네이터 사진 확인(프롬프트와 일치·글자/이름표·다른 사람): 장마다 표시
   S.designs = S.designs || {}; S.designs[entry.id] = d;
@@ -6472,6 +6473,13 @@ async function openPhotoDesign(entry, cur, fresh) {
     return r.ok ? `<span class="pdrv ok" title="프롬프트와 일치">✓ 일치</span>` : `<span class="pdrv bad" title="${esc((r.issues || []).join(' / '))}">⚠ ${esc(r.text ? `글자 '${r.text}'` : (r.issues || [])[0] || '문제')}</span>`; };
   const img = (x, sel) => `<label class="pdimg ${sel ? 'pick' : ''} ${rvOf(x.path) && !rvOf(x.path).ok ? 'rvbad' : ''}">${urls[x.path] ? `<img src="${esc(urls[x.path])}" loading="lazy">` : '<span class="ph">사진</span>'}
     ${sel ? `<input type="checkbox" data-pdc="${esc(x.path)}" data-b="${esc(x.bucket || 'takes')}">` : ''}${x.label ? `<span>${esc(x.label)}</span>` : ''}${rvBadge(x)}</label>`;
+  // 이 사진 디자인을 맡은 작업(Higgsfield 후보·얼굴 학습)의 실제 상태: 대기 중인지, Higgsfield 차례 기다리는지, 실패했는지
+  const [pdTask] = busy || d.status === 'failed' ? await q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,error,attempts,started_at,created_at,not_before,devices(name)')
+    .in('kind', ['photo_design', 'photo_set']).eq('payload->>design_id', d.id).order('created_at', { ascending: false }).limit(1)).catch(() => []) : [];
+  const pdState = !pdTask ? '' : pdTask.status === 'queued'
+      ? (pdTask.not_before && new Date(pdTask.not_before) > Date.now() ? `잠시 대기: ${esc(pdTask.progress || '')}` : `에이전트가 집어 가길 기다리는 중(요청 ${agoText(pdTask.created_at)})${stuckWhy(pdTask) ? ` — <b>${esc(stuckWhy(pdTask).why)}</b> <button class="btn small" data-agupdate="1">에이전트 지금 업데이트</button>` : ''}`)
+    : pdTask.status === 'running' ? `${esc(pdTask.progress || '처리 중')}${pdTask.devices?.name ? ` · ${esc(pdTask.devices.name)}` : ''}`
+    : pdTask.status === 'failed' ? `실패: ${esc(explainFail(pdTask.kind, pdTask.error).what)} ${esc(explainFail(pdTask.kind, pdTask.error).how)}` : '';
   const pdCheck = await q(S.sb.from('pipeline_tasks').select('id,status').eq('kind', 'coord_review').eq('payload->>design_id', d.id).order('created_at', { ascending: false }).limit(1)).catch(() => []);
   const rvLine = ['ready', 'set_ready'].includes(d.status) ? (d.review ? `<div class="msg ${(d.review.items || []).some(r => !r.ok) ? 'warn' : ''}" style="margin:6px 0">코디네이터 확인: ${esc(d.review.summary || '')}
       ${(d.review.items || []).filter(r => !r.ok).map(r => `<div class="quiet">사진 ${(d.review.items || []).indexOf(r) + 1}: ${esc((r.issues || []).join(' / '))}${r.text ? ` (글자: ${esc(r.text)})` : ''}</div>`).join('')}
@@ -6483,8 +6491,10 @@ async function openPhotoDesign(entry, cur, fresh) {
   box.innerHTML = `<div class="vdbox"><div class="row"><b>${isChar ? '실사 사진·얼굴 고정' : '사진 디자인'}</b>${pill(pl, pk)}
       <button class="btn small" id="pdNew-${entry.id}" style="margin-left:auto">새로 만들기</button></div>
     ${busy ? `<p><span class="spin"></span>${d.status === 'training' ? '고른 사진으로 얼굴을 학습하고 같은 얼굴의 기준 사진을 만드는 중입니다.' : 'Higgsfield에서 후보를 만드는 중입니다.'} 끝나면 알림이 옵니다.
-      <br><span class="quiet">⏱ ${esc(etaText(d.status === 'training' ? 'photo_set' : 'photo_design', d.created_at, 'running'))}</span></p>` : ''}
-    ${d.status === 'failed' ? `<div class="msg err">${esc(d.error || '실패')}</div>` : ''}
+      <br><span class="quiet">⏱ ${esc(etaText(d.status === 'training' ? 'photo_set' : 'photo_design', pdTask?.started_at || d.created_at, pdTask?.status || 'running'))}</span>
+      ${pdState ? `<br><span class="quiet">지금 상태: ${pdState}</span>` : ''}</p>` : ''}
+    ${d.status === 'failed' ? `<div class="msg err">${esc(explainFail(pdTask?.kind || 'photo_design', d.error || pdTask?.error).what)} ${esc(explainFail(pdTask?.kind || 'photo_design', d.error || pdTask?.error).how)}
+      <details><summary class="quiet">원인 원문</summary><div class="quiet">${esc(d.error || pdTask?.error || '기록 없음')}</div></details></div>` : ''}
     ${d.status === 'ready' ? `<p class="quiet" style="margin:4px 0">${isChar ? '같은 사람으로 쓸 사진을 1~4장 고르세요(여러 장이면 얼굴이 더 안정적). 사진을 누르면 크게 보고, 크게 본 채로 고를 수 있습니다. 고르기는 체크칸.' : '바이블에 넣을 사진을 고르세요.'}</p>
       ${rvLine}<div class="pdgrid">${(d.previews || []).map(x => img(x, true)).join('')}</div>
       <div class="row" style="margin-top:8px"><button class="btn small primary" id="pdPick-${entry.id}">${isChar ? '이 얼굴로 학습 + 기준 사진 만들기' : '바이블에 적용'}</button>
@@ -7759,6 +7769,8 @@ function explainFail(kind, err) {
   if (/429|rate.?limit|overloaded|529|too many/i.test(e)) return R('AI 서비스가 잠시 붐빕니다.', '몇 분 뒤 다시 시도하세요. 보통 그대로 해결됩니다.', ['retry']);
   if (/만들지 못했|JSON|잘림|비어 있|형식/.test(e)) return R('AI가 답을 정해진 형식으로 주지 못했습니다(답이 깨졌거나 비었음).', '대부분 다시 시도하면 해결됩니다. 두 번 이상 같으면 대본이 너무 길거나 특이한 형식이 아닌지 확인하세요.', ['retry']);
   if (/시간 초과|timeout|timed out/i.test(e)) return R('시간 안에 끝나지 않았습니다.', '다시 시도하세요. 계속되면 에이전트 탭에서 그 컴퓨터를 재시작하세요.', ['retry', 'agents']);
+  if (/생성 시간 초과/.test(e)) return R('Higgsfield가 15분 안에 사진을 만들지 못했습니다(Higgsfield 쪽 대기열이 밀림).', '잠시 뒤 "새로 만들기"를 누르세요. 계속되면 Higgsfield 사이트에서 서비스 상태·잔액을 확인하세요.', ['retry']);
+  if (/요청 실패 (4\d\d|5\d\d)/.test(e) && /인물 사진|사진|얼굴 학습/.test(e)) return R('Higgsfield가 요청을 거절했습니다(' + (e.match(/요청 실패 (\d+)/) || [])[1] + ').', '401·403이면 설정 → API 키의 Higgsfield 키를, 402면 잔액을 확인하세요. 422면 프롬프트·사진 형식 문제라 "새로 만들기"로 다시 해 보세요.', ['settings', 'retry']);
   if (/nsfw|safety|policy|moderation/i.test(e)) return R('생성 서비스가 장면 내용을 안전 규정 위반으로 판단해 거절했습니다.', '컷 카드의 "감독에게 수정 요청"으로 노출·폭력 표현을 순화해 달라고 한 뒤 다시 생성하세요.', ['production']);
   if (/ffmpeg|영상 도구/.test(e)) return R('컴퓨터의 영상 도구(ffmpeg)에 문제가 있습니다.', '에이전트 탭에서 그 컴퓨터를 재시작한 뒤 다시 시도하세요.', ['agents', 'retry']);
   if (/폴더가 이 컴퓨터에 없|찾지 못했습니다: \/|No such file/.test(e)) return R('파일이 이 작업을 받은 컴퓨터에 없습니다.', '완성본·원본이 있는 컴퓨터(보통 집 PC)가 켜져 있는지 확인하고 다시 시도하세요.', ['agents', 'retry']);

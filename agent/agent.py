@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.17.1"
+VERSION = "1.17.2"
 
 import base64
 import glob
@@ -2498,9 +2498,9 @@ def t_photo_design(t):
         raise RuntimeError("사진 디자인 요청을 찾지 못했습니다")
     name = d["entry_name"]
     # 순서: 그 항목의 영어 프롬프트 반영·코디네이터 감수가 진행 중이면 그게 끝난 뒤에 만든다
-    if d.get("prompt_pending") and (t.get("attempts") or 1) < 12:
+    if d.get("prompt_pending") and (t.get("attempts") or 1) < 10:   # 최대 약 3분만 기다리고, 그 뒤엔 지금 프롬프트로 만든다
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "queued"})
-        raise Retry(45, "바이블 영어 프롬프트 반영·감수가 먼저 끝나야 해서 기다리는 중(끝나면 바로 만듭니다)")
+        raise Retry(20, "바이블 영어 프롬프트 반영이 끝나길 기다리는 중(최대 3분, 끝나면 바로 만듭니다)")
     if d.get("use_bible") and d.get("prompt_en"):   # 대표가 묘사 칸을 손대지 않았으면 만들 때의 최신 영어 프롬프트
         d["prompt"] = d["prompt_en"]
     lr = d.get("last_review") or {}   # 지난 후보에서 코디네이터가 찾은 문제를 이번 프롬프트에 반영
