@@ -192,6 +192,8 @@
   .ex { display: block; font-size: 12.5px; color: var(--quiet); margin-top: 2px; }
   .ex::before { content: '↳ '; }
   .tonebox { display: grid; gap: 8px; padding: 8px 10px; margin: 6px 0; border: 1px dashed var(--line); border-radius: 8px; font-size: 13px; }
+  .tooltab td { vertical-align: top; padding: 6px 8px; } .tooltab td:first-child { white-space: nowrap; color: var(--quiet); }
+  .tooltab select { max-width: 340px; }
   /* 편집실 */
   .ed-empty { text-align: center; padding: 30px 16px; } .ed-empty .row { justify-content: center; }
   .ed-top { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; }
@@ -306,7 +308,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.13.0"
+VERSION = "1.13.1"
 
 import base64
 import glob
@@ -1508,6 +1510,47 @@ def el_sts(path, voice_id, model="eleven_multilingual_sts_v2"):
         raise RuntimeError(f"목소리 바꾸기 실패 {e.code}: {e.read()[:200]!r}") from None
 
 
+def diarized_swap(voice_wav, lines, speakers, secs, work, out_wav, cut, ep):
+    """여러 명이 말하는 컷: 받아쓰기로 화자별 말한 구간을 찾고, 구간마다 그 인물 목소리로 바꿔 같은 시간에 다시 놓는다.
+    말하지 않는 구간의 현장음은 원래 소리 그대로. 화자 연결은 대본의 첫 등장 순서 = 받아쓰기의 첫 등장 순서."""
+    try:
+        progress(f"{cut['code']} 여러 명 대사: 화자별 구간을 찾는 중")
+        segs = stt_speakers(voice_wav)
+    except Exception as ex:
+        log(f"화자 구분 실패(이어 붙이기로): {ex}")
+        return 0
+    order_script = list(dict.fromkeys(ln.get("speaker") for ln in lines if ln.get("speaker")))
+    order_heard = list(dict.fromkeys(s["speaker"] for s in segs))
+    if not segs or len(order_heard) > len(order_script) + 1:
+        return 0
+    m = {h: order_script[i] for i, h in enumerate(order_heard) if i < len(order_script)}
+    pieces = []
+    for k, sg in enumerate(segs):
+        who = m.get(sg["speaker"])
+        vid = speakers.get(who)
+        if not vid:
+            continue
+        a, b = max(0.0, sg["s"] - 0.05), min(secs, sg["e"] + 0.12)
+        src = os.path.join(work, f"seg{k}.wav")
+        ff("-i", voice_wav, "-ss", f"{a:.2f}", "-to", f"{b:.2f}", "-ac", "1", "-ar", "44100", src)
+        conv = os.path.join(work, f"seg{k}.mp3")
+        with open(conv, "wb") as f:
+            f.write(el_sts(src, vid))
+        pieces.append((conv, a, b))
+    if not pieces:
+        return 0
+    mute = ",".join(f"volume=enable='between(t,{a:.2f},{b:.2f})':volume=0" for _, a, b in pieces)
+    inputs, filt = ["-i", voice_wav], [f"[0:a]{mute},aformat=channel_layouts=stereo[bg]"]
+    for k, (p, a, b) in enumerate(pieces, 1):
+        inputs += ["-i", p]
+        filt.append(f"[{k}:a]atrim=0:{b - a + 0.05:.2f},adelay={int(a * 1000)}|{int(a * 1000)},aformat=channel_layouts=stereo[v{k}]")
+    mix = "[bg]" + "".join(f"[v{k}]" for k in range(1, len(pieces) + 1)) + f"amix=inputs={len(pieces) + 1}:normalize=0,apad,atrim=0:{secs}[out]"
+    ff(*inputs, "-filter_complex", ";".join(filt) + ";" + mix, "-map", "[out]", "-ar", "48000", "-c:a", "pcm_s16le", out_wav)
+    log_cost("audio", "elevenlabs", "speech-to-speech", {"seconds": round(sum(b - a for _, a, b in pieces), 1)}, episode_id=ep,
+             scene_no=cut.get("scene_no"), cut_id=cut.get("code"), outcome="success", note="화자별 목소리 바꾸기")
+    return len(pieces)
+
+
 def apply_dialogue_tool(ctx, gen, cut, files, tmp, ep):
     """설정 '대사 도구'가 ElevenLabs면 영상의 대사를 바이블 인물 목소리로 바꿔 입힌다.
     - 영상에 소리가 있고 화자가 한 명: 목소리 바꾸기(타이밍·감정 유지, 음색만 교체)
@@ -1540,6 +1583,8 @@ def apply_dialogue_tool(ctx, gen, cut, files, tmp, ep):
             how = "목소리 바꾸기"
             log_cost("audio", "elevenlabs", "speech-to-speech", {"seconds": secs}, episode_id=ep, scene_no=cut.get("scene_no"), cut_id=cut.get("code"),
                      outcome="success", note="대사 목소리 바꾸기")
+        elif files.get("voice") and (segs := diarized_swap(files["voice"], lines, speakers, secs, work, out_wav, cut, ep)):
+            how = f"화자별 목소리 바꾸기 {segs}구간"
         else:
             progress(f"{cut['code']} 대사를 바이블 목소리로 읽혀 이어 붙이는 중(ElevenLabs)")
             parts, t0 = [], 0.3
@@ -1588,6 +1633,35 @@ def apply_dialogue_tool(ctx, gen, cut, files, tmp, ep):
         return tmp
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def stt_speakers(path, model="scribe_v1"):
+    """받아쓰기 + 화자 구분: [{speaker, s, e, text}] 말한 구간 목록(같은 화자 연속 단어는 한 구간)."""
+    boundary = "----nyx" + uuid.uuid4().hex
+    with open(path, "rb") as f:
+        data = f.read()
+    def part(name, value):
+        return f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+    body = part("model_id", model) + part("language_code", "kor") + part("diarize", "true") + part("timestamps_granularity", "word") + \
+        (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="a.wav"\r\nContent-Type: audio/wav\r\n\r\n').encode() + data + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request("https://api.elevenlabs.io/v1/speech-to-text", data=body, method="POST",
+                                 headers={"xi-api-key": el_key(), "Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            d = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"화자 구분 받아쓰기 실패 {e.code}: {e.read()[:160]!r}") from None
+    segs = []
+    for w in d.get("words") or []:
+        if w.get("type", "word") != "word":
+            continue
+        spk, s, e = w.get("speaker_id") or "speaker_0", float(w.get("start") or 0), float(w.get("end") or 0)
+        if segs and segs[-1]["speaker"] == spk and s - segs[-1]["e"] < 0.8:
+            segs[-1]["e"] = e
+            segs[-1]["text"] += " " + (w.get("text") or "")
+        else:
+            segs.append({"speaker": spk, "s": s, "e": e, "text": w.get("text") or ""})
+    return segs
 
 
 def stt_words(path, model="scribe_v1"):
@@ -6735,13 +6809,23 @@ async function renderProdSettings() {
   const meta = await q(S.sb.from('app_secret_meta').select('name')).catch(() => []);
   const has = n => meta.some(m => m.name === n);
   const hasHf = has('higgsfield_key_id') && has('higgsfield_key_secret'), hasEl = has('elevenlabs_api_key');
+  // Higgsfield 영상 모델 전체(Explore 목록 2026-11). 입력 형식을 확인해 연결한 것만 고를 수 있다
+  const HF_VIDEO = [['seedance-2.5', 'Seedance 2.5', '영상+소리, 480p~1080p', true], ['kling-4.0', 'Kling 4.0', '영상만(소리 없음), 720p~1080p', true],
+    ['seedance-2.0', 'Seedance 2.0', '', false], ['kling-3.0', 'Kling 3.0', '', false], ['minimax-h3', 'MiniMax H3', '', false], ['wan-3.0-prime', 'Wan 3.0 Prime', '', false],
+    ['wan-3.0', 'Wan 3.0', '', false], ['wan-2.7', 'Wan 2.7', '', false], ['ltx-2.5-fast', 'LTX 2.5 Fast', '', false], ['ltx-2.5-pro', 'LTX 2.5 Pro', '', false],
+    ['grok-video-1.5', 'Grok Imagine Video 1.5', '', false], ['cinema-studio-4.0', 'Cinema Studio 4.0', '', false]];
   const TOOLS = {
-    video: [['seedance-2.5', 'Higgsfield · Seedance 2.5 (영상+소리 함께, 480p~1080p)', hasHf], ['kling-4.0', 'Higgsfield · Kling 4.0 (영상만, 720p~1080p)', hasHf]],
+    video: HF_VIDEO.map(([v, n, d, ok]) => [v, `Higgsfield · ${n}${d ? ` (${d})` : ''}`, hasHf && ok, ok ? '' : ' — 연결 준비 중']),
     dialogue: [['higgsfield', 'Higgsfield (영상 모델이 함께 만든 목소리)', hasHf], ['elevenlabs', 'ElevenLabs (바이블 인물 목소리로 바꿔 입힘)', hasEl]],
     music: [['elevenlabs', 'ElevenLabs Music (편집실에서 바로 생성)', hasEl], ['upload', '직접 올리기 (Suno 등에서 받은 파일)', true]],
+    image: [['auto', 'Higgsfield · Nano Banana Pro (자동 탐색, 없으면 Grok)', hasHf], ['xai/grok-imagine-image-2.0', 'Higgsfield · Grok Imagine 2.0', hasHf], ['custom', '직접 경로 입력', hasHf]],
+    mmodel: [['music_v1', 'music_v1', hasEl], ['music_v2', 'music_v2', hasEl], ['music_v2_5', 'music_v2_5', hasEl]],
+    claude: [['claude-opus-5-5', 'Claude Opus 5.5 (가장 정확)', has('anthropic_api_key')], ['claude-sonnet-5-5', 'Claude Sonnet 5.5 (빠르고 저렴)', has('anthropic_api_key')], ['claude-haiku-5-5', 'Claude Haiku 5.5 (가장 저렴)', has('anthropic_api_key')]],
   };
-  const toolSel = (id, kind, cur) => `<select id="${id}" style="width:auto">${TOOLS[kind].map(([v, l, ok]) =>
-    `<option value="${v}" ${v === cur ? 'selected' : ''} ${ok ? '' : 'disabled'}>${l}${ok ? '' : ' — API 키 미등록'}</option>`).join('')}</select>`;
+  const toolSel = (id, kind, cur) => `<select id="${id}" style="width:auto;max-width:100%">${TOOLS[kind].map(([v, l, ok, why]) =>
+    `<option value="${v}" ${v === cur ? 'selected' : ''} ${ok ? '' : 'disabled'}>${l}${ok ? '' : (why || ' — API 키 미등록')}</option>`).join('')}</select>`;
+  const imgCur = !G.image_model || G.image_model === 'auto' ? 'auto' : G.image_model === 'xai/grok-imagine-image-2.0' ? G.image_model : 'custom';
+  const nm = (kind, v) => (TOOLS[kind].find(x => x[0] === v) || [, v])[1];
   box.innerHTML = `<b>제작</b>
     <p class="quiet" style="margin:4px 0 8px">영상은 배경음악 없이 대사·현장음만 넣어 만들고, 씬 폴더에 <b>영상(무음) / 대사·현장음 / 배경음악 / 원본</b>으로 따로 저장합니다.</p>
     <div class="row" style="align-items:flex-end">
@@ -6750,16 +6834,24 @@ async function renderProdSettings() {
       <div style="width:150px"><label>화면 비율</label><select id="gAsp">${['9:16', '16:9', '3:4', '1:1', '4:3', '21:9'].map(a => opt(a, G.aspect_ratio || '9:16', a + (a === '9:16' ? ' (세로·숏폼)' : a === '16:9' ? ' (가로)' : ''))).join('')}</select></div>
     </div>
     <label class="ed-chk" style="margin-top:10px"><input type="checkbox" id="gPrep" ${G.auto_prep !== false ? 'checked' : ''}> 컷 설계가 끝나면 장면 사진·대사 미리 듣기를 자동으로 준비</label>
-    <label>장면 사진 모델 (Higgsfield 경로)</label><input id="gImg" value="${esc(G.image_model || '')}" placeholder="auto = Nano Banana Pro 자동 탐색 (없으면 Grok Imagine)">
-    <p class="quiet" style="margin:2px 0 0">기본(auto)은 Nano Banana Pro: 바이블 기준 사진(인물당 최대 3장, 모두 합쳐 8장)을 참고로 장면을 그립니다. 에이전트가 내 Higgsfield 키로 경로를 스스로 찾고, 못 찾으면 Grok Imagine 2.0을 씁니다. 바이블 인물 사진은 Soul 2로 만듭니다.</p>
-    <div class="row" style="align-items:flex-end;margin-top:6px">
-      <div><label>영상 모델</label>${toolSel('gVid', 'video', G.video_model || 'seedance-2.5')}</div>
-      <div><label>대사(목소리) 도구</label>${toolSel('gDlg', 'dialogue', G.dialogue_tool || 'higgsfield')}</div>
-      <div><label>배경음악 도구</label>${toolSel('gMus', 'music', G.music_tool || 'elevenlabs')}</div></div>
+    <h4 style="margin:14px 0 4px">모델·도구 — 지금 고정된 것과 바꾸기</h4>
+    <p class="quiet" style="margin:0 0 6px">왼쪽이 지금 쓰고 있는 것, 오른쪽에서 바꿉니다. API 키가 등록된 도구만 고를 수 있고(설정 → API 키), "연결 준비 중"은 입력 형식을 확인해 연결하면 열립니다.</p>
+    <table class="tooltab">
+      <tr><th>분야</th><th>지금 고정</th><th>바꾸기</th></tr>
+      <tr><td>영상 생성</td><td><b>${esc(nm('video', G.video_model || 'seedance-2.5'))}</b></td><td>${toolSel('gVid', 'video', G.video_model || 'seedance-2.5')}</td></tr>
+      <tr><td>장면 사진(컷의 첫·끝 장면)</td><td><b>${esc(imgCur === 'custom' ? G.image_model : nm('image', imgCur))}</b></td><td>${toolSel('gImgSel', 'image', imgCur)}
+        <input id="gImg" value="${esc(imgCur === 'custom' ? G.image_model : '')}" placeholder="Higgsfield 모델 경로" ${imgCur === 'custom' ? '' : 'hidden'} style="margin-top:4px"></td></tr>
+      <tr><td>인물 실사 사진(바이블)</td><td><b>Higgsfield · Soul 2 + Soul ID</b></td><td class="quiet">고정(실사 인물 전용)</td></tr>
+      <tr><td>대사 목소리(완성본)</td><td><b>${esc(nm('dialogue', G.dialogue_tool || 'higgsfield'))}</b></td><td>${toolSel('gDlg', 'dialogue', G.dialogue_tool || 'higgsfield')}</td></tr>
+      <tr><td>대사 미리 듣기·소리 감수</td><td><b>ElevenLabs v3 읽기 · Scribe 받아쓰기</b></td><td class="quiet">고정</td></tr>
+      <tr><td>배경음악</td><td><b>${esc(nm('music', G.music_tool || 'elevenlabs'))}</b>${(G.music_tool || 'elevenlabs') === 'elevenlabs' ? ` · ${esc(G.music_model || 'music_v1')}` : ''}</td>
+        <td>${toolSel('gMus', 'music', G.music_tool || 'elevenlabs')} ${toolSel('gMm', 'mmodel', G.music_model || 'music_v1')}</td></tr>
+      <tr><td>작가실(대본·바이블)</td><td><b>${esc(nm('claude', G.claude_writer || 'claude-opus-5-5'))}</b></td><td>${toolSel('gCw', 'claude', G.claude_writer || 'claude-opus-5-5')}</td></tr>
+      <tr><td>감독(컷 설계)</td><td><b>${esc(nm('claude', G.claude_director || 'claude-opus-5-5'))}</b></td><td>${toolSel('gCd', 'claude', G.claude_director || 'claude-opus-5-5')}</td></tr>
+      <tr><td>감수자(영상·감정)</td><td><b>${esc(nm('claude', G.claude_reviewer || 'claude-sonnet-5-5'))}</b></td><td>${toolSel('gCr', 'claude', G.claude_reviewer || 'claude-sonnet-5-5')}</td></tr>
+    </table>
     <div id="gToolWarn"></div>
-    <p class="quiet" style="margin:2px 0 0">API 키가 등록된(연결된) 도구만 고를 수 있습니다. 새 도구의 API를 연결하면 여기에 추가됩니다.
-      <b>Higgsfield</b> 대사: 영상 모델이 입 모양에 맞춰 함께 만든 목소리를 그대로 씁니다. <b>ElevenLabs</b> 대사: 생성 뒤 바이블에 정한 인물 목소리로 바꿔 입힙니다(화자 1명 컷은 타이밍·감정을 살린 목소리 바꾸기, 소리가 없는 모델이나 여러 명 컷은 대사 읽기를 이어 붙임 — 입 모양과 어긋날 수 있음). 원래 소리는 씬 폴더에 '_원음'으로 남습니다.
-      대사 미리 듣기(컷 설계)는 대사 도구와 상관없이 ElevenLabs 목소리로 만듭니다.</p>
+    <p class="quiet" style="margin:4px 0 0"><b>대사 목소리</b> — Higgsfield: 영상 모델이 입 모양에 맞춰 함께 만든 목소리. ElevenLabs: 생성 뒤 바이블 인물 목소리로 바꿔 입힘(말하는 부분의 시간은 그대로 두고 음색만 바꿔 입 모양과 맞음, 원래 소리는 씬 폴더에 '_원음'으로 남음).</p>
     <label>감수 불합격 컷 자동 재시도 (대표가 미리 승인하는 횟수)</label><select id="gRetry" style="width:auto">
       ${[0, 1, 2].map(n => opt(String(n), String(G.max_auto_retries || 0), n ? `${n}번까지 자동 (감독 수정 → 사진·목소리 준비 → 다시 생성)` : '자동 재시도 안 함 (대표가 하나씩 다시 생성)')).join('')}</select>
     <p class="quiet" style="margin:2px 0 0">자동 재시도도 영상 생성 비용이 듭니다. 횟수를 넘으면 지금처럼 대표 승인을 기다립니다.</p>
@@ -6771,7 +6863,8 @@ async function renderProdSettings() {
     <button class="btn primary" id="gSave">제작 설정 저장</button>`;
   $('#gSave').onclick = guard(async () => {
     await q(S.sb.from('app_settings').upsert([
-      { key: 'generation', value: { ...G, resolution: $('#gRes').value, aspect_ratio: $('#gAsp').value, auto_prep: $('#gPrep').checked, image_model: $('#gImg').value.trim(), max_auto_retries: Number($('#gRetry').value), dialogue_tool: $('#gDlg').value, music_tool: $('#gMus').value, video_model: $('#gVid').value,
+      { key: 'generation', value: { ...G, resolution: $('#gRes').value, aspect_ratio: $('#gAsp').value, auto_prep: $('#gPrep').checked, image_model: $('#gImgSel').value === 'custom' ? $('#gImg').value.trim() : $('#gImgSel').value, music_model: $('#gMm').value,
+        claude_writer: $('#gCw').value, claude_director: $('#gCd').value, claude_reviewer: $('#gCr').value, max_auto_retries: Number($('#gRetry').value), dialogue_tool: $('#gDlg').value, music_tool: $('#gMus').value, video_model: $('#gVid').value,
         resolution: $('#gVid').value === 'kling-4.0' && $('#gRes').value === '480p' ? '720p' : $('#gRes').value }, updated_at: new Date().toISOString() },
       { key: 'storage', value: { ...ST, windows_folder: $('#gWin').value.trim(), mac_folder: $('#gMac').value.trim(), server: 'windows' }, updated_at: new Date().toISOString() }]));
     toast('제작 설정을 저장했습니다 (새로 설계하는 컷부터 적용)');
@@ -6781,6 +6874,8 @@ async function renderProdSettings() {
       ? '<div class="msg warn" style="margin:6px 0 0">Kling 4.0은 소리를 만들지 않아(문서 기준) 대사가 비게 됩니다. 대사 도구를 ElevenLabs로 바꾸세요.</div>'
       : $('#gVid').value === 'kling-4.0' && $('#gRes').value === '480p' ? '<div class="msg warn" style="margin:6px 0 0">Kling 4.0은 720p부터라 저장하면 720p로 바뀝니다.</div>' : ''; };
   ['#gVid', '#gDlg', '#gRes'].forEach(s => { const el = $(s); if (el) el.onchange = warn; }); warn();
+  $('#gImgSel').onchange = () => { $('#gImg').hidden = $('#gImgSel').value !== 'custom'; };
+  $('#gMus').onchange = () => { $('#gMm').hidden = $('#gMus').value !== 'elevenlabs'; }; $('#gMus').onchange();
   $('#gCheck').onclick = guard(async () => {
     const v = await q(S.sb.from('bible_versions').select('voice_id').eq('status', 'active').not('voice_id', 'is', null).limit(1));
     await q(S.sb.from('pipeline_tasks').insert({ kind: 'api_check', payload: { voice_id: v[0]?.voice_id || null } }));
@@ -8129,6 +8224,7 @@ const HELP = {
 <li><b>2단계 인증</b> — 꼭 켜 두세요.</li>
 <li><b>API 키</b> — Claude·Higgsfield·ElevenLabs. 연결 시험은 무료로 키만 확인. 키는 채팅에 붙이지 마세요.<span class="ex">예: Higgsfield "연결됨" 초록</span></li>
 <li><b>제작</b> — 해상도(처음엔 480p), 화면 비율, 장면 사진 모델(auto = Nano Banana Pro), 자동 재시도(0~2), 보관 폴더.<span class="ex">예: 480p · 9:16 · auto · 자동 재시도 1번</span></li>
+<li><b>모델·도구 표</b>(제작 칸) — 분야마다 <b>지금 고정된 것</b>(왼쪽)과 <b>바꾸기</b>(오른쪽). 영상 생성·장면 사진·대사 목소리·배경음악·작가실·감독·감수자 모델을 고릅니다. Higgsfield 영상 모델은 전체 목록이 보이고, 입력 형식을 확인해 연결한 것만 고를 수 있습니다("연결 준비 중"은 회색).<span class="ex">예: 영상 Seedance 2.5 · 장면 사진 Nano Banana Pro · 대사 ElevenLabs · 배경음악 ElevenLabs Music(music_v1) · 감독 Opus 5.5</span></li>
 <li><b>영상 모델 · 대사 도구 · 배경음악 도구</b>(제작 칸) — <b>API 키가 등록된 것 중에서</b> 고릅니다(키 없는 도구는 회색). 영상 모델은 Higgsfield 안의 Seedance 2.5 / Kling 4.0.<span class="ex">예: 영상 Seedance 2.5 · 대사 Higgsfield(영상과 함께 만든 목소리) · 배경음악 ElevenLabs Music</span><span class="ex">예: 영상 Kling 4.0 · 대사 ElevenLabs(Kling은 소리가 없어 바이블 목소리로 입힘) · 배경음악 직접 올리기(Suno)</span></li>
 <li><b>실제 연결 점검</b>(제작 칸) — 진짜 호출을 한 번씩(약 100~300원) 해서 결과를 알려 줍니다. 집에서 에이전트를 켠 뒤 처음 한 번.<span class="ex">예: "OK 장면 사진 모델 경로: google/nano-banana-pro/edit"</span></li>
 <li><b>작가실</b> — 정리본 자동 확정. PPL 수정본은 켜져 있어도 항상 대표 확정.<span class="ex">예: 켬 → 정리본이 오면 바로 감독까지</span></li>

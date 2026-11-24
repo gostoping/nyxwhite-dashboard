@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.13.0"
+VERSION = "1.13.1"
 
 import base64
 import glob
@@ -1212,6 +1212,47 @@ def el_sts(path, voice_id, model="eleven_multilingual_sts_v2"):
         raise RuntimeError(f"목소리 바꾸기 실패 {e.code}: {e.read()[:200]!r}") from None
 
 
+def diarized_swap(voice_wav, lines, speakers, secs, work, out_wav, cut, ep):
+    """여러 명이 말하는 컷: 받아쓰기로 화자별 말한 구간을 찾고, 구간마다 그 인물 목소리로 바꿔 같은 시간에 다시 놓는다.
+    말하지 않는 구간의 현장음은 원래 소리 그대로. 화자 연결은 대본의 첫 등장 순서 = 받아쓰기의 첫 등장 순서."""
+    try:
+        progress(f"{cut['code']} 여러 명 대사: 화자별 구간을 찾는 중")
+        segs = stt_speakers(voice_wav)
+    except Exception as ex:
+        log(f"화자 구분 실패(이어 붙이기로): {ex}")
+        return 0
+    order_script = list(dict.fromkeys(ln.get("speaker") for ln in lines if ln.get("speaker")))
+    order_heard = list(dict.fromkeys(s["speaker"] for s in segs))
+    if not segs or len(order_heard) > len(order_script) + 1:
+        return 0
+    m = {h: order_script[i] for i, h in enumerate(order_heard) if i < len(order_script)}
+    pieces = []
+    for k, sg in enumerate(segs):
+        who = m.get(sg["speaker"])
+        vid = speakers.get(who)
+        if not vid:
+            continue
+        a, b = max(0.0, sg["s"] - 0.05), min(secs, sg["e"] + 0.12)
+        src = os.path.join(work, f"seg{k}.wav")
+        ff("-i", voice_wav, "-ss", f"{a:.2f}", "-to", f"{b:.2f}", "-ac", "1", "-ar", "44100", src)
+        conv = os.path.join(work, f"seg{k}.mp3")
+        with open(conv, "wb") as f:
+            f.write(el_sts(src, vid))
+        pieces.append((conv, a, b))
+    if not pieces:
+        return 0
+    mute = ",".join(f"volume=enable='between(t,{a:.2f},{b:.2f})':volume=0" for _, a, b in pieces)
+    inputs, filt = ["-i", voice_wav], [f"[0:a]{mute},aformat=channel_layouts=stereo[bg]"]
+    for k, (p, a, b) in enumerate(pieces, 1):
+        inputs += ["-i", p]
+        filt.append(f"[{k}:a]atrim=0:{b - a + 0.05:.2f},adelay={int(a * 1000)}|{int(a * 1000)},aformat=channel_layouts=stereo[v{k}]")
+    mix = "[bg]" + "".join(f"[v{k}]" for k in range(1, len(pieces) + 1)) + f"amix=inputs={len(pieces) + 1}:normalize=0,apad,atrim=0:{secs}[out]"
+    ff(*inputs, "-filter_complex", ";".join(filt) + ";" + mix, "-map", "[out]", "-ar", "48000", "-c:a", "pcm_s16le", out_wav)
+    log_cost("audio", "elevenlabs", "speech-to-speech", {"seconds": round(sum(b - a for _, a, b in pieces), 1)}, episode_id=ep,
+             scene_no=cut.get("scene_no"), cut_id=cut.get("code"), outcome="success", note="화자별 목소리 바꾸기")
+    return len(pieces)
+
+
 def apply_dialogue_tool(ctx, gen, cut, files, tmp, ep):
     """설정 '대사 도구'가 ElevenLabs면 영상의 대사를 바이블 인물 목소리로 바꿔 입힌다.
     - 영상에 소리가 있고 화자가 한 명: 목소리 바꾸기(타이밍·감정 유지, 음색만 교체)
@@ -1244,6 +1285,8 @@ def apply_dialogue_tool(ctx, gen, cut, files, tmp, ep):
             how = "목소리 바꾸기"
             log_cost("audio", "elevenlabs", "speech-to-speech", {"seconds": secs}, episode_id=ep, scene_no=cut.get("scene_no"), cut_id=cut.get("code"),
                      outcome="success", note="대사 목소리 바꾸기")
+        elif files.get("voice") and (segs := diarized_swap(files["voice"], lines, speakers, secs, work, out_wav, cut, ep)):
+            how = f"화자별 목소리 바꾸기 {segs}구간"
         else:
             progress(f"{cut['code']} 대사를 바이블 목소리로 읽혀 이어 붙이는 중(ElevenLabs)")
             parts, t0 = [], 0.3
@@ -1292,6 +1335,35 @@ def apply_dialogue_tool(ctx, gen, cut, files, tmp, ep):
         return tmp
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def stt_speakers(path, model="scribe_v1"):
+    """받아쓰기 + 화자 구분: [{speaker, s, e, text}] 말한 구간 목록(같은 화자 연속 단어는 한 구간)."""
+    boundary = "----nyx" + uuid.uuid4().hex
+    with open(path, "rb") as f:
+        data = f.read()
+    def part(name, value):
+        return f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+    body = part("model_id", model) + part("language_code", "kor") + part("diarize", "true") + part("timestamps_granularity", "word") + \
+        (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="a.wav"\r\nContent-Type: audio/wav\r\n\r\n').encode() + data + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request("https://api.elevenlabs.io/v1/speech-to-text", data=body, method="POST",
+                                 headers={"xi-api-key": el_key(), "Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            d = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"화자 구분 받아쓰기 실패 {e.code}: {e.read()[:160]!r}") from None
+    segs = []
+    for w in d.get("words") or []:
+        if w.get("type", "word") != "word":
+            continue
+        spk, s, e = w.get("speaker_id") or "speaker_0", float(w.get("start") or 0), float(w.get("end") or 0)
+        if segs and segs[-1]["speaker"] == spk and s - segs[-1]["e"] < 0.8:
+            segs[-1]["e"] = e
+            segs[-1]["text"] += " " + (w.get("text") or "")
+        else:
+            segs.append({"speaker": spk, "s": s, "e": e, "text": w.get("text") or ""})
+    return segs
 
 
 def stt_words(path, model="scribe_v1"):
