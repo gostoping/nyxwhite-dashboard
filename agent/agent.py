@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.14.0"
+VERSION = "1.14.1"
 
 import base64
 import glob
@@ -2680,10 +2680,17 @@ def t_bible_prompt(t):
     user = (f"분류: {cat}\n이름(참고, 프롬프트에 쓰지 말 것): {info.get('name')}\n대본 속 역할: {info.get('summary') or '-'}\n"
             f"[묘사]\n{info.get('description') or '-'}\n[세부 사항]\n{info.get('details') or '-'}")
     progress(f"{info.get('name')}: 작가실이 영어 프롬프트로 옮기는 중")
-    text, _ = claude("claude-opus-5-5", system, user, max_tokens=1500, stage="other", note=f"바이블 영어 프롬프트: {info.get('name')}")
+    text, _ = claude("claude-opus-5-5", system, user, max_tokens=3000, stage="other", note=f"바이블 영어 프롬프트: {info.get('name')}")
     en = (pick_json(text).get("prompt_en") or "").strip()
-    if not en or re.search(r"[가-힣]", en):
-        raise RuntimeError("영어 프롬프트를 만들지 못했습니다")
+    if not en:   # JSON이 깨졌으면 "prompt_en": "…" 부분이나 본문을 그대로 쓴다
+        m = re.search(r'"prompt_en"\s*:\s*"(.+?)"\s*[,}]', text, re.S)
+        en = (m.group(1) if m else re.sub(r"</?json>|```\w*", "", text)).strip()
+    # 이름 등 한글이 섞여 있으면 괄호째 지우고, 남은 한글 단어도 뺀다(영어 문장만 남김)
+    en = re.sub(r"\s*[\(\[][^\)\]]*[가-힣][^\)\]]*[\)\]]", "", en)
+    en = re.sub(r"[가-힣]+", "", en)
+    en = re.sub(r"\s{2,}", " ", en).strip(" ,.;") + "."
+    if len(en) < 30:
+        raise RuntimeError(f"영어 프롬프트가 비어 있거나 너무 짧습니다(작가실 답: {text[:160]!r}). 묘사가 너무 짧으면 내용을 보강해 주세요")
     rpc("agent_bible_set_prompt", p_token=TOKEN, p_version=info["version_id"], p_prompt=en)
     return f"{info.get('name')} 영어 프롬프트 {len(en)}자"
 
@@ -3223,12 +3230,14 @@ def run_task(tk):
         log(f"제작 작업 실패: {kind}: {e}\n{traceback.format_exc()}")
         retry = 120 if (tk.get("attempts") or 1) < 2 and kind in ("store", "video_review") else None
         rpc("agent_task_update", p_token=TOKEN, p_id=tk["id"], p_status="failed", p_error=str(e)[:1500], p_retry_in=retry)
-        if kind in ("writers_room", "director") or retry is None:
-            notify(f"작업 실패: {TASK_NAME.get(kind, kind)}", str(e)[:300], "warning")
+        # 바이블 보조 작업은 하나하나 알림을 울리지 않는다: 지시 탭 적용 대기함 '실패'에 원인과 함께 모이고 거기서 다시 시도
+        if kind not in QUIET_FAIL and (kind in ("writers_room", "director") or retry is None):
+            notify(f"작업 실패: {TASK_NAME.get(kind, kind)}", f"원인: {str(e)[:260]}\n지시 탭 적용 대기함 '실패'에서 다시 시도할 수 있습니다", "warning")
     finally:
         CURRENT["task"] = None
 
 
+QUIET_FAIL = {"bible_prompt", "photo_describe", "bible_place", "photo_design", "prep_cut"}
 TASK_NAME = {"upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
