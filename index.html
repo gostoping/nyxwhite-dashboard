@@ -6848,19 +6848,19 @@ async function renderProdSettings() {
     `<option value="${v}" ${v === cur ? 'selected' : ''} ${ok ? '' : 'disabled'}>${l}${ok ? '' : (why || ' — API 키 미등록')}</option>`).join('')}</select>`;
   const imgCur = !G.image_model || G.image_model === 'auto' ? 'auto' : G.image_model === 'xai/grok-imagine-image-2.0' ? G.image_model : 'custom';
   const nm = (kind, v) => (TOOLS[kind].find(x => x[0] === v) || [, v])[1];
+  const ASPECTS = [['9:16', '세로 9:16 (쇼츠·릴스)'], ['16:9', '가로 16:9 (유튜브 일반)'], ['3:4', '세로 3:4'], ['4:3', '가로 4:3'], ['1:1', '정사각 1:1'], ['21:9', '시네마 21:9']];
   box.innerHTML = `<b>제작</b>
     <p class="quiet" style="margin:4px 0 8px">영상은 배경음악 없이 대사·현장음만 넣어 만들고, 씬 폴더에 <b>영상(무음) / 대사·현장음 / 배경음악 / 원본</b>으로 따로 저장합니다.</p>
-    <div class="row" style="align-items:flex-end">
-      <div style="width:260px"><label>해상도 (10초 컷 예상, 참고 사진 사용)</label><select id="gRes">
-        ${['480p', '720p', '1080p'].map(r => opt(r, G.resolution || '480p', `${r} · 약 ${won((p('seedance-2.5-ref-' + r) || 0) * 10 * 1340)}`)).join('')}</select></div>
-      <div style="width:150px"><label>화면 비율</label><select id="gAsp">${['9:16', '16:9', '3:4', '1:1', '4:3', '21:9'].map(a => opt(a, G.aspect_ratio || '9:16', a + (a === '9:16' ? ' (세로·숏폼)' : a === '16:9' ? ' (가로)' : ''))).join('')}</select></div>
-    </div>
     <label class="ed-chk" style="margin-top:10px"><input type="checkbox" id="gPrep" ${G.auto_prep !== false ? 'checked' : ''}> 컷 설계가 끝나면 장면 사진·대사 미리 듣기를 자동으로 준비</label>
     <h4 style="margin:14px 0 4px">모델·도구 — 지금 고정된 것과 바꾸기</h4>
     <p class="quiet" style="margin:0 0 6px">왼쪽이 지금 쓰고 있는 것, 오른쪽에서 바꿉니다. API 키가 등록된 도구만 고를 수 있고(설정 → API 키), "연결 준비 중"은 입력 형식을 확인해 연결하면 열립니다.</p>
     <table class="tooltab">
       <tr><th>분야</th><th>지금 고정</th><th>바꾸기</th></tr>
       <tr><td>영상 생성</td><td><b>${esc(nm('video', G.video_model || 'seedance-2.5'))}</b></td><td>${toolSel('gVid', 'video', G.video_model || 'seedance-2.5')}</td></tr>
+      <tr><td>화면 방향</td><td><b>${esc(ASPECTS.find(x => x[0] === (G.aspect_ratio || '9:16'))?.[1] || G.aspect_ratio)}</b></td>
+        <td><select id="gAsp" style="width:auto">${ASPECTS.map(([a, l]) => opt(a, G.aspect_ratio || '9:16', l)).join('')}</select></td></tr>
+      <tr><td>해상도(처음 생성)</td><td><b>${esc(G.resolution || '480p')}</b> · 10초 컷 약 ${won((p('seedance-2.5-i2v-' + (G.resolution || '480p')) || p('seedance-2.5-ref-' + (G.resolution || '480p')) || 0) * 10 * 1340)}</td>
+        <td><select id="gRes" style="width:auto">${['480p', '720p', '1080p'].map(r => opt(r, G.resolution || '480p', `${r} · 10초 컷 약 ${won((p('seedance-2.5-i2v-' + r) || p('seedance-2.5-ref-' + r) || 0) * 10 * 1340)}`)).join('')}</select></td></tr>
       <tr><td>장면 사진(컷의 첫·끝 장면)</td><td><b>${esc(imgCur === 'custom' ? G.image_model : nm('image', imgCur))}</b></td><td>${toolSel('gImgSel', 'image', imgCur)}
         <input id="gImg" value="${esc(imgCur === 'custom' ? G.image_model : '')}" placeholder="Higgsfield 모델 경로" ${imgCur === 'custom' ? '' : 'hidden'} style="margin-top:4px"></td></tr>
       <tr><td>인물 실사 사진(바이블)</td><td><b>Higgsfield · Soul 2 + Soul ID</b></td><td class="quiet">고정(실사 인물 전용)</td></tr>
@@ -8258,6 +8258,7 @@ const HELP = {
 <li><b>2단계 인증</b> — 꼭 켜 두세요.</li>
 <li><b>API 키</b> — Claude·Higgsfield·ElevenLabs. 연결 시험은 무료로 키만 확인. 키는 채팅에 붙이지 마세요.<span class="ex">예: Higgsfield "연결됨" 초록</span></li>
 <li><b>제작</b> — 해상도(처음엔 480p), 화면 비율, 장면 사진 모델(auto = Nano Banana Pro), 자동 재시도(0~2), 보관 폴더.<span class="ex">예: 480p · 9:16 · auto · 자동 재시도 1번</span></li>
+<li><b>화면 방향 · 해상도</b>(모델·도구 표 안) — 세로(9:16)/가로(16:9) 등과 처음 생성 해상도(480p·720p·1080p). 새로 설계하는 컷부터 적용됩니다.<span class="ex">예: 세로 9:16 · 720p (10초 컷 약 3,500원)</span></li>
 <li><b>모델·도구 표</b>(제작 칸) — 분야마다 <b>지금 고정된 것</b>(왼쪽)과 <b>바꾸기</b>(오른쪽). 영상 생성·장면 사진·대사 목소리·배경음악·작가실·감독·감수자 모델을 고릅니다. Higgsfield 영상 모델은 전체 목록이 보이고, 입력 형식을 확인해 연결한 것만 고를 수 있습니다("연결 준비 중"은 회색).<span class="ex">예: 영상 Seedance 2.5 · 장면 사진 Nano Banana Pro · 대사 ElevenLabs · 배경음악 ElevenLabs Music(music_v1) · 감독 Opus 5.5</span></li>
 <li><b>영상 모델 · 대사 도구 · 배경음악 도구</b>(제작 칸) — <b>API 키가 등록된 것 중에서</b> 고릅니다(키 없는 도구는 회색). 영상 모델은 Higgsfield 안의 Seedance 2.5 / Kling 4.0.<span class="ex">예: 영상 Seedance 2.5 · 대사 Higgsfield(영상과 함께 만든 목소리) · 배경음악 ElevenLabs Music</span><span class="ex">예: 영상 Kling 4.0 · 대사 ElevenLabs(Kling은 소리가 없어 바이블 목소리로 입힘) · 배경음악 직접 올리기(Suno)</span></li>
 <li><b>실제 연결 점검</b>(제작 칸) — 진짜 호출을 한 번씩(약 100~300원) 해서 결과를 알려 줍니다. 집에서 에이전트를 켠 뒤 처음 한 번.<span class="ex">예: "OK 장면 사진 모델 경로: google/nano-banana-pro/edit"</span></li>
