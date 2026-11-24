@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.10.2"
+VERSION = "1.10.3"
 
 import base64
 import glob
@@ -1342,17 +1342,55 @@ def find_image_url(d):
     return None
 
 
+PHOTO_CATS = ("character", "location", "background", "prop")
+
+
+def ensure_temp_refs(ctx, names, gen, ep=None):
+    """컷에 나오는 바이블 항목에 사진이 하나도 없으면, 작가실 묘사로 사진 1장을 만들어 '임시 기준 사진'으로 고정한다.
+    그래야 임의로 정해진 모습이라도 모든 컷에서 같게 나온다. 대표가 사진을 올리면 그쪽이 우선."""
+    for n in dict.fromkeys(names or []):
+        b = bible_entry(ctx, n)
+        if not b or b.get("category") not in PHOTO_CATS or b.get("images") or b.get("temp_image") or not b.get("entry_id"):
+            continue
+        twin = bible_entry(ctx, b.get("same_as")) if b.get("same_as") else None
+        if twin and (twin.get("images") or twin.get("temp_image")):
+            continue
+        prompt = (b.get("prompt_en") or b.get("description") or n).strip()
+        try:
+            progress(f"'{n}' 사진이 비어 있어 작가실 묘사로 임시 기준 사진을 만드는 중")
+            if b["category"] == "character":
+                url, model = soul_images(prompt + " Neutral expression, plain light grey background. " + PHOTO_LOOK, n=1, aspect="3:4")[0], SOUL2
+            else:
+                model = resolve_image_model(gen)
+                look = {"prop": " Photorealistic product photograph of the object alone, plain neutral background, no people, no text.",
+                        "background": " Photorealistic wide background plate photograph, no people, no text."}.get(
+                    b["category"], " Photorealistic location photograph, natural light, no people, no text.")
+                st = hf_submit_wait(model, {"prompt": prompt + look, "aspect_ratio": "9:16"}, "임시 사진")
+                url = (find_image_urls(st.get("images") or st) or [None])[0]
+                if not url:
+                    raise RuntimeError("사진 주소가 없습니다")
+            path = upload_from_url(url, f"bible_temp/{b['entry_id']}/{uuid.uuid4().hex[:8]}.jpg")
+            b["temp_image"] = rpc("agent_bible_set_temp_photo", p_token=TOKEN, p_entry=b["entry_id"], p_path=path, p_model=model) or {"path": path}
+            log_cost("keyframe", "higgsfield", model, {"images": 1}, episode_id=ep, note=f"임시 기준 사진: {n}", outcome="success")
+            log(f"'{n}' 임시 기준 사진 고정")
+        except Exception as ex:
+            log(f"'{n}' 임시 기준 사진 실패(묘사만으로 진행): {ex}")
+
+
 def bible_ref_urls(ctx, names, limit=4, per=1):
     bl = ctx.get("bible") or []
-    imgs = {b["name"]: b.get("images") or [] for b in bl}
-    for b in bl:   # 사진이 없는 동일인은 연결된 사람의 사진을 쓴다
+    imgs = {b["name"]: [("bible", p) for p in (b.get("images") or [])] for b in bl}
+    for b in bl:   # 대표 사진이 없으면 임시 기준 사진(자동), 그것도 없으면 동일인의 사진
+        if not imgs.get(b["name"]) and (b.get("temp_image") or {}).get("path"):
+            imgs[b["name"]] = [("takes", b["temp_image"]["path"])]
+    for b in bl:
         if not imgs.get(b["name"]) and b.get("same_as"):
             imgs[b["name"]] = imgs.get(b["same_as"]) or []
     out = []
     for n in names or []:
-        for p in imgs.get(n, [])[:per]:
+        for bucket, p in imgs.get(n, [])[:per]:
             try:
-                out.append(storage_signed_url("bible", p, 7200))
+                out.append(storage_signed_url(bucket, p, 7200))
             except Exception as ex:
                 log(f"참고 사진 주소 실패({n}): {ex}")
     return out[:limit]
@@ -1434,6 +1472,7 @@ def t_prep_cut(t):
         # ③ 장면 사진 (첫 장면, 필요하면 끝 장면)
         frames = {}
         aspect = gen.get("aspect_ratio", "9:16")
+        ensure_temp_refs(ctx, c.get("reference_names"), gen, ep)
         refs = bible_ref_urls(ctx, c.get("reference_names"), limit=8, per=3)
         imodel = resolve_image_model(gen)
         for key, want in (("frame_first", True), ("frame_last", bool(c.get("use_end_frame")))):
@@ -2135,15 +2174,16 @@ def t_bible_place(t):
     if not eps and p.get("place") is not False:
         raise RuntimeError("대본이 들어간 화가 없어 추천할 수 없습니다. 대본 탭에서 대본을 먼저 넣어 주세요")
     want_desc = bool(p.get("write_description"))
-    progress(f"제작자가 대본 {len(eps)}개 화를 읽고 '{e.get('name')}'을 넣을 화·씬을 고르는 중")
+    progress(f"작가실이 대본 {len(eps)}개 화를 읽고 '{e.get('name')}'이(가) 잘 보일 화·씬을 고르는 중")
     budget = max(8000, 240000 // max(1, len(eps)))
     scripts = "\n\n".join(f"[{x['number']}화 {x.get('title') or ''}]\n{(x.get('text') or '')[:budget]}" for x in eps)
-    system = """너는 드라마 제작자(프로듀서)다. 대표가 바이블에 새로 넣은 항목을 대본의 어느 화·씬에 넣으면 이야기와 화면이 가장 좋아질지 판단해 추천한다.
-- 대본 흐름을 해치지 않고 자연스럽게 들어가는 곳, 인물의 감정·관계를 보여 주거나 복선·반복으로 기억에 남는 곳을 고른다.
+    system = """너는 드라마 작가실이다. 대표가 바이블에 직접 넣은 장소·배경·소품은 광고(PPL·협찬)일 가능성이 높다.
+대본의 어느 화·씬에 넣으면 시청자에게 가장 '세게' 보일지 판단해 추천하고, 그 씬에서 어떻게 강하게 보여 줄지 조정안을 낸다.
+- 노출이 강한 곳을 우선: 인물이 직접 쓰거나 만지는 순간, 감정이 터지는 장면, 화의 첫 장면·마지막 장면, 반복 등장으로 기억에 남는 곳.
+- 화면에서 크게·오래: 클로즈업이나 화면 중앙, 3초 이상, 조명이 닿게. 장소·배경은 인물이 들어서는 와이드 숏으로 공간이 한눈에 보이게.
+- 그래도 이야기 흐름은 해치지 않는다: 대사를 새로 쓰거나 줄거리를 바꾸지 않고, 화면 안 배치·행동·카메라로 강조한다.
 - 씬 번호는 그 화 대본의 씬 순서(1부터). 대본에 실제로 있는 씬만 고른다.
-- 추천은 2~5곳, 좋은 순서대로. 각 추천: reason(왜 여기인지, 한국어 1~2문장), how(화면에서 어떻게 보이게 할지: 누가 들고/어디 놓이고/카메라가 어떻게 잡는지, 한국어 1~2문장).
-- 대사를 새로 쓰거나 줄거리를 바꾸자고 하지 않는다. 화면 안 배치·행동으로 넣는다.
-- 협찬·PPL(간접광고)을 염두에 둔다: 시청자 눈에 잘 띄되 광고처럼 튀지 않게, 인물이 자연스럽게 쓰거나 지나가는 화면 안에서 충분히 보이는 곳(클로즈업 가능, 2~3초 이상)을 우선한다.
+- 추천은 2~5곳, 좋은 순서대로. 각 추천: reason(왜 여기인지, 한국어 1~2문장), how(화면에서 어떻게 세게 보이게 할지: 누가 들고/어디 놓이고/카메라가 얼마나 크게·몇 초 잡는지, 한국어 1~2문장).
 - description: 요청이 있을 때만. 영상·사진 모델에 그대로 넣을 영어 고정 묘사 3~6문장(모양·비율·크기·재질·질감·색·무늬·낡은 정도). 실존 브랜드 이름 금지. 요청이 없으면 빈 문자열.
 답 형식: <json>{"placements": [{"ep": 1, "scene": 1, "reason": "", "how": ""}], "description": ""}</json>"""
     user = (f"시리즈: {(info.get('series') or {}).get('title', '')}\n"

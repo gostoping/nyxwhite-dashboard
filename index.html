@@ -73,6 +73,8 @@
   .msg { padding: 10px 14px; border-radius: 8px; margin: 10px 0; }
   .msg.err { background: rgba(197,48,48,.12); color: var(--bad); }
   .msg.ok { background: rgba(31,138,76,.12); color: var(--good); }
+  .tmpimg { display: flex; gap: 10px; margin-top: 8px; padding: 8px; border: 1px dashed var(--warn, #d68c14); border-radius: 8px; }
+  .tmpimg img { width: 72px; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 6px; display: block; }
   .msg.warn { background: rgba(214,140,20,.13); color: var(--warn, #a36a00); }
   .center { max-width: 420px; margin: 8vh auto; }
   .split { display: grid; gap: 12px; grid-template-columns: 300px 1fr; }
@@ -292,7 +294,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.10.2"
+VERSION = "1.10.3"
 
 import base64
 import glob
@@ -1624,17 +1626,55 @@ def find_image_url(d):
     return None
 
 
+PHOTO_CATS = ("character", "location", "background", "prop")
+
+
+def ensure_temp_refs(ctx, names, gen, ep=None):
+    """컷에 나오는 바이블 항목에 사진이 하나도 없으면, 작가실 묘사로 사진 1장을 만들어 '임시 기준 사진'으로 고정한다.
+    그래야 임의로 정해진 모습이라도 모든 컷에서 같게 나온다. 대표가 사진을 올리면 그쪽이 우선."""
+    for n in dict.fromkeys(names or []):
+        b = bible_entry(ctx, n)
+        if not b or b.get("category") not in PHOTO_CATS or b.get("images") or b.get("temp_image") or not b.get("entry_id"):
+            continue
+        twin = bible_entry(ctx, b.get("same_as")) if b.get("same_as") else None
+        if twin and (twin.get("images") or twin.get("temp_image")):
+            continue
+        prompt = (b.get("prompt_en") or b.get("description") or n).strip()
+        try:
+            progress(f"'{n}' 사진이 비어 있어 작가실 묘사로 임시 기준 사진을 만드는 중")
+            if b["category"] == "character":
+                url, model = soul_images(prompt + " Neutral expression, plain light grey background. " + PHOTO_LOOK, n=1, aspect="3:4")[0], SOUL2
+            else:
+                model = resolve_image_model(gen)
+                look = {"prop": " Photorealistic product photograph of the object alone, plain neutral background, no people, no text.",
+                        "background": " Photorealistic wide background plate photograph, no people, no text."}.get(
+                    b["category"], " Photorealistic location photograph, natural light, no people, no text.")
+                st = hf_submit_wait(model, {"prompt": prompt + look, "aspect_ratio": "9:16"}, "임시 사진")
+                url = (find_image_urls(st.get("images") or st) or [None])[0]
+                if not url:
+                    raise RuntimeError("사진 주소가 없습니다")
+            path = upload_from_url(url, f"bible_temp/{b['entry_id']}/{uuid.uuid4().hex[:8]}.jpg")
+            b["temp_image"] = rpc("agent_bible_set_temp_photo", p_token=TOKEN, p_entry=b["entry_id"], p_path=path, p_model=model) or {"path": path}
+            log_cost("keyframe", "higgsfield", model, {"images": 1}, episode_id=ep, note=f"임시 기준 사진: {n}", outcome="success")
+            log(f"'{n}' 임시 기준 사진 고정")
+        except Exception as ex:
+            log(f"'{n}' 임시 기준 사진 실패(묘사만으로 진행): {ex}")
+
+
 def bible_ref_urls(ctx, names, limit=4, per=1):
     bl = ctx.get("bible") or []
-    imgs = {b["name"]: b.get("images") or [] for b in bl}
-    for b in bl:   # 사진이 없는 동일인은 연결된 사람의 사진을 쓴다
+    imgs = {b["name"]: [("bible", p) for p in (b.get("images") or [])] for b in bl}
+    for b in bl:   # 대표 사진이 없으면 임시 기준 사진(자동), 그것도 없으면 동일인의 사진
+        if not imgs.get(b["name"]) and (b.get("temp_image") or {}).get("path"):
+            imgs[b["name"]] = [("takes", b["temp_image"]["path"])]
+    for b in bl:
         if not imgs.get(b["name"]) and b.get("same_as"):
             imgs[b["name"]] = imgs.get(b["same_as"]) or []
     out = []
     for n in names or []:
-        for p in imgs.get(n, [])[:per]:
+        for bucket, p in imgs.get(n, [])[:per]:
             try:
-                out.append(storage_signed_url("bible", p, 7200))
+                out.append(storage_signed_url(bucket, p, 7200))
             except Exception as ex:
                 log(f"참고 사진 주소 실패({n}): {ex}")
     return out[:limit]
@@ -1716,6 +1756,7 @@ def t_prep_cut(t):
         # ③ 장면 사진 (첫 장면, 필요하면 끝 장면)
         frames = {}
         aspect = gen.get("aspect_ratio", "9:16")
+        ensure_temp_refs(ctx, c.get("reference_names"), gen, ep)
         refs = bible_ref_urls(ctx, c.get("reference_names"), limit=8, per=3)
         imodel = resolve_image_model(gen)
         for key, want in (("frame_first", True), ("frame_last", bool(c.get("use_end_frame")))):
@@ -2417,15 +2458,16 @@ def t_bible_place(t):
     if not eps and p.get("place") is not False:
         raise RuntimeError("대본이 들어간 화가 없어 추천할 수 없습니다. 대본 탭에서 대본을 먼저 넣어 주세요")
     want_desc = bool(p.get("write_description"))
-    progress(f"제작자가 대본 {len(eps)}개 화를 읽고 '{e.get('name')}'을 넣을 화·씬을 고르는 중")
+    progress(f"작가실이 대본 {len(eps)}개 화를 읽고 '{e.get('name')}'이(가) 잘 보일 화·씬을 고르는 중")
     budget = max(8000, 240000 // max(1, len(eps)))
     scripts = "\n\n".join(f"[{x['number']}화 {x.get('title') or ''}]\n{(x.get('text') or '')[:budget]}" for x in eps)
-    system = """너는 드라마 제작자(프로듀서)다. 대표가 바이블에 새로 넣은 항목을 대본의 어느 화·씬에 넣으면 이야기와 화면이 가장 좋아질지 판단해 추천한다.
-- 대본 흐름을 해치지 않고 자연스럽게 들어가는 곳, 인물의 감정·관계를 보여 주거나 복선·반복으로 기억에 남는 곳을 고른다.
+    system = """너는 드라마 작가실이다. 대표가 바이블에 직접 넣은 장소·배경·소품은 광고(PPL·협찬)일 가능성이 높다.
+대본의 어느 화·씬에 넣으면 시청자에게 가장 '세게' 보일지 판단해 추천하고, 그 씬에서 어떻게 강하게 보여 줄지 조정안을 낸다.
+- 노출이 강한 곳을 우선: 인물이 직접 쓰거나 만지는 순간, 감정이 터지는 장면, 화의 첫 장면·마지막 장면, 반복 등장으로 기억에 남는 곳.
+- 화면에서 크게·오래: 클로즈업이나 화면 중앙, 3초 이상, 조명이 닿게. 장소·배경은 인물이 들어서는 와이드 숏으로 공간이 한눈에 보이게.
+- 그래도 이야기 흐름은 해치지 않는다: 대사를 새로 쓰거나 줄거리를 바꾸지 않고, 화면 안 배치·행동·카메라로 강조한다.
 - 씬 번호는 그 화 대본의 씬 순서(1부터). 대본에 실제로 있는 씬만 고른다.
-- 추천은 2~5곳, 좋은 순서대로. 각 추천: reason(왜 여기인지, 한국어 1~2문장), how(화면에서 어떻게 보이게 할지: 누가 들고/어디 놓이고/카메라가 어떻게 잡는지, 한국어 1~2문장).
-- 대사를 새로 쓰거나 줄거리를 바꾸자고 하지 않는다. 화면 안 배치·행동으로 넣는다.
-- 협찬·PPL(간접광고)을 염두에 둔다: 시청자 눈에 잘 띄되 광고처럼 튀지 않게, 인물이 자연스럽게 쓰거나 지나가는 화면 안에서 충분히 보이는 곳(클로즈업 가능, 2~3초 이상)을 우선한다.
+- 추천은 2~5곳, 좋은 순서대로. 각 추천: reason(왜 여기인지, 한국어 1~2문장), how(화면에서 어떻게 세게 보이게 할지: 누가 들고/어디 놓이고/카메라가 얼마나 크게·몇 초 잡는지, 한국어 1~2문장).
 - description: 요청이 있을 때만. 영상·사진 모델에 그대로 넣을 영어 고정 묘사 3~6문장(모양·비율·크기·재질·질감·색·무늬·낡은 정도). 실존 브랜드 이름 금지. 요청이 없으면 빈 문자열.
 답 형식: <json>{"placements": [{"ep": 1, "scene": 1, "reason": "", "how": ""}], "description": ""}</json>"""
     user = (f"시리즈: {(info.get('series') or {}).get('title', '')}\n"
@@ -4436,33 +4478,35 @@ function placementBox(e) {
 }
 
 // 소품 빨리 추가: 이름·한국어 설명(사진 선택) → 사진이 있으면 사진 보고 묘사, 없으면 설명으로 묘사 + 넣을 화·씬 추천
-function openPropForm() {
+function openPropForm(cat = 'prop') {
+  const L = cat === 'location' ? { n: '장소', ex: '예: 성수동 카페 \'모노\'', d: '예: 통유리 창, 원목 테이블, 노출 콘크리트 벽. 오후 햇빛이 길게 들어오는 2층 카페', h: '예: 린과 탄이 다시 만나는 장면에 쓰고 싶다(협찬 매장)' }
+    : { n: '소품', ex: '예: 할머니의 은반지', d: '예: 오래된 은반지. 안쪽에 이니셜이 새겨져 있고 조금 긁혀 있다. 주인공이 늘 끼고 다닌다', h: '예: 협찬 제품이라 주인공이 자주 쓰게 하고 싶다' };
   $('#bEditor').innerHTML = `<div class="card" style="border-color:var(--accent)">
-    <b>소품 추가</b>
-    <p class="quiet" style="margin:4px 0 0">영어 묘사는 쓰지 않아도 됩니다. 사진을 넣으면 사진을 보고, 없으면 설명을 보고 작가실이 씁니다. 제작자가 대본을 읽고 넣을 화·씬을 추천합니다.</p>
-    <label>소품 이름</label><input id="ppname" placeholder="예: 할머니의 은반지">
-    <label>어떤 소품인가요</label><textarea id="ppdesc" style="min-height:80px" placeholder="예: 오래된 은반지. 안쪽에 이니셜이 새겨져 있고 조금 긁혀 있다. 주인공이 늘 끼고 다닌다"></textarea>
-    <label>어디에 쓰고 싶나요 (선택)</label><input id="pphint" placeholder="예: 주인공이 힘들 때 만지는 버릇으로, 마지막 화에 상대에게 건넨다">
+    <b>${L.n} 추가</b>
+    <p class="quiet" style="margin:4px 0 0">영어 묘사는 쓰지 않아도 됩니다. 사진을 넣으면 사진을 보고, 없으면 설명을 보고 작가실이 씁니다. 직접 넣는 ${L.n}은 광고(PPL·협찬)일 가능성이 높으니, 작가실이 대본을 읽고 <b>세게 보일</b> 화·씬과 보여 주는 방법(크게·화면 중앙·3초 이상)을 추천합니다. '넣기'를 누르면 그 씬 감독 메모로 들어갑니다.</p>
+    <label>${L.n} 이름</label><input id="ppname" placeholder="${L.ex}">
+    <label>어떤 ${L.n}인가요 (한글로 적어도 됩니다)</label><textarea id="ppdesc" style="min-height:80px" placeholder="${L.d}"></textarea>
+    <label>어디에 쓰고 싶나요 (선택)</label><input id="pphint" placeholder="${L.h}">
     <label>사진 (선택: 외부에서 구한 사진)</label><input type="file" id="ppimg" accept="image/*" multiple>
-    <label class="quiet" style="margin-top:8px"><input type="checkbox" id="ppplace" style="width:auto" checked> 제작자에게 넣을 화·씬 추천받기</label>
+    <label class="quiet" style="margin-top:8px"><input type="checkbox" id="ppplace" style="width:auto" checked> 작가실에 세게 보일 화·씬 추천받기</label>
     <div class="row" style="margin-top:10px"><button class="btn primary" id="ppsave">추가</button><button class="btn" id="ppcancel">취소</button></div></div>`;
   $('#ppcancel').onclick = () => { $('#bEditor').innerHTML = ''; };
   $('#ppsave').onclick = guard(async () => {
     const name = $('#ppname').value.trim(), desc = $('#ppdesc').value.trim(), hint = $('#pphint').value.trim();
-    if (!name) return toast('소품 이름을 적어 주세요');
-    if (!desc) return toast('어떤 소품인지 한두 줄 적어 주세요');
+    if (!name) return toast(`${L.n} 이름을 적어 주세요`);
+    if (!desc) return toast(`어떤 ${L.n}인지 한두 줄 적어 주세요`);
     const files = [...$('#ppimg').files];
     if (files.some(f => f.size > 15e6)) return toast('사진이 너무 큽니다 (15MB까지)');
     const btn = $('#ppsave'); btn.disabled = true; btn.textContent = '추가하는 중…';
     try {
-      const row = { series_id: S.seriesId, category: 'prop', name, summary: desc.slice(0, 300) };
+      const row = { series_id: S.seriesId, category: cat, name, summary: desc.slice(0, 300) };
       const ent = await q(S.sb.from('bible_entries').insert({ ...row, photo_source: files.length ? 'upload' : 'auto' }).select('id').single())
         .catch(() => q(S.sb.from('bible_entries').insert(row).select('id').single()));
       const paths = [];
       for (const f of files) paths.push(await uploadBibleFile(ent.id, f));
       const v = await q(S.sb.from('bible_versions').insert({
         entry_id: ent.id, description: desc, details: hint ? `대표 희망 쓰임: ${hint}` : null, image_paths: paths,
-        change_reason: '대표가 소품 추가', status: 'proposed',
+        change_reason: `대표가 ${L.n} 추가`, status: 'proposed',
       }).select('id,version_no').single());
       await q(S.sb.rpc('activate_bible_version', { p_id: v.id }));
       const jobs = [];
@@ -4470,8 +4514,8 @@ function openPropForm() {
       if ($('#ppplace').checked || !files.length)
         jobs.push({ kind: 'bible_place', series_id: S.seriesId, payload: { entry_id: ent.id, write_description: !files.length, hint, place: $('#ppplace').checked } });
       if (jobs.length) await q(S.sb.from('pipeline_tasks').insert(jobs));
-      S.bibleCat = 'prop';
-      toast(`${name}을(를) 추가했습니다. 작가실·제작자가 묘사와 넣을 곳을 준비합니다`); go('bible');
+      S.bibleCat = cat;
+      toast(`${name}을(를) 추가했습니다. 작가실이 묘사와 세게 보일 곳을 준비합니다`); go('bible');
     } finally { const b = $('#ppsave'); if (b) { b.disabled = false; b.textContent = '추가'; } }
   });
   $('#bEditor').scrollIntoView({ behavior: 'smooth' });
@@ -4503,7 +4547,7 @@ function applyHelp(list) {
       <li>대본에서 찾은 항목을 모두 바이블에 적용합니다. 묘사는 작가실이 대본을 읽고 쓴 것입니다.</li>
       <li>사진 방식이 <b>자동으로 만들기</b>인 항목만 사진 후보를 만듭니다(인물은 Soul 2 실사 4장, 장소·배경·소품 2장). 카드에서 골라야 바이블 기준 사진이 됩니다.</li>
       <li><b>직접 올리기</b>로 둔 항목은 사진을 만들지 않고 <b>비워 둡니다</b>${manual.length ? ` (지금 ${manual.length}개: ${manual.slice(0, 8).map(e => esc(e.name)).join(', ')}${manual.length > 8 ? ' 외' : ''})` : ''}. 카드의 "사진 올리기"로 넣어 주세요.</li>
-      <li><b>사진이 비어 있는 채로 영상을 만들면</b>, 작가실이 추천한(대본에서 읽고 쓴) 묘사만으로 <b>임의의 얼굴·장소·소품</b>이 그려집니다. 기준 사진이 없어서 컷마다 조금씩 달라질 수 있으니, 중요한 인물·소품은 제작 전에 사진을 넣거나 '자동으로 만들기'로 바꿔 두세요.</li>
+      <li><b>사진이 비어 있는 채로 제작하면</b>, 컷 설계가 시작될 때 작가실이 추천한(대본에서 읽고 쓴) 묘사로 <b>임시 기준 사진 1장</b>을 만들어 그 항목에 고정합니다. 임의로 정해진 모습이지만 <b>모든 컷에서 같게</b> 나옵니다. 카드에 "임시 기준 사진(자동)"으로 보이고, "이 사진으로 확정"을 누르거나 나중에 사진을 올려 바꿀 수 있습니다.</li>
     </ul></div>`;
 }
 
@@ -4513,7 +4557,7 @@ async function viewBible(main) {
   if (!S.seriesId) { main.innerHTML = '<h2>시리즈 바이블</h2><div class="card quiet">먼저 대본 탭에서 시리즈를 만드세요.</div>'; return; }
   const [entries, episodes] = await Promise.all([
     // photo_source(사진 방식) 칸이 아직 DB에 없으면(반영 전) 없이 다시 읽는다
-    q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin,photo_source,placement,same_as').eq('series_id', S.seriesId).order('sort_order').order('created_at'))
+    q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin,photo_source,placement,same_as,temp_image').eq('series_id', S.seriesId).order('sort_order').order('created_at'))
       .catch(() => q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin').eq('series_id', S.seriesId).order('sort_order').order('created_at'))),
     q(S.sb.from('episodes').select('id,number,title').eq('series_id', S.seriesId).order('number')),
   ]);
@@ -4526,6 +4570,10 @@ async function viewBible(main) {
   const proposals = versions.filter(v => v.status === 'proposed');
   const urls = await signedUrls([...new Set(versions.filter(v => v.status === 'active' || v.status === 'proposed')
     .flatMap(v => [...(v.image_paths || []), v.voice_path]).filter(Boolean))]);
+  // 임시 기준 사진(자동)은 takes 저장소에 있다
+  const tmpPaths = entries.map(e => e.temp_image?.path).filter(Boolean);
+  const tmpUrls = {};
+  if (tmpPaths.length) { const { data } = await S.sb.storage.from('takes').createSignedUrls(tmpPaths, 3600); (data || []).forEach(x => { if (x.signedUrl) tmpUrls[x.path] = x.signedUrl; }); }
   S.bibleCat = S.bibleCat || 'all';
   const shown = entries.filter(e => S.bibleCat === 'all' || e.category === S.bibleCat);
   const cnt = k => entries.filter(e => e.category === k).length;
@@ -4549,7 +4597,8 @@ async function viewBible(main) {
       <button class="btn small" id="bextract" title="작가실이 대본을 화별로 읽고 씬마다 필요한 인물·장소·배경·소품을 찾아 바이블 항목으로 올립니다">대본에서 필요한 것 찾기</button>
       ${showPhotoBtn ? `<button class="btn small" id="bphotos" title="지금 고른 분류에서, 적용된 묘사는 있고 사진이 없는 항목의 사진 후보를 만듭니다. '사진: 직접 올리기'로 정한 항목은 빠집니다(인물은 Soul 2 실사)">${catLabel ? esc(catLabel) + ' ' : '사진 없는 항목 '}사진 만들기 (${photoTodo.length})</button>` : ''}
       <button class="btn small" id="bcast" title="작가실이 대본을 읽고 인물마다 목소리 설명·시험 대사를 쓰고, ElevenLabs 후보 3개씩 만듭니다">인물 목소리 한꺼번에 만들기</button>
-      <button class="btn small" id="bprop" title="넣고 싶은 소품을 이름·설명(사진은 선택)만으로 추가하면, 제작자가 대본을 읽고 넣을 화·씬을 추천합니다">+ 소품 추가</button>
+      <button class="btn small" id="bloc" title="넣고 싶은 장소(협찬 매장·촬영지 등)를 추가하면, 작가실이 대본을 읽고 세게 보일 화·씬을 추천합니다">+ 장소 추가</button>
+      <button class="btn small" id="bprop" title="넣고 싶은 소품(협찬 제품 등)을 추가하면, 작가실이 대본을 읽고 세게 보일 화·씬을 추천합니다">+ 소품 추가</button>
       <button class="btn primary small" id="bnew">+ 항목 추가</button></div>
     <div class="row" style="margin-top:10px">${[['all', `전체 ${entries.length}`], ...Object.entries(BIBLE_CAT).map(([k, l]) => [k, `${l} ${cnt(k)}`])].map(([k, l]) =>
       `<button class="btn small ${S.bibleCat === k ? 'primary' : ''}" data-bc="${k}">${esc(l)}</button>`).join('')}</div>
@@ -4581,8 +4630,12 @@ async function viewBible(main) {
       ${c ? thumbs(c.image_paths, urls) : ''}
       ${c ? `<div class="bdesc">${esc(c.description)}</div>` : ''}
       ${c ? promptLine(e, c) : ''}
-      ${PHOTO_CATS.includes(e.category) && e.photo_source === 'upload' && !(c?.image_paths || []).length
-        ? `<div class="msg warn" style="margin-top:6px;font-size:12.5px">직접 올리기로 정했지만 아직 사진이 없습니다. 이대로 영상을 만들면 작가실이 쓴 묘사만으로 장면마다 임의의 ${esc(BIBLE_CAT[e.category] || '')}이(가) 그려집니다.</div>` : ''}
+      ${PHOTO_CATS.includes(e.category) && !(c?.image_paths || []).length && e.temp_image?.path
+        ? `<div class="tmpimg"><a href="${esc(tmpUrls[e.temp_image.path] || '#')}" target="_blank" rel="noopener">${tmpUrls[e.temp_image.path] ? `<img src="${esc(tmpUrls[e.temp_image.path])}" alt="">` : ''}</a>
+            <div>${pill('임시 기준 사진(자동)', 'warn')}<div class="quiet" style="margin:4px 0">사진이 비어 있어 제작 때 작가실 묘사로 만든 사진입니다. 모든 컷이 이 모습으로 고정됩니다. 사진을 올리면 그쪽으로 바뀝니다.</div>
+            <button class="btn small" data-tmpok="${esc(e.id)}">이 사진으로 확정</button></div></div>`
+        : PHOTO_CATS.includes(e.category) && e.photo_source === 'upload' && !(c?.image_paths || []).length
+        ? `<div class="msg warn" style="margin-top:6px;font-size:12.5px">직접 올리기로 정했지만 아직 사진이 없습니다. 이대로 제작하면 컷 설계 때 작가실 묘사로 <b>임시 기준 사진 1장</b>을 만들어 모든 컷에 고정합니다(임의의 모습).</div>` : ''}
       ${sameAsLine(e, entries)}
       ${c?.details ? `<details style="margin-top:8px"><summary class="quiet">세부 사항</summary><pre class="doc" style="margin-top:6px">${esc(c.details)}</pre></details>` : ''}
       ${c?.soul_id ? `<div class="quiet" style="margin-top:6px">${pill('얼굴 고정됨', 'good')} Soul ID <code>${esc(c.soul_id.slice(0, 8))}</code></div>` : ''}
@@ -4596,7 +4649,7 @@ async function viewBible(main) {
         <div class="brow"><span class="blbl">내용</span><div class="bbtns">
           <button class="btn small" data-bedit="${esc(e.id)}">${c ? '고쳐 쓰기(새 버전)' : '내용 채우기'}</button>
           ${n > 1 ? `<button class="btn small" data-bhist="${esc(e.id)}">이력 ${n}개</button>` : ''}
-          ${['background', 'prop'].includes(e.category) && 'placement' in e ? `<button class="btn small" data-plc="${esc(e.id)}" title="PPL·협찬을 염두에 두고, 제작자가 대본을 읽고 이 배경·소품이 잘 보일 화·씬을 추천합니다">넣을 곳 추천받기</button>` : ''}</div></div>
+          ${['location', 'background', 'prop'].includes(e.category) && 'placement' in e ? `<button class="btn small" data-plc="${esc(e.id)}" title="광고(PPL·협찬)일 수 있으니, 작가실이 대본을 읽고 이 항목이 세게 보일 화·씬과 보여 주는 방법을 추천합니다">넣을 곳 추천받기</button>` : ''}</div></div>
         ${PHOTO_CATS.includes(e.category) ? `<div class="brow"><span class="blbl">사진</span><div class="bbtns">
           ${hasPhotoSrc ? `<span class="seg" data-psrc="${esc(e.id)}" title="직접 올리기로 정하면 '사진 만들기'를 한꺼번에 눌러도 이 항목은 만들지 않습니다">
             <button type="button" data-v="auto" class="${e.photo_source !== 'upload' ? 'on' : ''}">자동으로 만들기</button><button type="button" data-v="upload" class="${e.photo_source === 'upload' ? 'on' : ''}">직접 올리기</button></span>` : ''}
@@ -4696,7 +4749,8 @@ async function viewBible(main) {
   };
   watchDescribe();
   // 소품 추가 · 넣을 곳 추천
-  $('#bprop').onclick = () => openPropForm();
+  $('#bprop').onclick = () => openPropForm('prop');
+  $('#bloc').onclick = () => openPropForm('location');
   main.querySelectorAll('[data-plc]').forEach(b => b.onclick = guard(async () => {
     const e = entryOf(b.dataset.plc); if (!e) return;
     const hint = prompt(`제작자가 대본을 읽고 '${e.name}'을(를) 넣으면 좋을 화·씬을 추천합니다. (Claude 수백 원)\n원하는 쓰임이 있으면 적어 주세요(비워도 됩니다).`, '');
@@ -4711,7 +4765,7 @@ async function viewBible(main) {
     if (!ep) return toast(`${p.ep}화를 찾지 못했습니다`);
     const c = cur(e.id);
     const note = await q(S.sb.from('episode_notes').insert({ episode_id: ep.id, scene_no: Number(p.scene) || null, priority: 'must', important: false,
-      content: `[바이블 ${BIBLE_CAT[e.category] || ''}] '${e.name}'을(를) 이 씬에 넣는다. ${p.how || ''}${p.reason ? ` (이유: ${p.reason})` : ''}${c?.description ? `\n묘사: ${c.description}` : ''}` })
+      content: `[바이블 ${BIBLE_CAT[e.category] || ''} · PPL 강조 노출] '${e.name}'을(를) 이 씬에 넣고 화면에서 세게 보여 준다(크게·화면 중앙·3초 이상). ${p.how || ''}${p.reason ? ` (이유: ${p.reason})` : ''}${c?.description ? `\n묘사: ${c.description}` : ''}` })
       .select('id').single());
     list[+b.dataset.i] = { ...p, accepted: true, note_id: note.id };
     const appears = [...(e.appears || [])];
@@ -4733,6 +4787,17 @@ async function viewBible(main) {
     if (n) go('bible');
   });
   // 항목별 사진 방식: 자동으로 만들기 / 직접 올리기
+  main.querySelectorAll('[data-tmpok]').forEach(b => b.onclick = guard(async () => {
+    const e = entryOf(b.dataset.tmpok), c = cur(e.id); if (!e?.temp_image?.path) return;
+    b.disabled = true; b.textContent = '옮기는 중…';
+    const { data, error } = await S.sb.storage.from('takes').download(e.temp_image.path); if (error) throw error;
+    const path = await uploadBibleFile(e.id, new File([data], 'temp.jpg', { type: 'image/jpeg' }));
+    const v = await q(S.sb.from('bible_versions').insert({ entry_id: e.id, description: c?.description || e.summary || e.name, details: c?.details || null,
+      voice_id: c?.voice_id || null, voice_path: c?.voice_path || null, soul_id: c?.soul_id || null, image_paths: [path],
+      change_reason: '임시 기준 사진(자동)을 확정', status: 'proposed' }).select('id').single());
+    await q(S.sb.rpc('activate_bible_version', { p_id: v.id }));
+    toast(`${e.name}: 임시 사진을 기준 사진으로 확정했습니다`); go('bible');
+  }));
   main.querySelectorAll('[data-same]').forEach(sel => sel.onchange = guard(async () => {
     const e = entryOf(sel.dataset.same); const to = sel.value || null;
     await q(S.sb.from('bible_entries').update({ same_as: to }).eq('id', e.id));
@@ -7293,8 +7358,8 @@ const HELP = {
 <li>"고쳐 쓰기"에서 사진을 넣으면 묘사 칸을 비워 둬도 됩니다. "실사 사진을 보고 묘사를 다시 쓰기"가 자동으로 켜집니다.</li>
 <li><b>묘사·세부 사항은 한글로 적어도 됩니다.</b> 적용되는 순간 작가실이 영어 고정 프롬프트로 한 번 옮겨 두고(1~2분, 카드의 "영어 프롬프트"), 감독은 컷 설계 때 이 영어 문장을 그대로 씁니다. 컷마다 따로 번역하지 않으니 얼굴·장소가 흔들리지 않습니다. 묘사를 고치면 영어 프롬프트도 다시 만들어집니다.</li>
 <li><b>동일인</b>(캐릭터 카드): '미래의 남자'처럼 같은 사람의 다른 시점·호칭이면 그 사람(예: 탄)을 고르세요. 감독이 같은 사람으로 다루고, 목소리를 물려받고, 이 카드에 사진이 없으면 그 사람 사진을 참고합니다. 외모는 각 카드 묘사를 따릅니다(어린 시절·성형 전후처럼 달라도 됨). 없으면 '없음'.</li>
-<li><b>대본 추출 모두 적용 + 사진 만들기</b>: '자동으로 만들기' 항목만 사진 후보를 만들고, '직접 올리기' 항목은 비워 둡니다. 비운 채로 영상을 만들면 작가실이 대본에서 쓴 묘사만으로 임의의 인물·장소·소품이 그려지고, 기준 사진이 없어 컷마다 달라질 수 있습니다. 카드에 노란 안내가 뜹니다.</li>
-<li><b>넣을 곳 추천받기</b>는 배경·소품에만 있습니다. PPL·협찬을 염두에 두고 잘 보이는 화·씬을 고릅니다.</li>
+<li><b>대본 추출 모두 적용 + 사진 만들기</b>: '자동으로 만들기' 항목만 사진 후보를 만들고, '직접 올리기' 항목은 비워 둡니다. 비운 채로 제작하면 컷 설계 때 작가실 묘사로 임시 기준 사진 1장을 만들어 고정하므로, 임의의 모습이지만 모든 컷에서 같게 나옵니다. 카드에서 확정하거나 사진을 올려 바꿀 수 있습니다.</li>
+<li><b>+ 장소 추가 / + 소품 추가</b>: 대표가 직접 넣는 장소·소품은 광고(PPL·협찬)일 가능성이 높아서, 작가실이 대본을 읽고 <b>세게 보일</b> 화·씬과 보여 주는 방법(크게·화면 중앙·3초 이상)을 추천합니다. '넣기'를 누르면 그 씬 감독 메모(필수)로 들어가 컷 설계에 반영됩니다. 카드의 <b>넣을 곳 추천받기</b>(장소·배경·소품)도 같습니다. 캐릭터에는 없습니다.</li>
 <li>분류에 <b>배경</b>이 있습니다. 장소(인물이 연기하는 공간)와 별도로 창밖 풍경, 도시 야경, 하늘, 무대 뒤 스크린처럼 화면 뒤에 보이는 것을 넣습니다.</li>
 </ul>
 <h4>⑤-1 실사 사진·얼굴 고정 (캐릭터 카드) — 영상이 실사처럼 보이는지는 여기서 정해집니다</h4>
