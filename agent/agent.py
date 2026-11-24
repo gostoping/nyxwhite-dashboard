@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.10.3"
+VERSION = "1.10.4"
 
 import base64
 import glob
@@ -560,8 +560,16 @@ def bible_text(ctx, limit=60):
 
 
 def bible_entry(ctx, name):
-    for b in ctx.get("bible") or []:
+    """이름으로 바이블 항목 찾기. 감독이 '린(과거)'처럼 괄호를 붙여도 '린'을 찾는다."""
+    if not name:
+        return None
+    bl = ctx.get("bible") or []
+    for b in bl:
         if b.get("name") == name:
+            return b
+    base = re.sub(r"\s*[\(\[].*?[\)\]]\s*", "", name).strip()
+    for b in bl:
+        if re.sub(r"\s*[\(\[].*?[\)\]]\s*", "", b.get("name") or "").strip() == base:
             return b
     return None
 
@@ -612,6 +620,16 @@ def t_writers_room(t):
   "summary": "대표용 변경 요약 3~5줄"}}
 </json>"""
     approved = wr.get("approved") or []
+    ppl = [n for n in (ctx.get("notes") or []) if "PPL" in (n.get("content") or "")]
+    if ppl:
+        system += """
+
+[PPL·협찬 반영 — 가장 중요]
+대표 연출 메모에 'PPL 강조 노출'이 있는 씬은 그 장소·소품이 화면에서 세게 보이도록 지문(행동·배치·카메라)으로 넣는다.
+- 흐름이 절대 흐트러지면 안 된다: 사건 순서, 감정선, 대사의 뜻, 복선·반전, 씬 순서는 그대로. 새 대사·새 사건을 만들지 않는다(꼭 필요하면 대사 없는 행동으로).
+- 늘어난 화면 시간만큼 같은 씬이나 앞뒤 씬의 군더더기(반복 지문, 늘어지는 동작, 같은 뜻의 대사 꼬리)를 축약해서 씬 시간 구간과 화 전체 길이를 원래대로 맞춘다.
+- 광고처럼 보이는 설명 대사·상표 이름 언급은 하지 않는다. 인물이 자연스럽게 쓰는 순간에 카메라가 가까이 머문다.
+- changes에 PPL을 넣은 곳과 축약한 곳을 각각 적는다(reason에 'PPL 반영' 또는 'PPL 시간 확보를 위한 축약')."""
     user = f"""{e.get('number')}화 「{e.get('title') or ''}」 원고를 정리해 주세요.
 
 [대표 연출 메모]
@@ -641,12 +659,12 @@ def t_writers_room(t):
     changes = meta.get("changes") or []
     summary = (meta.get("summary") or "") + f"\n변경 {len(changes)}곳" + (f" · 흐름 변경 제안 {len(props)}건(대표 승인 필요)" if props else "")
     confirmed = None
-    if wr.get("auto_confirm") is True and not props:
+    if wr.get("auto_confirm") is True and not props and not ppl:   # PPL을 넣고 축약한 수정본은 늘 대표가 읽고 확정
         confirmed = rpc("agent_confirm_script", p_token=TOKEN, p_id=vid, p_summary=summary)
         if p.get("auto_director", True):
             rpc("agent_add_task", p_token=TOKEN, p={"kind": "director", "episode_id": ep, "payload": {"script_version_id": vid}})
     else:
-        notify(f"{e.get('number')}화 작가실 정리본 도착", summary[:300] + "\n대본 탭에서 확인 후 확정해 주세요", "warning" if props else "info")
+        notify(f"{e.get('number')}화 작가실 {'PPL 반영 수정본' if ppl else '정리본'} 도착", summary[:300] + "\n대본 탭에서 확인 후 확정해 주세요", "warning" if props or ppl else "info")
     return f"정리본 저장" + (f", v{confirmed}로 확정 → 감독 컷 설계 시작" if confirmed else ", 확정 대기") + f" · 변경 {len(changes)}곳 · 제안 {len(props)}건"
 
 
@@ -654,7 +672,7 @@ def t_writers_room(t):
 CUT_SCHEMA = """{"scene_no": 1, "cut_no": 1, "code": "E01-S01-C01", "scene_heading": "S#1 | 00:00–00:12 | 장소 | 낮",
  "seconds": 10, "summary": "이 컷에서 일어나는 일", "dialogue": "린: (떨리며, 점점 높아지며) 대사 그대로",
  "emotion": "감정선", "expression_beats": [{"t": "0-3", "who": "린", "face": "놀람 → 입술을 깨묾"}, {"t": "3-5", "who": "린", "face": "…"}],
- "camera": "샷·앵글·움직임", "reference_names": ["린(과거)", "연습실"],
+ "camera": "샷·앵글·움직임", "reference_names": ["린", "연습실"],
  "prompt": "Seedance에 보낼 영어 프롬프트(대사는 한국어 원문 그대로 따옴표)", "director_note": "반영한 메모·교훈",
  "voice_lines": [{"speaker": "린", "text": "대사 그대로(괄호 지문 빼고)", "tags": "[nervous] [whispers]", "direction": "작게 떨리며 시작 → 끝에서 목소리가 갈라지며 높아짐"}],
  "frame_first": {"prompt": "첫 장면 사진용 영어 프롬프트: 인물 고정 묘사·의상·자세·첫 표정·장소·조명·구도"},
@@ -678,7 +696,7 @@ def director_system(ctx):
 - 프롬프트: 인물 고정 묘사(바이블), 의상, 장소, 조명, 카메라, 시간대별 동작·표정(0-3s, 3-5s …), 대사(화자와 한국어 원문, 톤).
 - 소리: 대사와 현장음만. 배경음악은 넣지 않는다 → 프롬프트 끝에 "No background music, no score. Dialogue and natural ambient sound only." 를 반드시 붙인다(편집에서 음악을 따로 깐다).
 - 화면 비율 {asp}. 자막·글자를 화면에 넣지 않는다(화면 글자가 대본에 있으면 summary에만 적는다).
-- reference_names에는 사진이 있는 바이블 항목 중 이 컷에 나오는 인물(최대 3)과 장소(최대 1)만.
+- reference_names에는 이 컷 화면에 나오는 바이블 항목 이름을 바이블 표기 그대로(괄호·수식어 붙이지 말 것): 인물 최대 3, 장소 또는 배경 최대 1, PPL·중요 소품 최대 1. 사진이 없는 항목도 넣는다(제작 때 임시 기준 사진을 만들어 고정한다).
 - voice_lines: 대사 한 줄마다 화자·대사·감정 지시. tags는 ElevenLabs v3 영어 감정 태그(예: [nervous] [whispers] [excited] [sighs] [crying] [laughs])로, direction은 한국어로 크기·높낮이·속도 변화를 적는다.
 - frame_first: 모든 컷. 첫 0.5초의 정지 장면(얼굴·의상·배경 고정의 기준). use_end_frame은 컷 안에서 자세·위치·감정이 크게 바뀌어 끝 상태가 중요할 때만 true(일어서기·문 나가기·웃다가 울기 등). 대부분 false.
 - continue_prev: 같은 씬에서 앞 컷과 동작이 바로 이어지면 true(앞 컷 마지막 장면에서 시작).
@@ -723,8 +741,13 @@ def est_cut_usd(ctx, seconds, refs):
 
 
 def has_images(ctx, names):
-    imgs = {b["name"]: b.get("images") for b in (ctx.get("bible") or [])}
-    return [n for n in (names or []) if imgs.get(n)]
+    """감독이 고른 이름을 바이블 표기로 맞추고, 바이블에 없는 이름은 뺀다(사진 유무와 상관없이 남긴다)."""
+    out = []
+    for n in names or []:
+        b = bible_entry(ctx, n)
+        if b and b["name"] not in out:
+            out.append(b["name"])
+    return out
 
 
 @task("director")
@@ -1388,6 +1411,9 @@ def bible_ref_urls(ctx, names, limit=4, per=1):
             imgs[b["name"]] = imgs.get(b["same_as"]) or []
     out = []
     for n in names or []:
+        if n not in imgs:
+            b = bible_entry(ctx, n)
+            n = b["name"] if b else n
         for bucket, p in imgs.get(n, [])[:per]:
             try:
                 out.append(storage_signed_url(bucket, p, 7200))
@@ -1924,6 +1950,12 @@ def t_photo_design(t):
     if not d:
         raise RuntimeError("사진 디자인 요청을 찾지 못했습니다")
     name = d["entry_name"]
+    if re.search(r"[가-힣]", d.get("prompt") or ""):
+        # 한글 묘사는 작가실이 영어 프롬프트로 옮긴 뒤에 만든다(사진 모델은 영어가 정확)
+        if d.get("prompt_en"):
+            d["prompt"] = d["prompt_en"]
+        elif (t.get("attempts") or 1) < 6:
+            raise Retry(90, "작가실이 한글 묘사를 영어 프롬프트로 옮기는 중이라 잠시 뒤에 만듭니다")
     try:
         if d["category"] == "character":
             progress(f"{name} 실사 인물 사진 후보를 만드는 중 (Soul 2)")
