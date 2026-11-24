@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.23.0"
+VERSION = "1.24.0"
 
 import base64
 import glob
@@ -244,6 +244,20 @@ def log_cost(stage, provider, model, qty, *, episode_id=None, scene_no=None, cut
     except Exception as e:
         log(f"비용 기록 실패: {e}")
         return None
+
+
+def hf_cost_start(model, qty, what):
+    """Higgsfield가 요청을 받은 순간(=돈이 나갈 수 있는 순간) 한 줄 기록. 끝나면 hf_cost_end로 성공·실패 표시.
+    예전엔 성공한 것만 적어서, 실패·거절·시간 초과로 버려진 시도의 비용이 장부에 안 남았다."""
+    t = CURRENT.get("task") or {}
+    return log_cost("keyframe", "higgsfield", model, qty, episode_id=t.get("episode_id"), scene_no=t.get("scene_no"),
+                    job_id=t.get("id"), outcome="pending", note=what)
+
+
+def hf_cost_end(cid, ok, reason=None):
+    if cid:
+        set_cost_outcome([cid], "success" if ok else "failed",
+                         None if ok else f"Higgsfield {reason} (돌려받았는지는 Higgsfield 콘솔 사용 내역에서 확인)"[:300], None if ok else "tool")
 
 
 def set_cost_outcome(ids, outcome, reason=None, cause=None):
@@ -1940,7 +1954,9 @@ def hf_submit_wait(path, body, what="사진", timeout=900):
     code, data = http_json(f"https://api.higgsfield.ai/{path.strip('/')}", hdr, "POST", body, timeout=120)
     if code not in (200, 201, 202) or not isinstance(data, dict):
         raise RuntimeError(f"{what} 요청 실패 {code} ({model_label(path)}): {str(data)[:300]}")
+    cid = hf_cost_start(image_base(path), {"images": int(body.get("batch_size") or 1)}, f"{what} ({model_label(path)})")
     if find_image_urls(data.get("images") or []) or data.get("status") == "completed":
+        hf_cost_end(cid, True)
         return data
     rid = data.get("request_id") or data.get("id")
     status_url = data.get("status_url") or f"https://api.higgsfield.ai/requests/{rid}/status"
@@ -1953,11 +1969,14 @@ def hf_submit_wait(path, body, what="사진", timeout=900):
             continue
         s = (st or {}).get("status") if isinstance(st, dict) else None
         if s in ("failed", "nsfw", "canceled"):
+            hf_cost_end(cid, False, f"{what} 생성 {s}")
             raise RuntimeError(f"{what} 생성 {s}")
         if s == "completed":
+            hf_cost_end(cid, True)
             return st
         el = int(time.time() - (deadline - timeout))
         progress(f"Higgsfield {what}: {'차례 기다리는 중(Higgsfield 대기열)' if s in ('queued', 'pending', None) else '만드는 중'} · {el // 60}분 {el % 60}초 지남")
+    hf_cost_end(cid, False, f"{what} 생성 시간 초과")
     raise RuntimeError(f"{what} 생성 시간 초과")
 
 
@@ -1982,6 +2001,7 @@ def soul_train(name, image_urls, timeout=3600):
     if code not in (200, 201, 202) or not isinstance(data, dict) or not data.get("id"):
         raise RuntimeError(f"얼굴 학습 요청 실패 {code}: {str(data)[:300]}")
     sid = data["id"]
+    cid = hf_cost_start("soul-id-training", {"calls": 1}, f"얼굴 학습: {name}")
     deadline = time.time() + timeout
     while time.time() < deadline:
         time.sleep(15)
@@ -1991,10 +2011,13 @@ def soul_train(name, image_urls, timeout=3600):
             continue
         s = (st or {}).get("status")
         if s == "completed":
+            hf_cost_end(cid, True)
             return sid
         if s in ("failed", "canceled"):
+            hf_cost_end(cid, False, f"얼굴 학습 {s}")
             raise RuntimeError(f"얼굴 학습 실패: {str(st)[:200]}")
         progress(f"얼굴 학습 중… ({s or '대기'})")
+    hf_cost_end(cid, False, "얼굴 학습 시간 초과")
     raise RuntimeError("얼굴 학습 시간 초과")
 
 
@@ -2016,6 +2039,7 @@ def hf_image(prompt, refs, aspect, model_path):
     if code not in (200, 201, 202) or not isinstance(data, dict):
         raise RuntimeError(f"사진 요청 실패 {code} ({model_label(model_path)}): {str(data)[:300]}")
     rid = data.get("request_id") or data.get("id")
+    cid = hf_cost_start(base, {"images": 1}, f"장면 사진 ({model_label(base)})")
     url = find_image_url(data)
     status_url = data.get("status_url") or f"https://api.higgsfield.ai/requests/{rid}/status"
     deadline = time.time() + 600
@@ -2027,13 +2051,17 @@ def hf_image(prompt, refs, aspect, model_path):
             continue
         s = (st or {}).get("status") if isinstance(st, dict) else None
         if s in ("failed", "nsfw", "canceled"):
+            hf_cost_end(cid, False, f"사진 생성 {s}")
             raise RuntimeError(f"사진 생성 {s}")
         if s == "completed":
             url = find_image_url(st)
             if not url:
+                hf_cost_end(cid, False, "사진 주소를 받지 못함")
                 raise RuntimeError(f"사진 주소를 찾지 못함: {str(st)[:200]}")
     if not url:
+        hf_cost_end(cid, False, "사진 생성 시간 초과")
         raise RuntimeError("사진 생성 시간 초과")
+    hf_cost_end(cid, True)
     return url
 
 
@@ -2104,7 +2132,6 @@ def _make_temp_ref(b, n, gen, ep):
             url = (find_image_urls(st.get("images") or st) or [None])[0]
             if not url:
                 raise RuntimeError("사진 주소가 없습니다")
-        log_cost("keyframe", "higgsfield", model, {"images": 1}, episode_id=ep, note=f"임시 기준 사진: {n}", outcome="success")
         path = upload_from_url(url, f"bible_temp/{b['entry_id']}/{uuid.uuid4().hex[:8]}.jpg")
         b["temp_image"] = rpc("agent_bible_set_temp_photo", p_token=TOKEN, p_entry=b["entry_id"], p_path=path, p_model=model) or {"path": path}
         TEMP_REF_DONE[b["entry_id"]] = b["temp_image"]
@@ -2266,8 +2293,6 @@ def t_prep_cut(t):
                                 log(f"'{n}' 참고 사진 쌓음: {code} 장면 사진")
                             except Exception as ex:
                                 log(f"'{n}' 참고 사진 저장 실패: {ex}")
-                log_cost("keyframe", "higgsfield", image_base(imodel), {"images": 1}, episode_id=ep, scene_no=c["scene_no"],
-                         cut_id=code, outcome="success", note=f"{'첫' if key == 'frame_first' else '끝'} 장면 사진")
             except Exception as ex:
                 fr.update({"prompt": fprompt, "status": "failed", "error": str(ex)[:300]})
                 problems.append(f"{'첫' if key == 'frame_first' else '끝'} 장면 사진 실패")
@@ -2963,7 +2988,6 @@ def t_photo_design(t):
         raise RuntimeError("후보가 만들어지지 않았습니다")
     rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "ready", "previews": previews})
     rpc("agent_add_task", p_token=TOKEN, p={"kind": "coord_review", "payload": {"design_id": did, "entry_id": d.get("entry_id"), "series_id": d.get("series_id")}})
-    log_cost("keyframe", "higgsfield", model, {"images": len(previews)}, note=f"사진 디자인: {name}", outcome="success")
     notify(f"{name} 사진 후보 {len(previews)}장 도착", "바이블 탭에서 마음에 드는 사진을 골라 주세요")
     return f"{name} 사진 후보 {len(previews)}장"
 
@@ -2992,7 +3016,6 @@ def t_photo_set(t):
         else:
             progress(f"{name} 얼굴 학습 중 (Soul ID, 수 분 걸림)")
             soul_id = soul_train(f"{d.get('series_title') or 'NYX'} · {name}", src)
-            log_cost("keyframe", "higgsfield", "soul-id-training", {"calls": 1}, note=f"얼굴 학습: {name}", outcome="success")
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "training", "soul_id": soul_id})
         look = (d.get("prompt_en") or d.get("description") or d.get("prompt") or "")[:900]   # 사진 모델에는 영어 프롬프트
         outfit = (d.get("details") or "")[:500]
@@ -3014,7 +3037,6 @@ def t_photo_set(t):
                 ref_set.append(r)
         if not ref_set:
             raise RuntimeError("기준 사진이 하나도 만들어지지 않았습니다: " + str(next((r for r in res if isinstance(r, Exception)), ""))[:200])
-        log_cost("keyframe", "higgsfield", image_base(nmodel) if use_nano else SOUL2, {"images": len(ref_set)}, note=f"기준 사진 세트: {name}", outcome="success")
     except Exception as e:
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
         raise
@@ -3360,7 +3382,6 @@ def t_api_check(t):
     def soul():
         u = soul_images("A Korean woman in her 20s, plain grey background, natural light. " + PHOTO_LOOK, n=1, aspect="3:4")[0]
         path = upload_from_url(u, f"api_check/{uuid.uuid4().hex[:8]}.jpg")
-        log_cost("keyframe", "higgsfield", SOUL2, {"images": 1}, note="실제 연결 점검", outcome="success")
         return f"사진 1장 받음 → {path}"
     step("Soul 2 실사 인물 사진", soul)
     def scene():
@@ -3369,7 +3390,6 @@ def t_api_check(t):
         urls = find_image_urls(st.get("images") or st)
         if not urls:
             raise RuntimeError(f"사진 주소 없음: {str(st)[:150]}")
-        log_cost("keyframe", "higgsfield", image_base(m), {"images": 1}, note="실제 연결 점검", outcome="success")
         return f"{m} 사진 1장 받음"
     step("장면 사진 생성", scene)
     vid = p.get("voice_id")
