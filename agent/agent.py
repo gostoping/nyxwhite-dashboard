@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.10.1"
+VERSION = "1.10.2"
 
 import base64
 import glob
@@ -545,12 +545,25 @@ def setting(ctx, key, sub, default=None):
 
 
 def bible_text(ctx, limit=60):
+    """감독·감수자가 읽는 바이블. 영어 프롬프트(prompt_en)가 있으면 그 문장이 '고정 묘사'이고, 한국어 원문은 참고로만 붙인다."""
     rows = []
     for b in (ctx.get("bible") or [])[:limit]:
-        rows.append(f"- [{b.get('category')}] {b.get('name')}: {b.get('description') or ''}"
+        en = (b.get("prompt_en") or "").strip()
+        main = en or (b.get("description") or "")
+        rows.append(f"- [{b.get('category')}] {b.get('name')}: {main}"
+                    + (f" / 한국어 원문(참고): {b.get('description')}" if en and b.get("description") and b.get("description") != en else "")
                     + (f" / 고정 특징: {b.get('details')}" if b.get("details") else "")
+                    + (f" / 동일인: {b.get('same_as')}와 같은 사람(다른 시점·호칭). 이름·목소리·버릇·정체성은 이어지고, 외모는 이 항목 묘사를 따른다"
+                       + ("" if b.get("images") else f", 이 항목 사진이 없으면 {b.get('same_as')}의 사진을 참고") if b.get("same_as") else "")
                     + (" (사진 있음)" if b.get("images") else ""))
     return "\n".join(rows) or "(바이블이 비어 있음)"
+
+
+def bible_entry(ctx, name):
+    for b in ctx.get("bible") or []:
+        if b.get("name") == name:
+            return b
+    return None
 
 
 def lessons_text(ctx, limit=30):
@@ -1095,11 +1108,16 @@ def parse_dialogue(dialogue):
 
 def voice_for(ctx, speaker):
     for b in ctx.get("bible") or []:
-        if b.get("category") in ("character", "voice") and b.get("voice_id"):
+        if b.get("category") in ("character", "voice"):
             nm = b.get("name") or ""
             base = re.sub(r"\s*\(.*?\)\s*", "", nm)
-            if speaker == nm or speaker == base or speaker.startswith(base) or base.startswith(speaker):
+            if not (speaker == nm or speaker == base or speaker.startswith(base) or base.startswith(speaker)):
+                continue
+            if b.get("voice_id"):
                 return b["voice_id"], nm
+            twin = bible_entry(ctx, b.get("same_as")) if b.get("same_as") else None   # 동일인의 목소리를 물려받음
+            if twin and twin.get("voice_id"):
+                return twin["voice_id"], nm
     return None, None
 
 
@@ -1325,7 +1343,11 @@ def find_image_url(d):
 
 
 def bible_ref_urls(ctx, names, limit=4, per=1):
-    imgs = {b["name"]: b.get("images") or [] for b in (ctx.get("bible") or [])}
+    bl = ctx.get("bible") or []
+    imgs = {b["name"]: b.get("images") or [] for b in bl}
+    for b in bl:   # 사진이 없는 동일인은 연결된 사람의 사진을 쓴다
+        if not imgs.get(b["name"]) and b.get("same_as"):
+            imgs[b["name"]] = imgs.get(b["same_as"]) or []
     out = []
     for n in names or []:
         for p in imgs.get(n, [])[:per]:
@@ -2074,6 +2096,33 @@ def t_photo_describe(t):
     return f"{info.get('name')} 묘사 {len(desc)}자"
 
 
+@task("bible_prompt")
+def t_bible_prompt(t):
+    """작가실: 한국어로 적힌 바이블 묘사·세부 사항을 영상·사진 모델용 영어 고정 프롬프트로 한 번 옮겨 둔다."""
+    p = t.get("payload") or {}
+    info = rpc("agent_bible_photo_info", p_token=TOKEN, p_version=p.get("version_id")) or {}
+    if not info:
+        return "대상 버전이 없습니다(삭제됨)"
+    if info.get("status") not in ("active", "proposed"):
+        return "이미 다른 버전으로 바뀌었습니다"
+    cat = info.get("category")
+    system = """너는 드라마 작가실의 프롬프트 담당이다. 시리즈 바이블 항목의 묘사(한국어가 섞여 있음)를 영상·사진 생성 모델에 그대로 넣을 영어 고정 프롬프트로 옮긴다.
+- 눈에 보이는 고정 특징만: 인물은 나이대·국적 인상·성별·얼굴형·눈·코·입·피부·머리(길이·모양·색)·체형·키 인상·기본 분위기·대표 의상,
+  장소·배경은 공간 구조·재질·색·시간대·빛·분위기, 소품은 모양·크기·재질·색·낡음, 스타일·톤은 색감·조명·카메라·질감.
+- 세부 사항에 '바뀌면 안 되는 특징'이 있으면 반드시 포함한다. 화마다 바뀌는 의상·상황·줄거리·성격·대사는 넣지 않는다.
+- 3~7문장, 현재형, 쉼표로 이어진 묘사 위주. 이름·실존 인물·배우·브랜드는 쓰지 않는다. 원문에 없는 것을 지어내지 않는다.
+답 형식: <json>{"prompt_en": ""}</json>"""
+    user = (f"분류: {cat}\n이름(참고, 프롬프트에 쓰지 말 것): {info.get('name')}\n대본 속 역할: {info.get('summary') or '-'}\n"
+            f"[묘사]\n{info.get('description') or '-'}\n[세부 사항]\n{info.get('details') or '-'}")
+    progress(f"{info.get('name')}: 작가실이 영어 프롬프트로 옮기는 중")
+    text, _ = claude("claude-opus-5-5", system, user, max_tokens=1500, stage="other", note=f"바이블 영어 프롬프트: {info.get('name')}")
+    en = (pick_json(text).get("prompt_en") or "").strip()
+    if not en or re.search(r"[가-힣]", en):
+        raise RuntimeError("영어 프롬프트를 만들지 못했습니다")
+    rpc("agent_bible_set_prompt", p_token=TOKEN, p_version=info["version_id"], p_prompt=en)
+    return f"{info.get('name')} 영어 프롬프트 {len(en)}자"
+
+
 @task("bible_place")
 def t_bible_place(t):
     """대표가 추가한 소품(등)을 대본 어느 화·씬에 넣으면 좋을지 제작자가 판단해 추천한다. 필요하면 영어 고정 묘사도 쓴다."""
@@ -2094,6 +2143,7 @@ def t_bible_place(t):
 - 씬 번호는 그 화 대본의 씬 순서(1부터). 대본에 실제로 있는 씬만 고른다.
 - 추천은 2~5곳, 좋은 순서대로. 각 추천: reason(왜 여기인지, 한국어 1~2문장), how(화면에서 어떻게 보이게 할지: 누가 들고/어디 놓이고/카메라가 어떻게 잡는지, 한국어 1~2문장).
 - 대사를 새로 쓰거나 줄거리를 바꾸자고 하지 않는다. 화면 안 배치·행동으로 넣는다.
+- 협찬·PPL(간접광고)을 염두에 둔다: 시청자 눈에 잘 띄되 광고처럼 튀지 않게, 인물이 자연스럽게 쓰거나 지나가는 화면 안에서 충분히 보이는 곳(클로즈업 가능, 2~3초 이상)을 우선한다.
 - description: 요청이 있을 때만. 영상·사진 모델에 그대로 넣을 영어 고정 묘사 3~6문장(모양·비율·크기·재질·질감·색·무늬·낡은 정도). 실존 브랜드 이름 금지. 요청이 없으면 빈 문자열.
 답 형식: <json>{"placements": [{"ep": 1, "scene": 1, "reason": "", "how": ""}], "description": ""}</json>"""
     user = (f"시리즈: {(info.get('series') or {}).get('title', '')}\n"
@@ -2613,7 +2663,7 @@ def run_task(tk):
         CURRENT["task"] = None
 
 
-TASK_NAME = {"bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"bible_prompt": "바이블 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 class Beat:
