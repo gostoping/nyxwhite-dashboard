@@ -5751,6 +5751,7 @@ function applyHelp(list) {
 }
 
 async function viewBible(main) {
+  const tok = S.bibleTok = (S.bibleTok || 0) + 1;   // 겹쳐 그리기 방지: 늦게 끝난 옛 그리기는 버린다
   const series = await q(S.sb.from('series').select('id,title').order('created_at'));
   if (!S.seriesId || !series.some(s => s.id === S.seriesId)) S.seriesId = series[0]?.id || null;
   if (!S.seriesId) { main.innerHTML = '<h2>시리즈 바이블</h2><div class="card quiet">먼저 대본 탭에서 시리즈를 만드세요.</div>'; return; }
@@ -5818,6 +5819,7 @@ async function viewBible(main) {
   const hasPhotoSrc = entries.some(e => 'photo_source' in e);
   const showPhotoBtn = S.bibleCat === 'all' || S.bibleCat === 'sponsor' || PHOTO_CATS.includes(S.bibleCat);
 
+  if (tok !== S.bibleTok || S.tab !== 'bible') return;
   main.innerHTML = `
   <h2>시리즈 바이블</h2>
   <p class="quiet">모든 화가 따르는 기준 원본입니다. 감독은 여기 적힌 문장만 프롬프트에 쓰고, 영상감수자는 여기 사진과 비교해 채점합니다. 적용은 대표만 할 수 있습니다.</p>
@@ -5941,10 +5943,10 @@ async function viewBible(main) {
     if (!confirm('이 버전을 적용할까요? 현재 버전은 이전 버전으로 보관됩니다.')) return;
     await q(S.sb.rpc('activate_bible_version', { p_id: id })); toast('적용했습니다'); go('bible');
   });
-  $('#bser').onchange = e => { S.seriesId = e.target.value; S.episodeId = null; S.contEp = null; go('bible'); };
+  ($('#bser') || {}).onchange = e => { S.seriesId = e.target.value; S.episodeId = null; S.contEp = null; go('bible'); };
   main.querySelectorAll('[data-bc]').forEach(b => b.onclick = () => { S.bibleCat = b.dataset.bc; go('bible'); });
-  $('#bnew').onclick = () => openBibleEditor({ urls });
-  $('#bextract').onclick = guard(async () => {
+  ($('#bnew') || {}).onclick = () => openBibleEditor({ urls });
+  ($('#bextract') || {}).onclick = guard(async () => {
     if (!confirm('작가실이 이 시리즈 대본을 화별로 읽고, 씬마다 필요한 인물·장소·배경·소품을 바이블 수정안으로 올립니다.\n이미 있는 항목은 등장 씬만 보탭니다. (Claude 화당 수백 원)')) return;
     await q(S.sb.from('pipeline_tasks').insert({ kind: 'bible_extract', series_id: S.seriesId, payload: { series_id: S.seriesId } }));
     toast('작가실에 맡겼습니다. 아래 화별 결과에서 진행 상황을 볼 수 있습니다');
@@ -6017,8 +6019,8 @@ async function viewBible(main) {
   };
   watchDescribe();
   // 소품 추가 · 넣을 곳 추천
-  $('#hdrProp').onclick = () => openPropForm('prop');
-  $('#hdrLoc').onclick = () => openPropForm('location');
+  ($('#hdrProp') || {}).onclick = () => openPropForm('prop');
+  ($('#hdrLoc') || {}).onclick = () => openPropForm('location');
   // 스타일·톤 / 배경음악: 있으면 그 분류로 이동, 없으면 작가실 추천 받기
   // 추천받기 칸: 대표 제안(한글 가능)을 적으면 작가실이 그걸 최우선으로 반영, 비우면 작가실 추천 그대로
   const askSuggest = (what, again) => {
@@ -6029,8 +6031,8 @@ async function viewBible(main) {
       <textarea id="sgHint" style="min-height:90px" placeholder="${isM ? '예: 전체적으로 잔잔한 피아노 중심, 1화 후반 공항 장면만 현악으로 벅차게. 2화는 코믹하게 통통 튀는 리듬. 가사 있는 곡은 빼 줘' : '예: 따뜻하지만 살짝 바랜 필름 느낌, 태국 장면은 노란 햇빛, 한국 장면은 차가운 푸른 톤. 손떨림 적은 핸드헬드, 화면 글자 금지'}"></textarea>
       <div class="row" style="margin-top:8px"><button class="btn primary" id="sgGo">추천받기</button><button class="btn" id="sgX">취소</button>
         <span class="quiet">Claude 수백 원 · 1~2분 뒤 수정안으로 올라옵니다</span></div></div>`;
-    $('#sgX').onclick = () => { box.innerHTML = ''; };
-    $('#sgGo').onclick = guard(async () => {
+    ($('#sgX') || {}).onclick = () => { box.innerHTML = ''; };
+    ($('#sgGo') || {}).onclick = guard(async () => {
       const hint = $('#sgHint').value.trim();
       await q(S.sb.from('pipeline_tasks').insert({ kind: 'bible_suggest', series_id: S.seriesId, payload: { series_id: S.seriesId, what, hint, redo: !!again } }));
       S.bibleCat = isM ? 'music' : 'style';
@@ -6043,8 +6045,8 @@ async function viewBible(main) {
     if (cnt(cat) || proposals.some(p => entryOf(p.entry_id)?.category === cat)) { S.bibleCat = cat; go('bible'); return; }
     askSuggest(what, false);
   };
-  $('#hdrStyle').onclick = suggest('style');
-  $('#hdrMusic').onclick = suggest('music');
+  ($('#hdrStyle') || {}).onclick = suggest('style');
+  ($('#hdrMusic') || {}).onclick = suggest('music');
   const sre = $('#bsugRe'); if (sre) sre.onclick = () => askSuggest(S.bibleCat, true);
   main.querySelectorAll('[data-plc]').forEach(b => b.onclick = guard(async () => {
     const e = entryOf(b.dataset.plc); if (!e) return;
@@ -6147,7 +6149,7 @@ async function viewBible(main) {
     const n = await queuePhotos(entries, id => fresh.find(v => v.entry_id === id), new Set(list.map(p => p.entry_id)));
     toast(`${list.length}개 적용 · 사진 후보 ${n}건 만드는 중`); go('bible');
   });
-  $('#bcoord').onclick = guard(async () => {
+  ($('#bcoord') || {}).onclick = guard(async () => {
     const act = entries.filter(e => ['character', 'location', 'background', 'prop', 'style', 'music'].includes(e.category) && cur(e.id))
       .filter(e => !['queued', 'running'].includes((S.cvTask || {})[e.id]?.status));
     if (!act.length) return toast('감수할 항목이 없습니다(이미 감수 대기·진행 중)');
@@ -6155,7 +6157,7 @@ async function viewBible(main) {
     await q(S.sb.from('pipeline_tasks').insert(act.map(e => ({ kind: 'coord_review', series_id: S.seriesId, payload: { entry_id: e.id, version_id: cur(e.id).id } }))));
     toast(`${act.length}개 항목 감수를 맡겼습니다`); go('bible');
   });
-  $('#bcast').onclick = guard(async () => {
+  ($('#bcast') || {}).onclick = guard(async () => {
     const chars = entries.filter(e => e.category === 'character');
     if (!chars.length) return toast('먼저 캐릭터를 바이블에 등록해 주세요 (+ 항목 추가)');
     const noVoice = chars.filter(e => !cur(e.id)?.voice_id);
