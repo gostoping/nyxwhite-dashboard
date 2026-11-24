@@ -333,7 +333,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.17.2"
+VERSION = "1.18.0"
 
 import base64
 import glob
@@ -828,6 +828,31 @@ def quick_lane():
 
 
 QUICK_WORKERS = 4   # 바이블 반영·코디네이터 감수는 4개를 동시에(병렬)
+GEN_KINDS = ["generate"]   # 영상 생성은 Higgsfield를 기다리는 시간이 대부분 → 3개 동시에
+PREP_KINDS = ["prep_cut"]  # 컷 장면 사진 준비 2개 동시에
+
+
+def parallel(fns, workers=4):
+    """함수 여러 개를 동시에 돌린다(지금 작업의 진행 문구·비용 기록 맥락은 그대로 넘김). 결과는 순서대로, 예외는 그 자리에 담아 돌려준다."""
+    task = CURRENT.get("task")
+    out = [None] * len(fns)
+
+    def wrap(i, f):
+        CURRENT["task"] = task
+        try:
+            out[i] = f()
+        except Exception as e:
+            out[i] = e
+    ths = []
+    for i, f in enumerate(fns):
+        while sum(1 for th in ths if th.is_alive()) >= workers:
+            time.sleep(0.2)
+        th = threading.Thread(target=wrap, args=(i, f), daemon=True)
+        th.start()
+        ths.append(th)
+    for th in ths:
+        th.join()
+    return out
 
 
 def lanes_busy():
@@ -1309,8 +1334,11 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
         return [], [], why
 
     cuts, end_state, failed = [], [], []
-    for g in scene_groups(todo):
-        cs, es, why = ask(g)
+    groups = scene_groups(todo)
+    progress(f"감독이 {epno}화 씬 묶음 {len(groups)}개를 동시에 설계하는 중")
+    first = parallel([(lambda g=g: ask(g)) for g in groups], workers=4)   # 씬 묶음을 동시에(병렬)
+    for g, r in zip(groups, first):
+        cs, es, why = r if not isinstance(r, Exception) else ([], [], f"감독 요청 오류: {r}")
         if not cs:   # 묶음이 실패하면 씬 하나씩, 그래도 안 되면 더 짧게 한 번 더
             for one in g:
                 cs1, es1, why1 = ask([one])
@@ -2885,14 +2913,19 @@ def t_photo_set(t):
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "training", "soul_id": soul_id})
         look = (d.get("prompt_en") or d.get("description") or d.get("prompt") or "")[:900]   # 사진 모델에는 영어 프롬프트
         outfit = (d.get("details") or "")[:500]
+        progress(f"{name} 기준 사진 {len(SET_SHOTS)}장을 동시에 만드는 중")
+
+        def shot_fn(i, label, shot):
+            return lambda: {"label": label, "path": upload_from_url(
+                soul_images(f"{look} {outfit if label == '전신·의상' else ''} {shot} {PHOTO_LOOK}", n=1, aspect="3:4", soul_id=soul_id)[0],
+                f"photos/{did}/set_{i + 1}_{uuid.uuid4().hex[:6]}.jpg")}
+        res = parallel([shot_fn(i, lb, sh) for i, (lb, sh) in enumerate(SET_SHOTS)], workers=len(SET_SHOTS))
         ref_set = []
-        for label, shot in SET_SHOTS:
-            progress(f"{name} 기준 사진 만드는 중: {label}")
-            try:
-                u = soul_images(f"{look} {outfit if label == '전신·의상' else ''} {shot} {PHOTO_LOOK}", n=1, aspect="3:4", soul_id=soul_id)[0]
-                ref_set.append({"label": label, "path": upload_from_url(u, f"photos/{did}/set_{len(ref_set) + 1}_{uuid.uuid4().hex[:6]}.jpg")})
-            except Exception as ex:
-                log(f"기준 사진 실패({label}): {ex}")
+        for (label, _), r in zip(SET_SHOTS, res):
+            if isinstance(r, Exception):
+                log(f"기준 사진 실패({label}): {r}")
+            else:
+                ref_set.append(r)
         log_cost("keyframe", "higgsfield", SOUL2, {"images": len(ref_set)}, note=f"기준 사진 세트: {name}", outcome="success")
     except Exception as e:
         rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
@@ -4195,6 +4228,10 @@ def main():
                     time.sleep(1)
                 for i in range(2):   # 사진도 2개 동시에(서로 다른 인물 후보·얼굴 학습)
                     threading.Thread(target=lane, args=(PHOTO_KINDS, f"photo{i}", f"사진 줄 {i + 1}"), daemon=True).start()
+                for i in range(3):   # 영상 생성 3개 동시에
+                    threading.Thread(target=lane, args=(GEN_KINDS, f"gen{i}", f"영상 줄 {i + 1}"), daemon=True).start()
+                for i in range(2):   # 컷 장면 사진 준비 2개 동시에
+                    threading.Thread(target=lane, args=(PREP_KINDS, f"prep{i}", f"장면 사진 줄 {i + 1}"), daemon=True).start()
                 log("짧은 일 줄(바이블 반영·코디네이터 감수)·사진 줄(Higgsfield 후보·얼굴 학습) 시작")
             last_error = None
             if os.path.exists(PENDING):  # 새 버전이 정상적으로 연결됨 → 업데이트 확정
@@ -4203,7 +4240,7 @@ def main():
             for c in hb.get("commands") or []:
                 handle_command(c)
             if not paused:
-                tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=sorted(k for k in TASKS if k not in PHOTO_KINDS), p_platform=PLATFORM)
+                tk = rpc("agent_claim_task", p_token=TOKEN, p_kinds=sorted(k for k in TASKS if k not in PHOTO_KINDS + GEN_KINDS + PREP_KINDS), p_platform=PLATFORM)
                 if tk and tk.get("id"):
                     busy = True
                     with Beat(info, tk) as beat:
@@ -9604,7 +9641,7 @@ const HELP = {
 <h4>코디네이터 — 감수·반영 기록</h4>
 <ul>
 <li>항목을 적용하거나 고쳐쓰면, <b>코디네이터</b>가 감수해 카드의 <b>감수·반영 기록</b>에 남깁니다. 고쳐쓰기의 "바꾸는 이유·바꿀 내용"에 적은 요청이 정확히 들어갔는지 확인할 수 있습니다.<span class="ex">예: 탄 v4 — 대표 요청 "눈매를 날카롭게, 은발로" · ✓ 은발 반영(묘사) · 🔧 날카로운 눈매(프롬프트에 빠져 보정) → [프롬프트 보정]</span></li>
-<li>감수·반영은 <b>4개를 동시에</b>, 사진(Higgsfield) 만들기는 <b>2개를 동시에</b> 처리합니다(영상 생성·컷 설계와도 따로).</li>
+<li>동시 처리: 감수·반영 <b>4개</b>, 사진 후보·얼굴 학습 <b>2개</b>(기준 사진 4장도 한꺼번에), 영상 생성 <b>3개</b>, 컷 장면 사진 <b>2개</b>, 감독 컷 설계는 씬 묶음을 <b>4개씩</b> 동시에. 서로 줄을 따로 서서 긴 일 뒤에 짧은 일이 기다리지 않습니다.</li>
 <li>순서: <b>반영 중</b>(작가실이 요청을 묘사·영어 프롬프트에 넣는 중) → <b>반영 완료</b> → <b>감수 대기/감수 중</b> → 결과.</li>
 <li>결과는 세 가지입니다.
   <ul>
