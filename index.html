@@ -337,7 +337,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.22.0"
+VERSION = "1.23.0"
 
 import base64
 import glob
@@ -1267,7 +1267,7 @@ def director_system(ctx):
 <json>{{"cuts": [{CUT_SCHEMA}]}}</json>"""
 
 
-def review_cuts(ctx, ep, cuts, model):
+def review_cuts(ctx, ep, cuts, model, script_text=None):
     system = (guide(ctx, "감정감수자") or guide(ctx, "감정감수자") or "너는 감정감수자다.") + f"""
 
 [시리즈 바이블]
@@ -1289,7 +1289,7 @@ def review_cuts(ctx, ep, cuts, model):
 <json>{{"cuts": [{{"scene_no": 1, "cut_no": 1, "verdict": "pass|fix", "issues": ["…"], "fix": "감독이 고칠 것"}}],
  "lessons": [{{"fingerprint": "짧은-영문-열쇠", "category": "face|costume|location|prop|continuity|expression|emotion_tone|dialogue|camera|motion|prompt|other",
                "problem": "", "rule": "앞으로 이렇게", "bad_example": "", "severity": "보통|치명"}}]}}</json>"""
-    text, _ = claude(model, system, "[대본]\n" + (ctx.get("script") or {}).get("content", "")[:60000]
+    text, _ = claude(model, system, "[대본]\n" + (script_text if script_text is not None else (ctx.get("script") or {}).get("content", ""))[:60000]
                      + "\n\n[감독 컷 설계]\n" + json.dumps(cuts, ensure_ascii=False),
                      max_tokens=8000, stage="prompt_review", episode_id=ep, note="감정감수자 컷 감수")
     return pick_json(text)
@@ -1416,25 +1416,44 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
             why = "감독 답에 이 씬의 컷이 비어 있었습니다(씬 번호를 다르게 적었을 수 있음)"
         return [], [], why
 
+    def one_scene(one):   # 씬 하나로 다시, 그래도 안 되면 더 짧게 한 번 더
+        cs1, es1, why1 = ask([one])
+        if not cs1:
+            cs1, es1, why1 = ask([one], tight=True)
+        if cs1:
+            return cs1, es1, None
+        n, h, b = one
+        return [], [], (n, "길이 제한" in (why1 or ""), f"{epno}화 {h.split('|')[0].strip() or f'S#{n}'} 「{h.split('|')[2].strip() if h.count('|') >= 2 else h}」"
+                        f"(첫 줄: {first_line_of(b) or '-'}) — 원인: {why1}. 씬 하나로 줄여 두 번 더 시도했지만 같았습니다.")
+
+    def design_group(g):   # 묶음 설계 → 실패하면 그 묶음의 씬들을 동시에(예전엔 하나씩 차례로) 다시
+        try:
+            cs, es, why = ask(g)
+        except Exception as ex:
+            cs, es, why = [], [], f"감독 요청 오류: {ex}"
+        if cs:
+            return cs, es, []
+        out_c, out_e, out_f = [], [], []
+        for r, one in zip(parallel([(lambda one=one: one_scene(one)) for one in g], workers=len(g)), g):
+            if isinstance(r, Exception):
+                n, h, _b = one
+                out_f.append((n, False, f"{epno}화 S#{n} — 원인: 감독 요청 오류: {r}"))
+                continue
+            cs1, es1, f1 = r
+            out_c += cs1; out_e += es1
+            if f1:
+                out_f.append(f1)
+        return out_c, out_e, out_f
+
     cuts, end_state, failed = [], [], []
     groups = scene_groups(todo)
     progress(f"감독이 {epno}화 씬 묶음 {len(groups)}개를 동시에 설계하는 중")
-    first = parallel([(lambda g=g: ask(g)) for g in groups], workers=4)   # 씬 묶음을 동시에(병렬)
-    for g, r in zip(groups, first):
-        cs, es, why = r if not isinstance(r, Exception) else ([], [], f"감독 요청 오류: {r}")
-        if not cs:   # 묶음이 실패하면 씬 하나씩, 그래도 안 되면 더 짧게 한 번 더
-            for one in g:
-                cs1, es1, why1 = ask([one])
-                if not cs1:
-                    cs1, es1, why1 = ask([one], tight=True)
-                if cs1:
-                    cuts += cs1; end_state += es1
-                else:
-                    n, h, b = one
-                    failed.append((n, "길이 제한" in (why1 or ""), f"{epno}화 {h.split('|')[0].strip() or f'S#{n}'} 「{h.split('|')[2].strip() if h.count('|') >= 2 else h}」"
-                                  f"(첫 줄: {first_line_of(b) or '-'}) — 원인: {why1}. 씬 하나로 줄여 두 번 더 시도했지만 같았습니다."))
+    for g, r in zip(groups, parallel([(lambda g=g: design_group(g)) for g in groups], workers=min(8, max(1, len(groups))))):
+        if isinstance(r, Exception):
+            for n, h, _b in g:
+                failed.append((n, False, f"{epno}화 S#{n} — 원인: 감독 요청 오류: {r}"))
             continue
-        cuts += cs; end_state += es
+        cuts += r[0]; end_state += r[1]; failed += r[2]
     # 실패 처리: 너무 긴 씬은 작가실에 "대사·흐름 그대로 나눠 달라"고 피드백, 다른 원인은 감독이 그 씬만 한 번 더
     long_nos = sorted({n for n, is_long, _ in failed if is_long})
     other_nos = sorted({n for n, is_long, _ in failed if not is_long} - set(long_nos))
@@ -1464,21 +1483,7 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
         seq[sn] = seq.get(sn, 0) + 1
         c["cut_no"] = seq[sn]
         c["code"] = f"E{epno:02d}-S{sn:02d}-C{seq[sn]:02d}"
-    progress(f"감정감수자가 컷 {len(cuts)}개를 감수하는 중")
-    try:
-        rv = review_cuts(ctx, ep, cuts, rmodel)
-    except Exception as ex:   # 감수가 깨져도 설계는 살린다(감수는 생략하고 기록)
-        log(f"감정감수자 감수 실패(설계는 저장): {ex}")
-        rv = {}
-    verdicts = {(inum(r.get("scene_no") or 0), inum(r.get("cut_no") or 0)): r for r in rv.get("cuts") or [] if isinstance(r, dict)}
-    fixes = [c for c in cuts if (verdicts.get((inum(c.get("scene_no") or 0), inum(c.get("cut_no") or 0))) or {}).get("verdict") == "fix"]
-    for l in rv.get("lessons") or []:
-        try:
-            rpc("agent_add_lesson", p_token=TOKEN, p_lesson={**l, "series_id": (ctx.get("series") or {}).get("id"), "sources": ["감정감수자"]})
-        except Exception as ex:
-            log(f"교훈 기록 실패: {ex}")
-
-    def fix_part(part):
+    def fix_part(part, verdicts):
         fix_text = json.dumps([{"cut": c, "review": verdicts[(inum(c['scene_no']), inum(c['cut_no']))]} for c in part], ensure_ascii=False)
         scs = {inum(c["scene_no"]) for c in part}
         src = "\n\n".join(b for n, _, b in all_sc if n in scs or n == 0)
@@ -1486,17 +1491,47 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
                          max_tokens=12000, stage="cut_card", episode_id=ep, note="감독 감수 반영")
         return {(inum(c.get("scene_no") or 0), inum(c.get("cut_no") or 0)): c for c in safe_json(text).get("cuts") or [] if isinstance(c, dict)}
 
-    if fixes:   # 고칠 컷 묶음(5개씩)을 동시에 고친다. 한 묶음이 실패해도 그 컷은 원래 설계로 둔다
-        progress(f"감독이 감수 의견을 반영해 컷 {len(fixes)}개를 고치는 중")
-        parts = parallel([(lambda part=fixes[i:i + 5]: fix_part(part)) for i in range(0, len(fixes), 5)], workers=3)
-        fixed = {}
-        for r in parts:
+    def review_fix(chunk):   # 이 묶음만 감수하고, 고칠 컷이 있으면 곧바로 고친다
+        scs = {inum(c["scene_no"]) for c in chunk}
+        src = "\n\n".join(b for n, _, b in all_sc if n in scs or n == 0)
+        try:
+            rv = review_cuts(ctx, ep, chunk, rmodel, script_text=src)
+        except Exception as ex:   # 감수가 깨져도 설계는 살린다(감수는 생략하고 기록)
+            log(f"감정감수자 감수 실패(설계는 저장): {ex}")
+            return {}, {}, []
+        vd = {(inum(r.get("scene_no") or 0), inum(r.get("cut_no") or 0)): r for r in rv.get("cuts") or [] if isinstance(r, dict)}
+        fx = [c for c in chunk if (vd.get((inum(c.get("scene_no") or 0), inum(c.get("cut_no") or 0))) or {}).get("verdict") == "fix"]
+        fixed_c = {}
+        for r in parallel([(lambda part=fx[i:i + 5]: fix_part(part, vd)) for i in range(0, len(fx), 5)], workers=4):
             if isinstance(r, Exception):
                 log(f"감독 감수 반영 일부 실패(원래 설계 유지): {r}")
             else:
-                fixed.update(r)
-        cuts = [{**fixed[(inum(c["scene_no"]), inum(c["cut_no"]))], "scene_no": c["scene_no"], "cut_no": c["cut_no"], "code": c.get("code")}
-                if (inum(c["scene_no"]), inum(c["cut_no"])) in fixed else c for c in cuts]   # 고친 컷도 번호·코드는 그대로
+                fixed_c.update(r)
+        return vd, fixed_c, rv.get("lessons") or []
+
+    chunks, cur_c, cur_s = [], [], set()   # 씬 단위로 묶되 한 묶음은 씬 3개·컷 12개 정도까지
+    for sn in sorted({inum(c["scene_no"]) for c in cuts}):
+        sc_cuts = [c for c in cuts if inum(c["scene_no"]) == sn]
+        if cur_c and (len(cur_s) >= 3 or len(cur_c) + len(sc_cuts) > 12):
+            chunks.append(cur_c); cur_c, cur_s = [], set()
+        cur_c += sc_cuts; cur_s.add(sn)
+    if cur_c:
+        chunks.append(cur_c)
+    progress(f"감정감수자가 컷 {len(cuts)}개를 {len(chunks)}묶음으로 나눠 동시에 감수하고, 고칠 컷은 감독이 바로 고치는 중")
+    verdicts, fixed, lessons = {}, {}, []
+    for r in parallel([(lambda ch=ch: review_fix(ch)) for ch in chunks], workers=min(8, max(1, len(chunks)))):
+        if isinstance(r, Exception):
+            log(f"감수 묶음 실패(설계는 저장): {r}")
+            continue
+        verdicts.update(r[0]); fixed.update(r[1]); lessons += r[2]
+    fixes = [c for c in cuts if (verdicts.get((inum(c.get("scene_no") or 0), inum(c.get("cut_no") or 0))) or {}).get("verdict") == "fix"]
+    for l in lessons:
+        try:
+            rpc("agent_add_lesson", p_token=TOKEN, p_lesson={**l, "series_id": (ctx.get("series") or {}).get("id"), "sources": ["감정감수자"]})
+        except Exception as ex:
+            log(f"교훈 기록 실패: {ex}")
+    cuts = [{**fixed[(inum(c["scene_no"]), inum(c["cut_no"]))], "scene_no": c["scene_no"], "cut_no": c["cut_no"], "code": c.get("code")}
+            if (inum(c["scene_no"]), inum(c["cut_no"])) in fixed else c for c in cuts]   # 고친 컷도 번호·코드는 그대로
     by_scene = {}
     for c in cuts:
         k = (inum(c.get("scene_no") or 0), inum(c.get("cut_no") or 0))
