@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.32.0"
+VERSION = "1.32.1"
 
 import base64
 import glob
@@ -878,6 +878,10 @@ def t_writers_room(t):
     if not src or not src.get("content"):
         raise RuntimeError("작가실이 읽을 원고가 없습니다. 대본 탭에서 원고를 넣어 주세요")
     wr = rpc("agent_writers_room_context", p_token=TOKEN, p_episode=ep) or {}
+    if p.get("fix_issues") and not p.get("original"):   # 대본 감수 반영: 빠진 것을 되살리려면 대표 원고가 필요
+        vers = rpc("agent_script_versions", p_token=TOKEN, p_episode=ep) or []
+        p["original"] = (next((v for v in vers if (v.get("note") or "").startswith("원고") or v.get("version_no") is None), {}) or {}).get("content") or ""
+        progress(f"작가실이 대본 감수에서 나온 {len(p['fix_issues'])}건을 그대로 반영하는 중")
     model = setting(ctx, "generation", "claude_writer", "claude-opus-5-5")
     e = ctx.get("episode") or {}
     system = (guide(ctx, "작가실") or "너는 드라마 작가실이다. 흐름은 그대로 두고 감정선과 감정 연결 장치만 다듬는다.") + f"""
@@ -921,7 +925,7 @@ def t_writers_room(t):
 [앞뒤 화 발췌]
 {json.dumps(ctx.get('neighbors') or [], ensure_ascii=False)[:3000]}
 
-[대표가 승인한 흐름 변경 — 이번 정리본에 반영]
+{('[대본감수자 지적 — 대표가 그대로 적용하라고 함. 아래를 모두 고친다(빠진 씬·대사는 원고에서 그대로 되살리고, 순서·번호·장소 구분을 바로잡는다)]' + chr(10) + json.dumps(p.get('fix_issues'), ensure_ascii=False)[:8000] + chr(10) + '[대표 원고(빠진 것 되살리기용)]' + chr(10) + (p.get('original') or '')[:40000] + chr(10) + chr(10)) if p.get('fix_issues') else ''}[대표가 승인한 흐름 변경 — 이번 정리본에 반영]
 {json.dumps([{k: a.get(k) for k in ('scene_no', 'kind', 'proposed_text', 'reason')} for a in approved], ensure_ascii=False) if approved else '(없음)'}
 
 [원고]
@@ -962,7 +966,9 @@ def t_writers_room(t):
     changes = meta.get("changes") or []
     summary = (meta.get("summary") or "") + f"\n변경 {len(changes)}곳" + (f" · 흐름 변경 제안 {len(props)}건(대표 승인 필요)" if props else "")
     confirmed = None
-    if wr.get("auto_confirm") is True and not props and not ppl:   # PPL을 넣고 축약한 수정본은 늘 대표가 읽고 확정
+    if p.get("fix_issues") and not props:   # 대본 감수 결과를 대표가 '그대로 적용'으로 맡긴 것 → 바로 확정(→ 감독이 컷 설계를 다시)
+        confirmed = rpc("agent_confirm_script", p_token=TOKEN, p_id=vid, p_summary="대본 감수 반영: " + summary[:300])
+    elif wr.get("auto_confirm") is True and not props and not ppl:   # PPL을 넣고 축약한 수정본은 늘 대표가 읽고 확정
         confirmed = rpc("agent_confirm_script", p_token=TOKEN, p_id=vid, p_summary=summary)   # 확정되면 DB가 감독 컷 설계를 바로 맡긴다
     else:
         notify(f"{e.get('number')}화 작가실 {'PPL 반영 수정본' if ppl else '정리본'} 도착", summary[:300] + "\n대본 탭(또는 지시 탭)에서 확정하면 감독이 바로 컷 설계를 시작합니다", "warning" if props or ppl else "info")
