@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.34.0"
+VERSION = "1.34.1"
 
 import base64
 import glob
@@ -4310,6 +4310,7 @@ def flow_review(t):
     if not clips:
         raise RuntimeError("타임라인에 컷이 없습니다. 먼저 '영상 가져오기'로 컷을 넣어 주세요")
     clips = clips[:60]
+    progress(f"흐름 감수 시작: 타임라인 {len(clips)}컷 · {total:.1f}초를 순서대로 봅니다")
     ep0 = (ed.get("episode") or {}).get("id") or t.get("episode_id")
     ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep0)
     model = setting(ctx, "generation", "claude_reviewer", "claude-sonnet-5-5")
@@ -4326,7 +4327,7 @@ def flow_review(t):
     rows, files = [], {}
     try:
         for i, c in enumerate(clips):
-            progress(f"흐름 감수 준비: 컷 {i + 1}/{len(clips)} 장면·소리 살피는 중")
+            progress(f"① 준비 {i + 1}/{len(clips)}: {((ed.get('takes') or {}).get(c.get('take_id')) or {}).get('code') or '컷'} 영상 받아 장면 4장(시작·0.6초·가운데·끝)·소리 크기 뽑는 중")
             take = rpc("agent_get_take", p_token=TOKEN, p_id=c["take_id"]) or {}
             cut = take.get("cut") or {}
             src = files.get(c["take_id"])
@@ -4371,6 +4372,10 @@ def flow_review(t):
                         log(f"흐름 감수: 소리 분석 실패 {cut.get('code')}: {ex}")
                 else:
                     row["sound"] = {"소리": "없음"}
+            snd = row.get("sound") or {}
+            progress(f"① 준비 {i + 1}/{len(clips)}: {row['code']} 끝 — 장면 {len(row['frames'])}장"
+                     + (f", 첫소리 {snd.get('첫소리까지초')}초·끝 정적 {snd.get('끝소리뒤_조용한초')}초" if snd.get("첫소리까지초") is not None else (", 소리 없음" if snd.get("소리") else ""))
+                     + ("" if src else " (영상 파일 없음 — 대본만으로 봄)"))
             rows.append(row)
         # 씬별 대본
         scene_txt = {}
@@ -4378,6 +4383,8 @@ def flow_review(t):
             k = (r["episode_id"], r["scene_no"])
             if k not in scene_txt and r["episode_id"]:
                 scene_txt[k] = scene_body(r["episode_id"], r["scene_no"])
+        progress(f"② 대본: 확정본에서 씬 {len(scene_txt)}개 불러옴(" + ", ".join(f"S#{k[1]}" for k in list(scene_txt)[:12]) + ")"
+                 + ("" if all(scene_txt.values()) else " — 확정본에 없는 씬이 있어 그 부분은 컷 설계로만 봄"))
         system = (guide(ctx, "영상감수자") or "너는 영상감수자다.") + "\n\n" + (guide(ctx, "감정감수자") or "너는 감정감수자다.") + f"""
 
 [시리즈 바이블]
@@ -4424,13 +4431,18 @@ def flow_review(t):
                 if k not in keys:
                     keys.append(k)
             content.append({"type": "text", "text": "[대본(확정본) — 이 컷들이 속한 씬]\n" + "\n\n".join(scene_txt.get(k) or "" for k in keys)[:12000]})
-            progress(f"영상감수자·감정감수자가 컷 {s0 + 1}~{s0 + len(part)} 흐름을 대본과 맞춰 보는 중")
+            progress(f"③ 감수 {s0 + 1}~{s0 + len(part)}컷: 영상감수자(구도·연결)·감정감수자(감정·대사·리듬)가 "
+                     f"{part[0]['code']} ~ {part[-1]['code']}를 대본 씬과 맞춰 보는 중 (장면 {sum(len(r['frames']) for r in part)}장)")
             text, _ = claude(model, system, content, max_tokens=5000, stage="video_review", episode_id=ep0, note="편집실 흐름 감수")
             r = safe_json(text) or {}
             if r.get("summary"):
                 summaries.append(r["summary"])
-            issues += [x for x in (r.get("issues") or []) if isinstance(x, dict)]
+            got = [x for x in (r.get("issues") or []) if isinstance(x, dict)]
+            issues += got
             lessons += [x for x in (r.get("lessons") or []) if isinstance(x, dict) and x.get("rule")]
+            vw = sum(1 for x in got if "영상" in str(x.get("who"))); em = len(got) - vw
+            progress(f"③ 감수 {s0 + 1}~{s0 + len(part)}컷 끝: 확인 {len(got)}건(영상감수자 {vw} · 감정감수자 {em}), 다시 만들 컷 "
+                     f"{len({x.get('cut') for x in got if x.get('remake')})}개" + (" — " + "; ".join(f"{x.get('where') or x.get('cut')}: {x.get('problem')}" for x in got[:4])[:250] if got else ""))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     by_code = {r["code"]: r for r in rows if r["code"]}
@@ -4465,8 +4477,10 @@ def flow_review(t):
         except Exception as ex:
             log(f"흐름 감수 교훈 기록 실패: {ex}")
         out_lessons.append(row)
+        progress(f"④ 피드백 → {'·'.join(tg)}: {row['rule'][:120]} ({'지금부터 적용' if row.get('status') == 'active' else '후보 — 한 번 더 나오거나 대표가 켜면 적용'})")
     out = {"summary": " ".join(summaries)[:900] or ("이어 보기에 큰 문제 없음" if not out_issues else ""), "issues": out_issues,
            "lessons": out_lessons, "clips": len(rows), "remake_cuts": remake, "project_id": p["project_id"], "at": datetime.now().isoformat(timespec="seconds")}
+    progress(f"⑤ 정리 끝: 확인 {len(out_issues)}건 · 다시 만들 컷 {remake}개 · 피드백 {len(out_lessons)}건 — 편집 탭에서 고르고 지시를 덧붙여 보내 주세요")
     notify(f"편집실 흐름 감수: 확인 {len(out_issues)}건 · 다시 만들 컷 {remake}개", out["summary"][:300], "info" if not out_issues else "warning")
     return json.dumps(out, ensure_ascii=False)
 
