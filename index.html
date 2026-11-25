@@ -212,6 +212,7 @@
   .vlive { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; } .vlive audio { height: 32px; width: 240px; min-width: 200px; max-width: 100%; flex: 0 0 auto; margin: 0; }
   .vfail { color: var(--bad); font-size: 13px; } .vfail .quiet { display: block; font-size: 12px; }
   .fixbox { margin-top: 10px; padding: 10px; border: 1px solid var(--accent); border-radius: 8px; background: var(--panel); }
+  .ed-rwrap { position: relative; display: inline-block; } .ed-rwrap video { display: block; } .ed-rwrap .ed-sub { pointer-events: none; bottom: 16%; font-size: 13px; }
   .srbox { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); } .srbox > summary { cursor: pointer; }
   .srbox table td { font-size: 13px; vertical-align: top; } .srbox tr.srdone td:not(:last-child) { color: var(--muted, #888); }
   .balrow { display: grid; grid-template-columns: 170px auto 1fr auto; gap: 4px 12px; align-items: baseline; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
@@ -245,7 +246,7 @@
   .ed-top .card { margin-bottom: 0; }
   .ed-player { display: flex; flex-direction: column; align-items: center; }
   .ed-screen { position: relative; height: min(44vh, 460px); aspect-ratio: 9 / 16; max-width: 100%; background: #000; border-radius: 8px; overflow: hidden; }
-  .ed-screen video { width: 100%; height: 100%; object-fit: contain; }
+  .ed-screen video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
   .ed-black[hidden] { display: none; }
   .ed-black { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #777; font-size: 13px; background: #000; }
   .ed-sub { position: absolute; left: 6%; right: 6%; bottom: 9%; text-align: center; color: #fff; font-weight: 600; font-size: 15px; text-shadow: 0 0 4px #000, 0 0 2px #000; white-space: pre-wrap; }
@@ -290,6 +291,9 @@
   .ed-subb { background: var(--panel); border: 1px solid var(--line); color: var(--ink); }
   .ed-head { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--bad); pointer-events: none; z-index: 4; }
   .ed-head::before { content: ''; position: absolute; top: 0; left: -5px; border: 6px solid transparent; border-top-color: var(--bad); }
+  .ed-clip.loop { outline: 3px solid var(--accent); outline-offset: -3px; } .ed-clip.loop::after { content: '🔁 반복'; position: absolute; right: 4px; top: 2px; font-size: 11px; background: var(--accent); color: #fff; border-radius: 4px; padding: 0 4px; }
+  .ed-head .grip { position: absolute; top: 0; bottom: 0; left: -7px; width: 16px; cursor: ew-resize; pointer-events: auto; }
+  .ed-head.drag { background: var(--accent); } .ed-head.drag::before { border-top-color: var(--accent); }
   .ed-keys { margin-top: 8px; font-size: 12px; }
   .ed-result { display: grid; grid-template-columns: 200px 1fr; gap: 12px; margin-top: 10px; align-items: start; }
   .ed-result video { width: 200px; aspect-ratio: 9 / 16; background: #000; border-radius: 8px; }
@@ -392,7 +396,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.33.0"
+VERSION = "1.33.1"
 
 import base64
 import glob
@@ -5256,7 +5260,7 @@ def t_assemble(t):
             rr = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, cwd=work)
         if rr.returncode != 0:
             raise RuntimeError(f"조립 실패: {(rr.stderr or '')[-400:]}")
-        files = {"seconds": total, "clips": len(clips)}
+        files = {"seconds": total, "clips": len(clips), "audio_clips": len(alab)}   # 소리가 있는 컷 수(0이면 결과물에 대사 소리 없음)
         srt, vtt = os.path.join(work, f"{tag}_ko.srt"), os.path.join(work, f"{tag}_ko.vtt")
         if subs:
             write_subs(subs, srt, vtt)
@@ -10616,7 +10620,7 @@ function edRender() {
   ${miss.length ? `<div class="msg" style="background:var(--accent-soft)">타임라인에 없는 만들어진 컷 ${miss.length}개: ${esc(miss.map(c => c.code).join(', '))} <button class="btn small" id="eIns">제자리에 넣기</button></div>` : ''}
   <div class="ed-top">
     <div class="ed-player card">
-      <div class="ed-screen"><video id="eVid" playsinline preload="auto"></video><div id="eBlack" class="ed-black" hidden>정적</div><div id="eSub" class="ed-sub"></div></div>
+      <div class="ed-screen"><video id="eVid" playsinline preload="auto"></video><video id="eVid2" playsinline preload="auto" style="visibility:hidden"></video><div id="eBlack" class="ed-black" hidden>정적</div><div id="eSub" class="ed-sub"></div></div>
       <div class="ed-ctrl">
         <button class="btn small" id="ePrev" title="앞 컷">⏮</button><button class="btn small primary" id="ePlay" title="재생/멈춤 (스페이스)">▶</button><button class="btn small" id="eNext" title="다음 컷">⏭</button>
         <span id="eTime" class="ed-time">${fmtT(ED.t)} / ${fmtT(L.total)}</span>
@@ -10652,7 +10656,7 @@ function edRender() {
         <div class="ed-track" data-track="voice">${L.clips.map(x => edVoiceBlock(x)).join('')}</div>
         <div class="ed-track" data-track="music">${ED.tl.music.map(m => edMusicBlock(m)).join('')}</div>
         <div class="ed-track" data-track="subs">${L.subs.map(x => edSubBlock(x)).join('')}</div>
-        <div class="ed-head" id="eHead" style="left:${ED.t * ED.pps}px"></div>
+        <div class="ed-head" id="eHead" style="left:${ED.t * ED.pps}px"><div class="grip" title="끌어서 원하는 곳으로 옮기면 그 자리부터 재생됩니다"></div></div>
       </div></div>
     </div>
     <div class="quiet ed-keys">단축키: 스페이스 재생 · ←/→ 0.1초 이동(⇧ 1초) · S 나누기 · Delete 빼기 · ⌘Z 되돌리기 · 컷을 끌어 순서 변경 · 가장자리를 끌어 자르기 · 대사 막대를 끌어 대사 위치 조정</div>
@@ -10677,7 +10681,7 @@ function edClipBlock(x) {
   const sel = ED.sel?.type === 'clip' && ED.sel.id === c.id;
   const warn = cut.best_take_id && cut.best_take_id !== c.take_id ? ' ed-newtake' : tk.verdict !== 'pass' ? ' ed-unpassed' : '';
   return `${+c.gap > 0 ? `<div class="ed-gap" data-gap="${c.id}" style="left:${(x.start - c.gap) * ED.pps}px;width:${c.gap * ED.pps}px" title="정적 ${c.gap}초"></div>` : ''}
-    <div class="ed-clip${sel ? ' sel' : ''}${warn}" data-clip="${c.id}" style="left:${x.start * ED.pps}px;width:${Math.max(4, x.dur * ED.pps - 2)}px;${poster ? `background-image:url('${poster}')` : ''}">
+    <div class="ed-clip${sel ? ' sel' : ''}${warn}${ED.loop === c.id ? ' loop' : ''}" data-clip="${c.id}" style="left:${x.start * ED.pps}px;width:${Math.max(4, x.dur * ED.pps - 2)}px;${poster ? `background-image:url('${poster}')` : ''}">
       <i class="h l" data-trim="in"></i><span>${esc(clipCode(c))}<small>${x.dur.toFixed(1)}s</small></span><i class="h r" data-trim="out"></i></div>`;
 }
 function edVoiceBlock(x) {
@@ -10801,6 +10805,7 @@ const edOffLabel = v => Math.abs(v) < 0.01 ? '화면과 같이' : v < 0 ? `${Mat
 
 // ---------------- 타임라인 조작(끌기·자르기·선택)
 function edBind() {
+  edBindHead();
   $('#eIns') && ($('#eIns').onclick = edInsertMissing);
   $('#ePlay').onclick = () => ED.playing ? edPause() : edPlay();
   $('#ePrev').onclick = () => { const xs = ED.L.clips; const cur = xs.findLast(x => x.start < ED.t - 0.3); edSeek(cur ? cur.start : 0); };
@@ -10912,7 +10917,13 @@ function edBind() {
     canvas.onpointerup = canvas.onpointercancel = e2 => {
       canvas.onpointermove = canvas.onpointerup = canvas.onpointercancel = null;
       try { canvas.releasePointerCapture(e2.pointerId); } catch {}
-      if (!moved) { edLiveTracks(); edInspector(); return; }
+      if (!moved) {
+        if (kind === 'clip' && !trim) {   // 영상 컷을 누르면 그 컷만 반복 재생, 한 번 더 누르면 반복을 풀고 그대로 이어서 흘러감
+          if (ED.loop === id) { ED.loop = null; toast('반복을 풀었습니다 — 이어서 재생합니다'); }
+          else { ED.loop = id; const lx = ED.L.clips.find(y => y.c.id === id); if (lx) edSeek(lx.start, false); edPlay(); toast('이 컷을 반복 재생합니다 — 한 번 더 누르면 풀립니다'); }
+        }
+        edLiveTracks(); edInspector(); return;
+      }
       if (kind === 'clip' && !trim) {
         const at = toSec(e2); const others = L.clips.filter(y => y.c.id !== id);
         let idx = others.findIndex(y => at < y.start + y.dur / 2); if (idx < 0) idx = others.length;
@@ -10961,19 +10972,46 @@ function edSeek(t, keepPlay = true) {
   if (was && keepPlay) edPlay(ED.stopAt);
 }
 function edAt(t) { return ED.L.clips.find(x => t >= x.start - 0.0005 && t < x.start + x.dur - 0.02); }
+// 두 개의 플레이어를 번갈아 쓴다: 지금 컷을 보여 주는 동안 다음 컷을 미리 불러 두고, 경계에서 바로 바꿔 끊김 없이 이어지게
+const edVids = () => [$('#eVid'), $('#eVid2')].filter(Boolean);
+function edV() { const vs = edVids(); return vs[(ED.vi || 0) % vs.length] || null; }
+function edOther() { const vs = edVids(); return vs.length > 1 ? vs[1 - ((ED.vi || 0) % 2)] : null; }
+const edUrl = x => x && ED.urls[takeOf(x.c).files?.preview];
+function edNextOf(x) { return x ? ED.L.clips.find(y => y.start >= x.start + x.dur - 0.05 && y !== x) : null; }
+function edPreload(x) {   // 다음 컷을 숨은 플레이어에 미리(같은 파일을 이어 쓰는 컷이면 필요 없음)
+  const o = edOther(), nx = edNextOf(x); if (!o || !nx) return;
+  const u = edUrl(nx); if (!u || u === edV()?.dataset.src) return;
+  if (o.dataset.src !== u) { o.src = u; o.dataset.src = u; o.preload = 'auto'; }
+  o.muted = true; o.pause();
+  const go = () => { try { o.currentTime = +nx.c.in || 0; } catch {} };
+  if (o.readyState >= 1) go(); else o.onloadedmetadata = go;
+}
+function edSwapTo(x) {   // 숨은 플레이어가 이 컷을 갖고 있으면 그쪽으로 바로 바꾼다
+  const o = edOther(), u = edUrl(x); if (!o || !u || o.dataset.src !== u || o.readyState < 2) return false;
+  const v = edV(); const pos = +x.c.in + (ED.t - x.start);
+  if (Math.abs(o.currentTime - pos) > 0.08) { try { o.currentTime = pos; } catch {} }
+  o.muted = ED.mode === 'music'; o.volume = Math.min(1, x.c.voice_gain ?? 1);
+  o.style.visibility = 'visible'; o.style.zIndex = 1; if (ED.playing) o.play().catch(() => {});
+  if (v) { v.style.zIndex = 0; v.pause(); setTimeout(() => { if (edV() !== v) v.style.visibility = 'hidden'; }, 60); }
+  ED.vi = 1 - (ED.vi || 0);
+  return true;
+}
 function edShowFrame() {
-  const v = $('#eVid'); if (!v) return;
+  const v = edV(); if (!v) return;
   const x = edAt(ED.t);
   $('#eBlack').hidden = !!x;
-  if (!x) { v.style.visibility = 'hidden'; v.pause(); edSyncSub(); return; }
-  v.style.visibility = 'visible';
-  const url = ED.urls[takeOf(x.c).files?.preview];
+  if (!x) { edVids().forEach(e => { e.style.visibility = 'hidden'; e.pause(); }); edSyncSub(); return; }
+  const url = edUrl(x);
   if (!url) { $('#eBlack').hidden = false; $('#eBlack').textContent = '미리보기 파일 없음'; return; }
-  if (v.dataset.src !== url) { v.src = url; v.dataset.src = url; }
+  if (v.dataset.src !== url && edSwapTo(x)) { edPreload(x); edSyncSub(); return; }
+  const cur = edV();
+  cur.style.visibility = 'visible'; cur.style.zIndex = 1;
+  if (cur.dataset.src !== url) { cur.src = url; cur.dataset.src = url; }
   const pos = +x.c.in + (ED.t - x.start);
-  const apply = () => { try { v.currentTime = pos; } catch {} };
-  if (v.readyState >= 1) apply(); else v.onloadedmetadata = apply;
-  v.volume = Math.min(1, x.c.voice_gain ?? 1); v.muted = ED.mode === 'music';
+  const apply = () => { try { if (Math.abs(cur.currentTime - pos) > 0.05) cur.currentTime = pos; } catch {} };
+  if (cur.readyState >= 1) apply(); else cur.onloadedmetadata = apply;
+  cur.volume = Math.min(1, x.c.voice_gain ?? 1); cur.muted = ED.mode === 'music';
+  edPreload(x);
   edSyncSub();
 }
 function edSyncSub() {
@@ -10990,29 +11028,50 @@ function edPlay(stopAt) {
   if (!ED.L.clips.length) return;
   if (ED.t >= ED.L.total - 0.05) ED.t = 0;
   ED.playing = true; ED.stopAt = stopAt; $('#ePlay').textContent = '❚❚';
-  const v = $('#eVid'); edShowFrame();
+  edShowFrame();
   let last = performance.now();
   const tick = now => {
     if (!ED.playing) return;
-    const x = edAt(ED.t);
-    if (x && !v.paused && v.dataset.src) {
-      const t = x.start + (v.currentTime - +x.c.in);
-      ED.t = t;
-      if (v.currentTime >= +x.c.out - 0.03) { ED.t = x.start + x.dur + 0.001; edShowFrame(); if (edAt(ED.t)) v.play().catch(() => {}); }
-    } else if (!x) { ED.t += (now - last) / 1000; const nx = edAt(ED.t); if (nx) { edShowFrame(); v.play().catch(() => {}); } }
-    else if (v.paused && x) { v.play().catch(() => {}); }
+    const lp = ED.loop && ED.L.clips.find(y => y.c.id === ED.loop);
+    if (ED.loop && !lp) ED.loop = null;
+    if (lp && (ED.t >= lp.start + lp.dur - 0.05 || ED.t < lp.start - 0.05)) { ED.t = lp.start; edShowFrame(); edV()?.play().catch(() => {}); }
+    const v = edV(); const x = edAt(ED.t);
+    if (x && v && !v.paused && v.dataset.src === edUrl(x)) {
+      ED.t = x.start + (v.currentTime - +x.c.in);
+      if (lp && x === lp && v.currentTime >= +x.c.out - 0.04) { ED.t = lp.start; try { v.currentTime = +x.c.in; } catch {} }
+      else if (v.currentTime >= +x.c.out - 0.04) {   // 컷 경계: 다음 컷으로
+        const nx = edNextOf(x);
+        ED.t = x.start + x.dur + 0.001;
+        if (nx && edUrl(nx) === v.dataset.src && Math.abs(+nx.c.in - +x.c.out) < 0.06) { /* 같은 파일이 이어지면 그대로 흘려보낸다 */ }
+        else if (nx && nx.start <= ED.t + 0.01) { if (!edSwapTo(nx)) { edShowFrame(); edV()?.play().catch(() => {}); } else edPreload(nx); }
+        else edShowFrame();
+      }
+    } else if (!x) { ED.t += (now - last) / 1000; const nx = edAt(ED.t); if (nx) { edShowFrame(); edV()?.play().catch(() => {}); } }
+    else if (x && v && (v.paused || v.dataset.src !== edUrl(x))) { if (v.dataset.src !== edUrl(x)) edShowFrame(); edV()?.play().catch(() => {}); ED.t += (now - last) / 1000 * 0; }
     last = now;
     edMusicSync(); edSyncSub(); edUiTime();
-    if (ED.t >= (ED.stopAt ?? ED.L.total) - 0.02) { edPause(); return; }
+    if (!ED.loop && ED.t >= (ED.stopAt ?? ED.L.total) - 0.02) { edPause(); return; }
     ED.raf = requestAnimationFrame(tick);
   };
-  if (edAt(ED.t)) v.play().catch(() => {});
+  if (edAt(ED.t)) edV()?.play().catch(() => {});
   ED.raf = requestAnimationFrame(tick);
 }
 function edPause() {
   ED.playing = false; cancelAnimationFrame(ED.raf);
-  const v = $('#eVid'); if (v) v.pause(); const p = $('#ePlay'); if (p) p.textContent = '▶';
+  edVids().forEach(v => v.pause()); const p = $('#ePlay'); if (p) p.textContent = '▶';
   Object.values(edMusicEls).forEach(a => a.pause());
+}
+// 빨간 재생선을 끌면 그 자리로 옮기고(끄는 동안 화면도 따라감), 놓으면 그 자리부터 재생
+function edBindHead() {
+  const head = $('#eHead'), grip = head?.querySelector('.grip'), cv = $('#eCanvas'); if (!grip || !cv) return;
+  grip.onpointerdown = ev => {
+    ev.preventDefault(); ev.stopPropagation(); grip.setPointerCapture(ev.pointerId);
+    const wasPlaying = ED.playing; edPause(); head.classList.add('drag');
+    const at = e => Math.max(0, (e.clientX - cv.getBoundingClientRect().left) / ED.pps);
+    let raf = 0;
+    grip.onpointermove = e => { const t = at(e); ED.t = Math.min(ED.L.total, t); edUiTime(); if (!raf) raf = requestAnimationFrame(() => { raf = 0; edShowFrame(); }); };
+    grip.onpointerup = e => { grip.onpointermove = grip.onpointerup = null; head.classList.remove('drag'); edSeek(at(e), false); edPlay(); void wasPlaying; };
+  };
 }
 function edMusicSync() {
   for (const m of ED.tl.music) {
@@ -11033,7 +11092,7 @@ function edStop() { edPause(); clearInterval(ED.pollTimer); ED.pollTimer = null;
 function edSetMode(mode) {
   ED.mode = mode;
   document.querySelectorAll('#eMode [data-mode], #eRMode [data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
-  const v = $('#eVid'); if (v) v.muted = mode === 'music';
+  edVids().forEach(v => { v.muted = mode === 'music' || v !== edV(); });
   edMusicSync(); edResultMode();
 }
 
@@ -11113,6 +11172,19 @@ function edResultMode() {
 }
 function edBindResult() {
   const v = $('#eRVid'), a = $('#eRAud'); if (!v || !a) return;
+  // 자막: 저장소 자막 파일(vtt)을 읽어 영상 위에 직접 띄운다(브라우저 자막 트랙은 다른 주소의 파일을 막아 안 보였음)
+  const subEl = $('#eRSub'); let cues = [];
+  if (v.dataset.vtt) fetch(v.dataset.vtt).then(r => r.ok ? r.text() : '').then(txt => {
+    const ts = s => { const p = s.trim().replace(',', '.').split(':').map(Number); return p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : p[0] * 60 + p[1]; };
+    cues = txt.split(/\r?\n\r?\n/).map(b => { const m = b.match(/([\d:.,]+)\s*-->\s*([\d:.,]+)[^\n]*\n([\s\S]*)/); return m ? { s: ts(m[1]), e: ts(m[2]), t: m[3].trim() } : null; }).filter(Boolean);
+  }).catch(() => {});
+  const showSub = () => { if (!subEl) return; const c = ED.showSub === false ? null : cues.find(x => v.currentTime >= x.s && v.currentTime < x.e); subEl.textContent = c ? c.t : ''; subEl.style.display = c ? '' : 'none'; };
+  v.addEventListener('timeupdate', showSub); v.addEventListener('seeked', showSub);
+  // 소리 확인: 재생 2초 뒤에도 소리를 하나도 못 읽었으면 알려 준다(크롬)
+  v.addEventListener('playing', () => setTimeout(() => {
+    const n = $('#eRNoAud'); if (!n || v.muted || v.webkitAudioDecodedByteCount === undefined) return;
+    if (v.webkitAudioDecodedByteCount === 0 && v.currentTime > 1) { n.style.display = ''; n.textContent = '이 결과물 파일에서 소리를 찾지 못했습니다(소리 없이 조립됨). 컷 영상에 소리가 있는지 확인해 주세요'; }
+  }, 2500), { once: true });
   const sync = () => { if ((ED.mode || 'full') === 'full') { a.pause(); return; } if (Math.abs(a.currentTime - v.currentTime) > 0.25) a.currentTime = v.currentTime; };
   v.onplay = () => { if ((ED.mode || 'full') !== 'full') { edResultMode(); a.play().catch(() => {}); } };
   v.onpause = () => a.pause(); v.onseeked = sync; v.ontimeupdate = sync;
@@ -11149,7 +11221,9 @@ async function edRenderOut() {
       <button class="btn primary" id="eRFinal">완성본 내보내기</button></div>
     <p class="quiet" style="margin:6px 0">정확한 미리보기: 대사 위치·음악 페이드·자막까지 실제 완성본과 똑같이, 작은 화질로 1분 안팎에 만듭니다.
       완성본: 원본 화질로 ${hasWin ? '<b>집 PC</b>' : '켜져 있는 컴퓨터'}가 만들어 <code>00_편집본</code> 폴더에 <b>완성 영상 · 영상만(무음) · 대사·현장음 · 배경음악 · 자막(.srt) · 프리미어/다빈치용 타임라인(.xml)</b>을 저장합니다.</p>
-    ${latest ? `<div class="ed-result"><div><video id="eRVid" controls playsinline preload="metadata" src="${esc(urls[latest.files.preview] || '')}">${latest.files.vtt && urls[latest.files.vtt] ? `<track kind="subtitles" srclang="ko" label="한국어" src="${esc(urls[latest.files.vtt])}" default>` : ''}</video>
+    ${latest ? `<div class="ed-result"><div><div class="ed-rwrap"><video id="eRVid" controls playsinline preload="metadata" src="${esc(urls[latest.files.preview] || '')}" data-vtt="${esc(latest.files.vtt && urls[latest.files.vtt] || '')}"></video><div id="eRSub" class="ed-sub" style="display:none"></div></div>
+      ${latest.files.audio_clips === 0 ? `<div class="msg warn" style="margin:6px 0 0">이 결과물에는 대사 소리가 없습니다: 넣은 컷 영상들에 소리가 없었습니다(생성 때 소리 없이 만들어졌을 수 있음).</div>` : ''}
+      <div class="quiet" id="eRNoAud" style="display:none;color:var(--bad)"></div>
       <audio id="eRAud" preload="auto" data-voice="${esc(urls[latest.files.voice] || '')}" data-music="${esc(urls[latest.files.music] || '')}" hidden></audio>
       ${latest.files.voice ? `<div class="seg" id="eRMode" style="margin-top:6px">${[['full', '전체'], ['voice', '대사만'], ['music', '음악만']].map(([k, l]) => `<button data-mode="${k}" class="${(ED.mode || 'full') === k ? 'on' : ''}">${l}</button>`).join('')}</div>` : ''}</div>
       <div><b>${latest.kind === 'final' ? '완성본' : '미리보기'} · 버전 ${latest.rev || '-'}</b><div class="quiet">${fmt(latest.finished_at)} · ${latest.files.clips}컷 · ${fmtT(latest.files.seconds)}</div>

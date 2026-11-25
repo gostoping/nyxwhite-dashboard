@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.33.0"
+VERSION = "1.33.1"
 
 import base64
 import glob
@@ -4874,7 +4874,7 @@ def t_assemble(t):
             rr = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, cwd=work)
         if rr.returncode != 0:
             raise RuntimeError(f"조립 실패: {(rr.stderr or '')[-400:]}")
-        files = {"seconds": total, "clips": len(clips)}
+        files = {"seconds": total, "clips": len(clips), "audio_clips": len(alab)}   # 소리가 있는 컷 수(0이면 결과물에 대사 소리 없음)
         srt, vtt = os.path.join(work, f"{tag}_ko.srt"), os.path.join(work, f"{tag}_ko.vtt")
         if subs:
             write_subs(subs, srt, vtt)
