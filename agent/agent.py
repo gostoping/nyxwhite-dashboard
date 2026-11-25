@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.30.1"
+VERSION = "1.30.2"
 
 import base64
 import glob
@@ -516,7 +516,8 @@ QUICK_KINDS = ["bible_prompt", "coord_review", "photo_describe", "balance_check"
 PHOTO_KINDS = ["photo_design", "photo_set"]
 QUICK = {"busy": None, "photo": None, **{f"busy{i}": None for i in range(8)}, **{f"photo{i}": None for i in range(4)},
          **{f"gen{i}": None for i in range(4)}, **{f"prep{i}": None for i in range(4)},
-         **{f"work{i}": None for i in range(4)}, **{f"heavy{i}": None for i in range(2)}}   # 줄 이름을 미리 다 만들어 둔다(동시에 고치다 깨지지 않게)
+         **{f"work{i}": None for i in range(4)}, **{f"heavy{i}": None for i in range(2)},
+         **{f"design{i}": None for i in range(3)}, **{f"voice{i}": None for i in range(3)}}   # 줄 이름을 미리 다 만들어 둔다(동시에 고치다 깨지지 않게)
 PULSE = {"last": 0.0, "restart": False}
 
 
@@ -550,11 +551,13 @@ QUICK_WORKERS = 4   # 바이블 반영·코디네이터 감수는 4개를 동시
 GEN_KINDS = ["generate"]   # 영상 생성은 Higgsfield를 기다리는 시간이 대부분 → 3개 동시에
 PREP_KINDS = ["prep_cut"]  # 컷 장면 사진 준비 2개 동시에
 HEAVY_KINDS = ["assemble", "upscale"]   # 컴퓨터를 많이 쓰는 ffmpeg 일은 1개씩
+DESIGN_KINDS = ["director", "writers_room"]   # 컷 설계·작가실은 전용 줄 2개: 목소리·감수 일이 몰려도 기다리지 않게
+VOICE_KINDS = ["voice_cast", "voice_design", "voice_save"]   # ElevenLabs를 기다리는 목소리 일은 따로 2개
 WORK_WORKERS = 3   # 그 밖의 일(감독 컷 설계·작가실·감수·보관·목소리·배경음악 등)은 3개 동시에 — 예전엔 본체 혼자 하나씩 해서 밀렸음
 
 
 def work_kinds():
-    return sorted(k for k in TASKS if k not in QUICK_KINDS + PHOTO_KINDS + GEN_KINDS + PREP_KINDS + HEAVY_KINDS)
+    return sorted(k for k in TASKS if k not in QUICK_KINDS + PHOTO_KINDS + GEN_KINDS + PREP_KINDS + HEAVY_KINDS + DESIGN_KINDS + VOICE_KINDS)
 
 
 def parallel(fns, workers=4):
@@ -5080,7 +5083,9 @@ def main():
                          (PHOTO_KINDS, "photo", "사진 줄", 2),        # 서로 다른 인물 후보·얼굴 학습
                          (GEN_KINDS, "gen", "영상 줄", 3),
                          (PREP_KINDS, "prep", "장면 사진 줄", 2),
-                         (work_kinds(), "work", "일반 줄", WORK_WORKERS),   # 감독·작가실·감수·보관·목소리 등
+                         (DESIGN_KINDS, "design", "컷 설계·작가실 줄", 2),
+                         (VOICE_KINDS, "voice", "목소리 줄", 2),
+                         (work_kinds(), "work", "일반 줄", WORK_WORKERS),   # 감수·보관·배경음악 등
                          (HEAVY_KINDS, "heavy", "편집·업스케일 줄", 1)]
                 for kinds, slot, label, n in lanes:
                     for i in range(n):
