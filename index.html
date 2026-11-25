@@ -7235,7 +7235,7 @@ async function viewBible(main) {
       <div class="brow"><span class="blbl">한꺼번에</span><div class="bbtns">
         ${showPhotoBtn ? `<button class="btn small" id="bphotos" title="적용된 묘사는 있고 사진이 없는 항목의 사진 후보를 만듭니다. '직접 올리기' 항목은 빠집니다(인물은 Soul 2 실사)">${catLabel ? esc(catLabel) + ' ' : ''}사진 만들기 (${photoTodo.length})</button>` : ''}
         <button class="btn small" id="bcoord" title="코디네이터가 지금 적용된 모든 항목의 묘사·영어 프롬프트·대본 일치를 감수하고 카드에 기록합니다(항목당 수십 원)">전체 감수 다시 하기</button>
-        <button class="btn small" id="bcast" title="모든 인물을 기본(젊고 나긋한 사람 같은 목소리) + 인물별 감정선으로 새로 추천해 후보 1번을 바로 넣습니다">인물 목소리 전체 다시 추천</button></div></div>
+        <button class="btn small" id="bcast" title="목소리가 아직 없는 인물만 추천해 바로 넣습니다(이미 정한 목소리는 그대로)">목소리 없는 인물 추천받기</button></div></div>
       <div class="brow"><span class="blbl">설정</span><div class="bbtns">
         <button class="btn small" id="hdrProp" title="협찬(PPL) 소품을 사진과 함께 넣으면 작가실이 세게 보일 화·씬을 추천합니다">+ 협찬 소품</button>
         <button class="btn small" id="hdrLoc" title="협찬(PPL) 장소를 사진과 함께 넣으면 작가실이 세게 보일 화·씬을 추천합니다">+ 협찬 장소</button>
@@ -7582,10 +7582,11 @@ async function viewBible(main) {
   ($('#bcast') || {}).onclick = guard(async () => {
     const chars = entries.filter(e => e.category === 'character');
     if (!chars.length) return toast('먼저 캐릭터를 바이블에 등록해 주세요 (+ 항목 추가)');
-    const main1 = chars.filter(e => !e.same_as);   // 동일인의 다른 모습은 원래 인물 목소리를 같이 씀
-    const had = main1.filter(e => cur(e.id)?.voice_id).length;
-    if (!confirm(`인물 ${main1.length}명 목소리를 기본(20대 초중반 · 젊고 나긋하고 부드러운 · 사람 같은 목소리)에 인물별 감정선을 얹어 새로 추천합니다.\n인물마다 후보 3개를 만들고 1번을 바로 바이블에 넣습니다${had ? `(이미 정한 ${had}명 목소리도 바뀝니다 · 나중에 후보 바꾸기 가능)` : ''}.\n동일인 카드는 같은 목소리로 같이 바뀝니다.\n(Claude 수십 원 + ElevenLabs 크레딧 인물당 후보 3개분)`)) return;
-    await q(S.sb.from('pipeline_tasks').insert({ kind: 'voice_cast', series_id: S.seriesId, payload: { series_id: S.seriesId, redo: true, auto: true, force: true } }));
+    // 바이블에 목소리가 적용된 인물은 다시 추천하지 않는다(대표 지시). 목소리 없는 인물만, 동일인의 다른 모습은 원래 인물 목소리를 같이 씀
+    const todo = chars.filter(e => !e.same_as && !cur(e.id)?.voice_id);
+    if (!todo.length) return toast('목소리가 없는 인물이 없습니다. 이미 정한 목소리는 다시 추천하지 않습니다(바꾸려면 그 인물 카드의 ⋯ → 새로 추천받기)');
+    if (!confirm(`목소리가 아직 없는 인물 ${todo.length}명(${todo.map(e => e.name).join(', ')})의 목소리를 추천해 바로 넣습니다.\n이미 목소리가 정해진 인물은 그대로 둡니다.\n(Claude 수십 원 + ElevenLabs 크레딧 인물당 3개분)`)) return;
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'voice_cast', series_id: S.seriesId, payload: { series_id: S.seriesId, entry_ids: todo.map(e => e.id), auto: true } }));
     toast('작가실에 맡겼습니다. 몇 분 뒤 인물 카드에 새 목소리가 들어갑니다');
   });
   main.querySelectorAll('[data-bedit]').forEach(b => b.onclick = () => {
