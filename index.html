@@ -6831,7 +6831,7 @@ function reviewBox(e, c) {
     ${mine.summary ? `<div style="margin-top:2px">${esc(mine.summary)}</div>` : ''}
     ${mine.owner_note ? `<div class="msg warn" style="margin:4px 0 0">대표님 확인: ${esc(mine.owner_note)} <button class="btn small" data-bfixreq="${esc(e.id)}">고쳐쓰기</button></div>` : ''}
     ${(mine.checks || []).length ? `<ul class="rvchk">${mine.checks.map(k => `<li class="${esc(k.status)}">${CHK[k.status] || '·'} ${esc(k.item || '')}${k.note ? ` <span class="quiet">— ${esc(k.note)}</span>` : ''}</li>`).join('')}</ul>` : ''}
-    ${mine.photo_redo ? `<div class="msg warn" style="margin:6px 0 0"><b>기준 사진에 문제가 있습니다.</b> ${(mine.photo_issues || []).map(x => esc(x)).join(' / ')}
+    ${mine.photo_redo && !c.soul_id ? `<div class="msg warn" style="margin:6px 0 0"><b>기준 사진에 문제가 있습니다.</b> ${(mine.photo_issues || []).map(x => esc(x)).join(' / ')}
       <div class="row" style="margin-top:6px"><button class="btn small primary" data-rvphoto="${esc(e.id)}">다시 적용해서 사진 만들기 (추천)</button>
       <span class="quiet">지금 바이블 묘사·영어 프롬프트로 후보를 새로 만듭니다. 고른 뒤 바이블에 적용하면 기준 사진이 바뀝니다.</span></div></div>` : ''}
     ${mine.prompt_after ? `<details><summary class="quiet">영어 프롬프트 보정 전·후</summary><div class="quiet" style="margin-top:4px">전: ${esc(mine.prompt_before || '-')}</div><div style="margin-top:4px">후: ${esc(mine.prompt_after)}</div></details>` : ''}` : '';
@@ -7188,7 +7188,9 @@ async function viewBible(main) {
       <li>수정본을 확정하면 감독이 그 씬을 다시 설계합니다. 이미 만든 컷이 있으면 제작 탭에 "PPL 반영해 다시 설계" 안내가 뜹니다.</li>
     </ol></div>` : ''}
   <div id="bxBox"></div>
-  ${(() => { const bad = entries.map(e => ({ e, r: ((S.reviews || {})[e.id] || []).find(r => r.version_id === cur(e.id)?.id) })).filter(x => x.r && (x.r.verdict === 'owner' || x.r.photo_redo));
+  ${(() => { const bad = entries.map(e => ({ e, r: ((S.reviews || {})[e.id] || []).find(r => r.version_id === cur(e.id)?.id) }))
+      .map(x => x.r && cur(x.e.id)?.soul_id ? { ...x, r: { ...x.r, photo_redo: false } } : x)   // 얼굴 고정 = 대표가 정한 사진 → 사진 추천은 지운다
+      .filter(x => x.r && (x.r.verdict === 'owner' || x.r.photo_redo));
     const open = Object.values(S.cvTask || {}).filter(t => ['queued', 'running'].includes(t.status)).length;
     return entries.length ? `<div class="card" data-fold="cv-panel" data-fold-min="200" data-fold-default="1" style="border-color:${bad.length ? 'var(--bad)' : 'var(--line)'}"><div class="row"><b>코디네이터 감수 결과</b>
       ${open ? pill(`감수 중·대기 ${open}`, 'warn') : ''}${bad.length ? pill(`이상 ${bad.length}건`, 'bad') : pill('이상 없음', 'good')}
@@ -7224,7 +7226,7 @@ async function viewBible(main) {
         <button class="btn danger small" data-brej="${esc(p.id)}">반려</button></div></div>`; }).join('')}` : ''}
   ${shown.length ? `<div class="bgrid">${shown.map(e => {
     const c = cur(e.id); const n = versions.filter(v => v.entry_id === e.id && v.status !== 'proposed').length;
-    const rvBad = c && ((S.reviews || {})[e.id] || []).find(r => r.version_id === c.id && (r.verdict === 'owner' || r.photo_redo));
+    const rvBad = c && ((S.reviews || {})[e.id] || []).find(r => r.version_id === c.id && (r.verdict === 'owner' || (r.photo_redo && !c.soul_id)));
     return `<div class="card bcard ${hasPhotoSrc ? (e.photo_source === 'upload' ? 'ps-up' : 'ps-auto') : ''}" data-card="${esc(e.id)}" ${rvBad ? 'style="border-color:var(--bad)"' : ''}>
       <div class="row"><b style="font-size:16px">${esc(e.name)}</b>${pill(BIBLE_CAT[e.category])}${c ? pill('v' + c.version_no, 'accent') : pill('승인본 없음', 'bad')}</div>
       ${e.summary ? `<div class="quiet" style="margin-top:4px">${esc(e.summary)}</div>` : ''}
