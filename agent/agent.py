@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.28.1"
+VERSION = "1.29.0"
 
 import base64
 import glob
@@ -1792,9 +1792,7 @@ def recommend_voice(ctx, speaker):
     fem = len(re.findall(r"여자|여성|소녀|그녀|언니|누나|엄마|어머니|할머니|아가씨|female|woman|girl|\bshe\b|\bher\b", txt, re.I))
     mal = len(re.findall(r"남자|남성|소년|그는|오빠|형|아빠|아버지|할아버지|아저씨|\bmale\b|\bman\b|\bboy\b|\bhe\b|\bhis\b", txt, re.I))
     gender = "female" if fem > mal else "male" if mal > fem else None
-    age = ("old" if re.search(r"노인|할머니|할아버지|[6-8]0대|elderly|old (wo)?man", txt, re.I)
-           else "middle_aged" if re.search(r"중년|[4-5]0대|middle.aged|아저씨|아주머니", txt, re.I)
-           else "young" if re.search(r"[1-2]0대|소녀|소년|학생|아이돌|young|teen|girl|boy", txt, re.I) else None)
+    age = "young"   # 대표 기본값: 모든 인물은 젊은 목소리
     lab = lambda v: {k: str(v2).lower().replace(" ", "_") for k, v2 in (v.get("labels") or {}).items()}
     pool = [v for v in voices if not gender or lab(v).get("gender") == gender] or voices
     pool = [v for v in pool if not age or lab(v).get("age") == age] or pool
@@ -3263,7 +3261,7 @@ def _voice_design(t):
     progress(f"{d['entry_name']} 목소리 후보를 만드는 중")
     if len((d.get("sample_text") or "").strip()) < 100:   # 들어 볼 대사는 코디네이터가 대본에서 뽑아 쓴다
         d["sample_text"] = voice_sample_text(d)
-    body = {"voice_description": d["description"].split("\n[노래]")[0][:1000]}
+    body = {"voice_description": voice_desc(d["description"])}
     sample = (d.get("sample_text") or "").strip()
     if len(sample) >= 100:
         body["text"] = sample[:1000]
@@ -3298,6 +3296,24 @@ def _voice_design(t):
         return f"{d['entry_name']} 추천 목소리 적용 ({vid})"
     notify(f"{d['entry_name']} 목소리 후보 {len(previews)}개 도착", "바이블 탭에서 들어 보고 골라 주세요")
     return f"{d['entry_name']} 후보 {len(previews)}개"
+
+
+# 대표 지시(기본 목소리): 모든 인물은 젊고, 사람 같은(AI 티 없는), 나긋하고 부드러운 목소리가 기본. 그 위에 인물마다 감정선만 얹는다.
+VOICE_BASE = ("Young adult voice in their early-to-mid 20s, light and youthful timbre, soft and gentle, warm and calm, "
+              "natural conversational Korean delivery like a real person talking, relaxed breathing, subtle natural pauses, "
+              "not deep, not husky, not raspy, not mature, not middle-aged, not an announcer or narrator, not robotic or synthetic, "
+              "clean close-mic studio recording.")
+_OLD_WORDS = re.compile(r"\b(deep(er|ly)?|husky|raspy|gravell?y|gruff|mature|middle[- ]aged|elderly|old(er)?|aged|baritone|bass|booming|"
+                        r"authoritative|commanding|heavy|weathered|30s|40s|50s|60s|thirties|forties|fifties|sixties|announcer|narrator)\b[,]?", re.I)
+
+
+def voice_desc(desc):
+    """목소리 설명 → 기본 목소리(젊고 나긋·사람 같음)를 앞에 두고, 나이 들게 만드는 낱말은 뺀 뒤 인물별 감정선을 붙인다."""
+    body = re.sub(r"\b(in\s+)?(his|her|their)\s+(early|mid|late)?[- ]?(\d0s|thirties|forties|fifties|sixties)\b|\b(aged|age)\s*\d+\b|\d{2}\s*(대|세)", "",
+                  (desc or "").split("\n[노래]")[0], flags=re.I)
+    body = _OLD_WORDS.sub("", body)
+    body = re.sub(r"\s{2,}", " ", re.sub(r"\s+,", ",", body)).strip(" ,.")
+    return (VOICE_BASE + (" Character and emotional color: " + body if body else ""))[:1000]
 
 
 def voice_sample_text(d):
@@ -4366,8 +4382,11 @@ def t_voice_cast(t):
     title = (cast.get("series") or {}).get("title", "")
     progress(f"작가실이 「{title}」 인물 {len(chars)}명의 목소리를 설계하는 중")
     system = """너는 드라마 캐스팅 디렉터 겸 음성 감독이다. 대본과 인물 설정을 읽고 인물마다 ElevenLabs 목소리 디자인용 설명을 쓴다.
-- voice_description: 영어 200~600자. 나이, 성별, 출신·억양(한국어를 말할 때의 억양), 음색(밝음·허스키·두께·높이), 말 속도, 감정 표현 습관, 녹음 품질("clean studio recording").
-  실존 인물·배우·가수 이름은 쓰지 않는다. 인물끼리 확실히 구별되게 높이·질감·속도를 다르게 잡는다.
+- 대표 기본값(반드시): 모든 인물은 20대 초중반의 젊은 목소리, 사람처럼 자연스럽고(AI 티 없음) 나긋하고 부드러운 목소리다.
+  설정상 나이가 많아 보여도 중후·굵은·허스키·걸걸한 목소리로 쓰지 않는다(deep, husky, raspy, mature, middle-aged, narrator 같은 말 금지).
+- voice_description: 영어 200~500자. 기본값 위에 이 인물만의 것: 성별, 높낮이(조금 높게/조금 낮게), 밝기, 말 속도, 그리고 이 인물의 감정선
+  (대본에서 이 인물이 주로 지나가는 감정, 예: 떨리지만 다짐하는, 장난스럽다가 진지해지는)과 감정 표현 습관. 녹음 품질 "clean close-mic studio recording".
+  실존 인물·배우·가수 이름은 쓰지 않는다. 인물끼리는 높이·밝기·속도·감정 습관으로 구별한다(나이·굵기로 구별하지 않는다).
 - sample_text: 그 인물이 대본에서 할 법한 한국어 대사 130~250자. 감정이 두세 번 바뀌게(설렘→긴장→다짐 등) 써서 목소리 폭을 들을 수 있게.
 - singing_hint: 노래 장면이 있다면 어울리는 노래 음색 한 줄(한국어). 없으면 빈 문자열.
 답 형식: <json>{"voices": [{"entry_id": "", "name": "", "voice_description": "", "sample_text": "", "singing_hint": ""}]}</json>"""
@@ -4410,7 +4429,7 @@ def t_voice_save(t):
 def _voice_save_design(d):
     did = d["id"]
     progress(f"{d['entry_name']} 목소리를 ElevenLabs에 저장하는 중")
-    desc = d["description"].split("\n[노래]")[0]
+    desc = voice_desc(d["description"])
     if len(desc) < 20:
         desc = (desc + " — NYX WHITE 드라마 캐릭터 목소리")[:1000]
     try:
