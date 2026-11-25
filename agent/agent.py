@@ -888,7 +888,7 @@ def t_writers_room(t):
 </draft>
 
 [제작용 씬 나누기 — 감독이 바로 컷 설계를 할 수 있게, 작가실이 여기서 끝낸다]
-- 장소(배경)나 시간이 바뀌면 새 씬이다. 한 씬 안에 장소가 둘이면 둘로 나눈다.
+- 씬은 장소(배경)별로 구분한다: 장소나 시간이 바뀌면 새 씬이다. 한 씬 안에 장소가 둘이면 둘로 나눈다. 씬 머리의 장소 이름은 바이블 장소 이름을 그대로 쓴다.
 - 한 씬은 {SCENE_MAX_SEC}초 이하. 넘으면 감정이 꺾이는 곳·인물이 들고 나는 곳에서 나눈다(대사 한 줄을 중간에 끊지 않는다). 시간 구간도 나눠 적는다.
 - 씬 번호는 화 처음부터 S#1, S#2, S#3…으로 순서대로. 'S#2-1' 같은 가지 번호는 쓰지 않는다.
 - 나누기만 하는 곳에서는 대사·사건·순서를 바꾸지 않는다.
@@ -924,8 +924,28 @@ def t_writers_room(t):
 [원고]
 {src['content']}"""
     progress(f"작가실이 {e.get('number')}화 원고를 읽고 감정선을 정리하는 중")
-    text, _ = claude(model, system, user, max_tokens=20000, stage="script_revision", episode_id=ep, note="작가실 정리본")
+    text, _ = claude(model, system, user, max_tokens=32000, stage="script_revision", episode_id=ep, note="작가실 정리본")
     script = pick_tag(text, "draft")
+    # 긴 화는 답이 길이 제한에 걸려 정리본이 중간에 잘린다 → 마지막 완성된 씬까지 살리고 그 뒤를 이어서 쓰게 한다(최대 3번)
+    for k in range(3):
+        if script or "<draft>" not in text:
+            break
+        part = text.split("<draft>", 1)[1]
+        heads = list(SCENE_HEAD.finditer(part))
+        if len(heads) < 2:
+            break
+        keep = part[:heads[-1].start()].rstrip()          # 잘린 마지막 씬은 버림
+        last_no = int(heads[-2].group(1))
+        progress(f"작가실 정리본이 길어 이어서 쓰는 중({k + 1}) — S#{last_no + 1}부터")
+        cont, _ = claude(model, system, user + f"""
+
+[이어서 쓰기] 정리본이 길어 S#{last_no}까지만 썼다. 아래는 지금까지 쓴 정리본의 끝부분이다. 원고에서 그 다음 내용부터 끝까지 같은 규칙으로 이어서,
+씬 번호는 S#{last_no + 1}부터 이어 붙여 <draft>…</draft>에 넣는다(앞부분을 다시 쓰지 않는다). JSON은 마지막에 한 번만.
+[지금까지 쓴 끝부분]
+{keep[-2500:]}""", max_tokens=32000, stage="script_revision", episode_id=ep, note=f"작가실 정리본(이어서 {k + 1})")
+        more = pick_tag(cont, "draft") or (cont.split("<draft>", 1)[1] if "<draft>" in cont else "")
+        text = "<draft>\n" + keep + "\n\n" + more.strip() + ("\n</draft>" if pick_tag(cont, "draft") else "") + "\n" + cont.split("</draft>", 1)[-1]
+        script = pick_tag(text, "draft")
     meta = safe_json(text)
     if not script or len(script) < len(src["content"]) * 0.5:
         raise RuntimeError("정리본이 원고보다 너무 짧게 나왔습니다(잘림 의심). 다시 시도해 주세요")
@@ -940,11 +960,9 @@ def t_writers_room(t):
     summary = (meta.get("summary") or "") + f"\n변경 {len(changes)}곳" + (f" · 흐름 변경 제안 {len(props)}건(대표 승인 필요)" if props else "")
     confirmed = None
     if wr.get("auto_confirm") is True and not props and not ppl:   # PPL을 넣고 축약한 수정본은 늘 대표가 읽고 확정
-        confirmed = rpc("agent_confirm_script", p_token=TOKEN, p_id=vid, p_summary=summary)
-        if p.get("auto_director", True):
-            rpc("agent_add_task", p_token=TOKEN, p={"kind": "director", "episode_id": ep, "payload": {"script_version_id": vid}})
+        confirmed = rpc("agent_confirm_script", p_token=TOKEN, p_id=vid, p_summary=summary)   # 확정되면 DB가 감독 컷 설계를 바로 맡긴다
     else:
-        notify(f"{e.get('number')}화 작가실 {'PPL 반영 수정본' if ppl else '정리본'} 도착", summary[:300] + "\n대본 탭에서 확인 후 확정해 주세요", "warning" if props or ppl else "info")
+        notify(f"{e.get('number')}화 작가실 {'PPL 반영 수정본' if ppl else '정리본'} 도착", summary[:300] + "\n대본 탭(또는 지시 탭)에서 확정하면 감독이 바로 컷 설계를 시작합니다", "warning" if props or ppl else "info")
     return f"정리본 저장" + (f", v{confirmed}로 확정 → 감독 컷 설계 시작" if confirmed else ", 확정 대기") + f" · 변경 {len(changes)}곳 · 제안 {len(props)}건"
 
 
@@ -3773,6 +3791,88 @@ avoid에 생성 모델에 넣을 금지 사항(영어 짧은 구, 예: "no ID ba
     return f"{name} 사진 {len(out)}장 확인: 문제 {bad}장" + (" · 고친 프롬프트로 자동 다시 만드는 중" if redo else " · 다음 후보용 프롬프트 개선" if improved or avoid else "")
 
 
+VIDEO_REVIEW_RULES = """[영상감수자 — 영상을 만들기 전에 컷 설계(프롬프트)를 본다. 영상 생성 모델에서 의도대로 나오게 하는 것이 책임이다]
+1) 한 컷은 한 장면·한 장소·하나의 연속 동작인가(장면 전환·시간 점프가 섞이면 안 됨). 길이 4~15초에 맞는 동작량인가.
+2) 인물·장소 묘사가 바이블 고정 문장(영어 프롬프트)과 같은가, reference_names가 실제로 나오는 인물·장소와 맞는가.
+3) 표정 변화가 2~3초마다 구체적으로(눈·입·눈썹) 적혔는가, 카메라는 한 가지 움직임(고정·천천히 밀기 등)인가.
+4) 앞 컷과 이어지는 컷(continue_prev)이면 자세·위치·의상·소품이 이어지는가.
+5) 글자·자막·로고·간판 글자를 요구하지 않는가, 생성 서비스가 거절할 표현(노출·폭력 과장·실존 인물 이름)이 없는가.
+6) 프롬프트가 영어로 명확한가(대사는 한국어 원문 그대로 따옴표)."""
+
+
+@task("cut_review")
+def t_cut_review(t):
+    """작가실이 가져온 컷 설계를 제작 전에 감수: mode emotion(감정감수자: 대사·소리·감정선) | video(영상감수자: 화면·동작·일관성).
+    고칠 수 있는 것은 감수자가 프롬프트를 직접 고치고(대표 승인 없이 설계 단계만), 결과를 컷마다 남긴다."""
+    ep = t["episode_id"]
+    p = t.get("payload") or {}
+    mode = p.get("mode") if p.get("mode") in ("emotion", "video") else "emotion"
+    who = "감정감수자" if mode == "emotion" else "영상감수자"
+    ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep)
+    cuts = [c for c in (rpc("agent_list_cuts", p_token=TOKEN, p_episode=ep) or []) if c.get("status") in ("designed", "hold", "failed")]
+    if not cuts:
+        return "감수할 컷이 없습니다(설계 전이거나 모두 생성됨)"
+    rmodel = setting(ctx, "generation", "claude_reviewer", "claude-sonnet-5-5")
+    rules = VIDEO_REVIEW_RULES if mode == "video" else ""
+    def slim(c):
+        return {k: c.get(k) for k in ("scene_no", "cut_no", "code", "seconds", "summary", "dialogue", "emotion", "expression_beats", "camera",
+                                      "reference_names", "prompt", "voice_lines", "continue_prev")}
+    def review_chunk(chunk):
+        if mode == "emotion":
+            r = review_cuts(ctx, ep, [slim(c) for c in chunk], rmodel)
+            return {(int(x.get("scene_no") or 0), int(x.get("cut_no") or 0)): x for x in (r.get("cuts") or []) if isinstance(x, dict)}
+        system = (guide(ctx, "영상감수자") or "너는 영상감수자다.") + f"""
+
+[시리즈 바이블]
+{bible_text(ctx)}
+
+{rules}
+
+[답 형식] 고칠 컷만 fixed_prompt(고친 영어 프롬프트 전체)를 준다. 대사는 바꾸지 않는다.
+<json>{{"cuts": [{{"scene_no": 1, "cut_no": 1, "verdict": "pass|fix", "issues": ["…"], "fixed_prompt": ""}}]}}</json>"""
+        text, _ = claude(rmodel, system, "[컷 설계]\n" + json.dumps([slim(c) for c in chunk], ensure_ascii=False), max_tokens=12000,
+                         stage="prompt_review", episode_id=ep, note=f"영상감수자 컷 감수({len(chunk)}컷)")
+        return {(int(x.get("scene_no") or 0), int(x.get("cut_no") or 0)): x for x in (safe_json(text).get("cuts") or []) if isinstance(x, dict)}
+    chunks = [cuts[i:i + 8] for i in range(0, len(cuts), 8)]
+    progress(f"{who}가 컷 {len(cuts)}개를 {len(chunks)}묶음으로 동시에 감수하는 중")
+    res = parallel([(lambda ch=ch: review_chunk(ch)) for ch in chunks], workers=4)
+    verdicts = {}
+    for r in res:
+        if isinstance(r, dict):
+            verdicts.update(r)
+    n_pass = n_fix = n_err = 0
+    for c in cuts:
+        v = verdicts.get((int(c["scene_no"]), int(c["cut_no"])))
+        if not v:
+            n_err += 1
+            continue
+        upd = {}
+        fixed = False
+        if v.get("verdict") == "fix":
+            newp = (v.get("fixed_prompt") or "").strip()
+            if mode == "emotion" and not newp and v.get("fix"):   # 감정감수자는 고칠 점만 주면 → 프롬프트에 반영해 다시 쓰게
+                txt, _ = claude(rmodel, "너는 감정감수자다. 아래 지적을 반영해 이 컷의 영어 영상 프롬프트를 고쳐 쓴다. 대사는 한국어 원문 그대로. 답은 <json>{\"prompt\": \"\"}</json>",
+                                json.dumps({"cut": slim(c), "fix": v.get("fix"), "issues": v.get("issues")}, ensure_ascii=False),
+                                max_tokens=3000, stage="prompt_review", episode_id=ep, note="감정감수자 프롬프트 반영")
+                newp = (safe_json(txt).get("prompt") or "").strip()
+            if len(newp) > 40:
+                upd["prompt"] = newp
+                fixed = True
+        upd["reviews"] = {mode: {"verdict": "pass" if v.get("verdict") != "fix" else ("fixed" if fixed else "fix"),
+                                 "issues": [str(x)[:200] for x in (v.get("issues") or [])][:6], "fix": str(v.get("fix") or "")[:300] or None,
+                                 "at": datetime.now().isoformat(timespec="seconds")}}
+        rpc("agent_update_cut", p_token=TOKEN, p_id=c["id"], p=upd)
+        if v.get("verdict") == "fix":
+            n_fix += 1
+        else:
+            n_pass += 1
+    msg = f"{who} 감수: {len(cuts)}컷 중 통과 {n_pass} · 고침 {n_fix}" + (f" · 답 없음 {n_err}" if n_err else "")
+    notify(f"{(ctx.get('episode') or {}).get('number')}화 {who} 감수 완료", msg + "\n제작 탭에서 확인하고 생성 승인을 눌러 주세요")
+    if n_err and not (n_pass + n_fix):
+        raise RuntimeError(f"{who}가 컷을 감수하지 못했습니다(답 형식 오류). 다시 시도하면 대부분 해결됩니다")
+    return msg
+
+
 @task("coord_review")
 def t_coord_review(t):
     """코디네이터: 적용된 바이블 항목을 감수한다 — 대표 요청 반영, 묘사↔영어 프롬프트 일치, 대본과 어긋남.
@@ -4472,7 +4572,7 @@ def fail_hint(e):
 
 
 QUIET_FAIL = {"coord_review", "bible_prompt", "photo_describe", "bible_place", "photo_design", "prep_cut"}
-TASK_NAME = {"coord_review": "코디네이터 감수", "upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "코디네이터: 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"cut_review": "컷 감수(감정·영상)", "coord_review": "코디네이터 감수", "upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "코디네이터: 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 # ------------------------------------------------------------------ 본체
