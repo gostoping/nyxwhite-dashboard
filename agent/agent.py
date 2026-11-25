@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.36.0"
+VERSION = "1.37.0"
 
 import base64
 import glob
@@ -1552,7 +1552,12 @@ def director_revise(t, cut_id):
     last = (cut.get("takes") or [{}])[-1] if cut.get("takes") else {}
     dmodel = setting(ctx, "generation", "claude_director", "claude-opus-5-5")
     progress(f"감독이 {cut.get('code')} 프롬프트를 고치는 중")
-    user = f"""아래 컷 하나를 고쳐서 같은 형식(cuts 배열에 1개)으로 주세요. 대사는 바꾸지 않습니다.
+    rng = ((t.get("payload") or {}).get("script_range") or "").strip()   # 대표가 제작 탭에서 대본 범위를 늘리거나 줄임
+    head = ("아래 컷 하나를 고쳐서 같은 형식(cuts 배열에 1개)으로 주세요. 이 컷이 맡을 대본 범위를 대표가 새로 정했습니다:\n"
+            "dialogue에는 아래 범위의 대사만 대본 원문 그대로(화자: 대사, 괄호 지문 포함) 순서대로 담고, 범위 밖 대사는 넣지 않습니다. "
+            "summary·expression_beats·voice_lines·staging·프롬프트·seconds(4~15)도 이 범위에 맞게 다시 씁니다.\n"
+            f"[이 컷이 맡을 대본 — 대표가 정함]\n{rng}" if rng else "아래 컷 하나를 고쳐서 같은 형식(cuts 배열에 1개)으로 주세요. 대사는 바꾸지 않습니다.")
+    user = f"""{head}
 [지금 컷]
 {json.dumps({k: cut.get(k) for k in ('scene_no', 'cut_no', 'code', 'scene_heading', 'seconds', 'summary', 'dialogue', 'emotion', 'expression_beats', 'camera', 'staging', 'reference_names', 'prompt')}, ensure_ascii=False)}
 [대표 지시 — 최우선. 아래를 빠짐없이 프롬프트에 반영한다. 바이블·감수 의견과 부딪히면 대표 지시를 따른다]
@@ -1575,7 +1580,8 @@ def director_revise(t, cut_id):
         "reference_names": refs, "director_note": new.get("director_note"), "est_usd": est_cut_usd(ctx, secs, refs), "clear_fix": True,
         "voice_lines": new.get("voice_lines") or cut.get("voice_lines") or [], "frame_first": new.get("frame_first") or {"prompt": (cut.get("frame_first") or {}).get("prompt")},
         "frame_last": new.get("frame_last") or {}, "use_end_frame": bool(new.get("use_end_frame")), "continue_prev": bool(new.get("continue_prev")), "prep_status": "none",
-        "review": {"verdict": "revised", "issues": [], "fix": "대표 요청·영상 감수 반영"}})
+        "review": {"verdict": "revised", "issues": [], "fix": "대표 요청·영상 감수 반영"},
+        **({"dialogue": new.get("dialogue") or "", "seconds": secs, "summary": new.get("summary") or None, "emotion": new.get("emotion") or None} if rng else {})})
     if setting(ctx, "generation", "auto_prep", True):
         rpc("agent_add_task", p_token=TOKEN, p={"kind": "prep_cut", "episode_id": ep, "scene_no": cut.get("scene_no"), "cut_id": cut_id,
                                                "payload": {"force": True, "auto_retry": bool((t.get("payload") or {}).get("auto_retry"))}})

@@ -273,7 +273,7 @@
   .ed-scroll::-webkit-scrollbar { height: 12px; } .ed-scroll::-webkit-scrollbar-thumb { background: #b9c0cc; border-radius: 6px; } .ed-scroll::-webkit-scrollbar-track { background: var(--bg); }
   .pflow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 14px; align-items: start; }
   @media (max-width: 900px) { .pflow { grid-template-columns: 1fr; } }
-  .pscript { position: sticky; top: 8px; max-height: calc(100vh - 40px); overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--panel); font-size: 13.5px; line-height: 1.6; }
+  .pscript { position: sticky; top: 72px; max-height: calc(100vh - 92px); overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--panel); font-size: 13.5px; line-height: 1.6; }
   .pscript .sl { padding: 1px 6px; border-left: 3px solid transparent; border-radius: 3px; cursor: pointer; white-space: pre-wrap; }
   .pscript .sl.hd { font-weight: 700; margin-top: 10px; background: var(--bg); cursor: default; }
   .pscript .sl.dlg { color: var(--ink); } .pscript .sl.act { color: var(--quiet); }
@@ -281,6 +281,14 @@
   .pscript .sl.miss { text-decoration: underline wavy #e08a00; text-underline-offset: 3px; }
   .pscript .sl.miss::after { content: ' 컷 없음'; font-size: 11px; color: #c06a00; }
   .pscript .sl.nocut { opacity: .6; }
+  .pscript .addm { margin-left: 6px; font-size: 11px; padding: 0 6px; border-radius: 9px; border: 1px solid #e08a00; background: #fff7ea; color: #a85b00; cursor: pointer; }
+  .pscript .rh { position: absolute; left: 4px; right: 4px; height: 10px; cursor: ns-resize; z-index: 3; display: flex; justify-content: center; align-items: center; }
+  .pscript .rh i { display: block; width: 46px; height: 6px; border-radius: 3px; background: #d63b3b; box-shadow: 0 0 0 2px #fff; }
+  .pscript .sl.add { background: #ffe9c2; border-left-color: #e08a00; } .pscript .sl.rem { background: #eee; text-decoration: line-through; border-left-color: #999; color: #888; }
+  .rngbox { margin-top: 6px; padding: 8px; border: 1px solid #d63b3b; border-radius: 6px; background: #fff; font-size: 12.5px; }
+  .pbox h4 { margin: 12px 0 4px; font-size: 13.5px; display: flex; gap: 6px; align-items: center; }
+  .pbox .pc { white-space: pre-wrap; font-size: 12.5px; background: var(--bg); border-radius: 6px; padding: 6px 8px; margin: 0; }
+  .pbox .ok { color: var(--good); } .pbox .wn { color: #c06a00; } .pbox .no { color: var(--quiet); }
   .pscene { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; background: var(--panel); }
   .pscene .psh { padding: 8px 10px; background: var(--bg); border-bottom: 1px solid var(--line); border-radius: 8px 8px 0 0; }
   .pscene .psh .t { font-weight: 700; } .pscene .psh .j { font-size: 12.5px; margin-top: 3px; }
@@ -441,7 +449,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.36.0"
+VERSION = "1.37.0"
 
 import base64
 import glob
@@ -1983,7 +1991,12 @@ def director_revise(t, cut_id):
     last = (cut.get("takes") or [{}])[-1] if cut.get("takes") else {}
     dmodel = setting(ctx, "generation", "claude_director", "claude-opus-5-5")
     progress(f"감독이 {cut.get('code')} 프롬프트를 고치는 중")
-    user = f"""아래 컷 하나를 고쳐서 같은 형식(cuts 배열에 1개)으로 주세요. 대사는 바꾸지 않습니다.
+    rng = ((t.get("payload") or {}).get("script_range") or "").strip()   # 대표가 제작 탭에서 대본 범위를 늘리거나 줄임
+    head = ("아래 컷 하나를 고쳐서 같은 형식(cuts 배열에 1개)으로 주세요. 이 컷이 맡을 대본 범위를 대표가 새로 정했습니다:\n"
+            "dialogue에는 아래 범위의 대사만 대본 원문 그대로(화자: 대사, 괄호 지문 포함) 순서대로 담고, 범위 밖 대사는 넣지 않습니다. "
+            "summary·expression_beats·voice_lines·staging·프롬프트·seconds(4~15)도 이 범위에 맞게 다시 씁니다.\n"
+            f"[이 컷이 맡을 대본 — 대표가 정함]\n{rng}" if rng else "아래 컷 하나를 고쳐서 같은 형식(cuts 배열에 1개)으로 주세요. 대사는 바꾸지 않습니다.")
+    user = f"""{head}
 [지금 컷]
 {json.dumps({k: cut.get(k) for k in ('scene_no', 'cut_no', 'code', 'scene_heading', 'seconds', 'summary', 'dialogue', 'emotion', 'expression_beats', 'camera', 'staging', 'reference_names', 'prompt')}, ensure_ascii=False)}
 [대표 지시 — 최우선. 아래를 빠짐없이 프롬프트에 반영한다. 바이블·감수 의견과 부딪히면 대표 지시를 따른다]
@@ -2006,7 +2019,8 @@ def director_revise(t, cut_id):
         "reference_names": refs, "director_note": new.get("director_note"), "est_usd": est_cut_usd(ctx, secs, refs), "clear_fix": True,
         "voice_lines": new.get("voice_lines") or cut.get("voice_lines") or [], "frame_first": new.get("frame_first") or {"prompt": (cut.get("frame_first") or {}).get("prompt")},
         "frame_last": new.get("frame_last") or {}, "use_end_frame": bool(new.get("use_end_frame")), "continue_prev": bool(new.get("continue_prev")), "prep_status": "none",
-        "review": {"verdict": "revised", "issues": [], "fix": "대표 요청·영상 감수 반영"}})
+        "review": {"verdict": "revised", "issues": [], "fix": "대표 요청·영상 감수 반영"},
+        **({"dialogue": new.get("dialogue") or "", "seconds": secs, "summary": new.get("summary") or None, "emotion": new.get("emotion") or None} if rng else {})})
     if setting(ctx, "generation", "auto_prep", True):
         rpc("agent_add_task", p_token=TOKEN, p={"kind": "prep_cut", "episode_id": ep, "scene_no": cut.get("scene_no"), "cut_id": cut_id,
                                                "payload": {"force": True, "auto_retry": bool((t.get("payload") or {}).get("auto_retry"))}})
@@ -10014,7 +10028,7 @@ async function renderProduction(ep, quietRefresh = false) {
     q(S.sb.from('cost_settings').select('krw_per_usd').eq('id', 1).maybeSingle()),
     q(S.sb.from('app_settings').select('key,value').in('key', ['generation', 'storage'])),
   ]);
-  const rate = costSet?.krw_per_usd || 1340;
+  const rate = costSet?.krw_per_usd || 1340; S.prodRate = rate;
   // PPL 메모가 들어온 뒤에도 그 전에 만든 컷이 남아 있으면 알려 준다(이미 생성된 컷은 비용 때문에 자동으로 다시 만들지 않음)
   const pplNotes = await q(S.sb.from('episode_notes').select('scene_no,content,created_at').eq('episode_id', ep.id).ilike('content', '%PPL%')).catch(() => []);
   try {
@@ -10023,6 +10037,7 @@ async function renderProduction(ep, quietRefresh = false) {
     S.noVoice = [];   // 목소리는 Seedance가 영상과 함께 만든다(바이블에서 미리 정하지 않음)
     // 사진이 필요한 항목(인물·협찬)인데 바이블 기준 사진이 없는 것
     S.noPhoto = chars.filter(c => (c.category === 'character' || c.origin === 'sponsor') && !(act(c)?.image_paths || []).length).map(c => c.name);
+    S.bibleInfo = Object.fromEntries(chars.map(c => [c.name, { cat: c.category, photo: (act(c)?.image_paths || []).length > 0, sponsor: c.origin === 'sponsor' }]));
   } catch { S.noVoice = []; S.noPhoto = []; }
   const G = Object.fromEntries(gen.map(r => [r.key, r.value]));
   const takes = cuts.length ? await q(S.sb.from('production_takes').select('*').in('cut_id', cuts.map(c => c.id)).order('take_no')) : [];
@@ -10292,12 +10307,14 @@ function sceneJudge(rows, sc, cs) {
 const fmtMS = s => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
 function flowView(ep, sceneNos, scenes, scText, scInfo, rate, pkgs = [], takes = [], urls = {}) {
   const rows = scriptRows(scText);
-  const F = flowMap(rows, scenes); S.flowMap = F; S.flowRows = rows;
+  const F = flowMap(rows, scenes); S.flowMap = F; S.flowRows = rows; S.flowScenes = scenes; S.flowPkgs = pkgs; S.flowEp = ep;
   const ordered = sceneNos.flatMap(no => (scenes[no] || []).slice().sort((a, b) => a.cut_no - b.cut_no));
   let t = 0; const at = {}; ordered.forEach(c => { at[c.id] = [t, t + (c.seconds || 0)]; t += c.seconds || 0; });
   const scriptScenes = new Set(rows.filter(r => r.head).map(r => r.sc));
   const nWarn = ordered.filter(c => (F.warn[c.id] || []).length).length;
-  const left = rows.length ? rows.map(r => `<div class="sl ${r.head ? 'hd' : r.dlg ? 'dlg' : 'act'}${F.missing.has(r.i) ? ' miss' : ''}${F.nocut.has(r.i) ? ' nocut' : ''}" data-li="${r.i}">${esc(r.text)}</div>`).join('')
+  const left = rows.length ? rows.map(r => `<div class="sl ${r.head ? 'hd' : r.dlg ? 'dlg' : 'act'}${F.missing.has(r.i) ? ' miss' : ''}${F.nocut.has(r.i) ? ' nocut' : ''}" data-li="${r.i}">${esc(r.text)}${
+      F.missing.has(r.i) ? `<button class="addm" data-addmiss="${r.i}" title="빠진 대사를 이 씬 컷에 넣습니다">＋ 컷에 넣기</button>` : ''}${
+      r.head && r.sc && !(scenes[r.sc] || []).length ? `<button class="addm" data-addscene="${r.sc}" title="감독이 이 씬을 컷으로 설계합니다">＋ 이 씬 컷 만들기</button>` : ''}</div>`).join('')
     : '<div class="quiet">확정 대본이 없습니다</div>';
   const fld = (k, v) => `<dt>${k}</dt><dd class="${v ? '' : 'none'}">${v ? esc(v) : '다음 설계부터 채워집니다'}</dd>`;
   const PLAN = [['composition', '화면 구성'], ['direction', '방향'], ['flow', '흐름'], ['mood', '분위기'], ['transition_in', '앞 씬에서'], ['transition_out', '다음 씬으로']];
@@ -10327,6 +10344,7 @@ function flowView(ep, sceneNos, scenes, scText, scInfo, rate, pkgs = [], takes =
           <div class="cacts">${(() => { const ts = takes.filter(x => x.cut_id === c.id);
               const sh = ts.find(x => x.id === c.best_take_id && urls[x.files?.preview]) || ts.filter(x => urls[x.files?.preview]).at(-1);
               return sh ? `<button class="btn small primary" data-vplay="${esc(urls[sh.files.preview])}" data-vposter="${esc(urls[sh.files?.poster] || '')}" data-vtitle="${esc(`S#${c.scene_no} C${c.cut_no} · ${c.seconds}초${sh.take_no ? ' · 테이크 ' + sh.take_no : ''}`)}">▶ 영상 보기</button>` : ''; })()}
+            <button class="btn small" data-pshow="${c.id}" title="프롬프트를 항목별(시간 흐름·연결·감정·인물·장소·소품·구도)로 나눠 봅니다">📝 프롬프트</button>
             ${['designed', 'failed', 'hold'].includes(c.status) ? `<button class="btn small" data-approve="${c.id}">🎬 생성 승인 · ${usdKrw(c.est_usd, rate)}</button>` : ''}
             ${['designed', 'failed', 'passed', 'hold'].includes(c.status) ? `<button class="btn small" data-fix="${c.id}" title="프롬프트를 보고, 보완할 내용을 적어 이 컷만 다시 설계·생성">✏️ 보완해서 다시 만들기</button>` : ''}</div>
         </div>`; }).join('')}
@@ -10343,12 +10361,13 @@ function bindFlowView(pane) {
   const sp = pane.querySelector('#pScript'); if (!sp) return;
   const pick = id => {
     pane.querySelectorAll('.fcut.sel, .pscene.sel').forEach(x => x.classList.remove('sel'));
-    sp.querySelectorAll('.sl.on').forEach(x => x.classList.remove('on'));
+    sp.querySelectorAll('.sl.on, .sl.add, .sl.rem').forEach(x => x.classList.remove('on', 'add', 'rem'));
     const card = pane.querySelector(`[data-fcut="${id}"]`); if (card) { card.classList.add('sel'); const d = card.closest('details'); if (d && !d.open) d.open = true; }
     const ls = (S.flowMap?.cutLines?.[id] || []).map(i => sp.querySelector(`[data-li="${i}"]`)).filter(Boolean);
     ls.forEach(x => x.classList.add('on'));
-    if (ls[0]) sp.scrollTo({ top: Math.max(0, ls[0].offsetTop - sp.offsetTop - 60), behavior: 'smooth' });
+    flowFocus(sp, ls[0]);
     S.flowSel = id;
+    flowHandles(pane, sp, id);
     return card;
   };
   const pickScene = no => {
@@ -10357,13 +10376,20 @@ function bindFlowView(pane) {
     const card = pane.querySelector(`.pscene[data-scene="${no}"]`); card?.classList.add('sel');
     const ls = (S.flowRows || []).filter(r => r.sc === +no).map(r => sp.querySelector(`[data-li="${r.i}"]`)).filter(Boolean);
     ls.forEach(x => x.classList.add('on'));
-    if (ls[0]) sp.scrollTo({ top: Math.max(0, ls[0].offsetTop - sp.offsetTop - 20), behavior: 'smooth' });
+    flowFocus(sp, ls[0]);
     S.flowSel = 'S' + no;
+    sp.querySelectorAll('.rh').forEach(x => x.remove());
   };
   pane.querySelectorAll('[data-fscene]').forEach(hd => hd.addEventListener('click', ev => { if (ev.target.closest('button,a')) return; pickScene(hd.dataset.fscene); }));
   S.flowOpen ||= new Set();
   pane.querySelectorAll('[data-pcd]').forEach(d => d.addEventListener('toggle', () => { d.open ? S.flowOpen.add(d.dataset.pcd) : S.flowOpen.delete(d.dataset.pcd); }));
   pane.querySelectorAll('[data-fcut]').forEach(c => c.addEventListener('click', ev => { if (ev.target.closest('button,textarea,input,select,a,.fixbox')) return; pick(c.dataset.fcut); }));
+  sp.querySelectorAll('[data-addmiss]').forEach(b => b.onclick = guard(ev => { ev.stopPropagation(); return flowAddMissing(+b.dataset.addmiss); }));
+  sp.querySelectorAll('[data-addscene]').forEach(b => b.onclick = guard(async ev => { ev.stopPropagation();
+    if (!confirm(`감독이 S#${b.dataset.addscene}을(를) 컷으로 설계합니다(Claude 비용, 수백 원).`)) return;
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'director', episode_id: S.flowEp.id, scene_no: +b.dataset.addscene, payload: { scenes: [+b.dataset.addscene], prepped: true } }));
+    toast(`감독이 S#${b.dataset.addscene} 컷을 설계합니다`); }));
+  pane.querySelectorAll('[data-pshow]').forEach(b => b.onclick = ev => { ev.stopPropagation(); flowPromptPopup(b.dataset.pshow); });
   sp.querySelectorAll('[data-li]').forEach(l => l.onclick = () => {
     const r = (S.flowRows || [])[+l.dataset.li];
     const ids = S.flowMap?.lineCut?.[l.dataset.li] || [];
@@ -10371,6 +10397,179 @@ function bindFlowView(pane) {
     const card = pick(ids[0]); card?.scrollIntoView({ behavior: 'smooth', block: 'center' }); });
   if (S.flowSel?.startsWith?.('S') && pane.querySelector(`.pscene[data-scene="${S.flowSel.slice(1)}"]`)) pickScene(S.flowSel.slice(1));
   else if (S.flowSel && pane.querySelector(`[data-fcut="${S.flowSel}"]`)) pick(S.flowSel);
+}
+// 왼쪽 대본 칸 안에서만 움직여 표시한 줄이 보이게(페이지 전체는 그대로)
+function flowFocus(sp, el) {
+  if (!sp || !el) return;
+  const top = sp.scrollTop + el.getBoundingClientRect().top - sp.getBoundingClientRect().top - 40;
+  sp.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+}
+const flowCutById = id => Object.values(S.flowScenes || {}).flat().find(c => c.id === id);
+// 빨간 표시 위·아래 손잡이: 끌어서 이 컷이 맡을 대본 범위를 늘리거나 줄인다(같은 씬 안에서)
+function flowHandles(pane, sp, id) {
+  sp.querySelectorAll('.rh').forEach(x => x.remove());
+  pane.querySelectorAll('.rngbox').forEach(x => x.remove());
+  const c = flowCutById(id); if (!c) return;
+  const rowsAll = S.flowRows || [];
+  const sceneRows = rowsAll.filter(r => r.sc === +c.scene_no && !r.head);
+  if (!sceneRows.length) return;
+  const orig = (S.flowMap?.cutLines?.[id] || []).slice().sort((a, b) => a - b);
+  let a = orig.length ? orig[0] : sceneRows[0].i, b = orig.length ? orig[orig.length - 1] : sceneRows[0].i;
+  const lo = sceneRows[0].i, hi = sceneRows[sceneRows.length - 1].i;
+  const el = i => sp.querySelector(`[data-li="${i}"]`);
+  const mk = cls => { const d = document.createElement('div'); d.className = 'rh ' + cls; d.innerHTML = '<i></i>'; d.title = '끌어서 이 컷이 맡을 대본을 늘리거나 줄입니다'; sp.appendChild(d); return d; };
+  const top = mk('top'), bot = mk('bot');
+  const place = () => {
+    const A = el(a), B = el(b); if (!A || !B) return;
+    const base = sp.getBoundingClientRect().top - sp.scrollTop;
+    top.style.top = (A.getBoundingClientRect().top - base - 5) + 'px';
+    bot.style.top = (B.getBoundingClientRect().bottom - base - 5) + 'px';
+  };
+  const paint = () => {
+    sp.querySelectorAll('.sl.on, .sl.add, .sl.rem').forEach(x => x.classList.remove('on', 'add', 'rem'));
+    for (let i = a; i <= b; i++) el(i)?.classList.add(orig.includes(i) ? 'on' : 'add');
+    orig.filter(i => i < a || i > b).forEach(i => el(i)?.classList.add('rem'));
+    place();
+  };
+  place();
+  const lineAt = y => { let best = null; for (const r of sceneRows) { const e = el(r.i); if (!e) continue; const R = e.getBoundingClientRect(); if (y >= R.top - 2) best = r.i; } return best ?? lo; };
+  const drag = which => ev => {
+    ev.preventDefault(); ev.stopPropagation();
+    const h0 = which === 'top' ? top : bot; h0.setPointerCapture(ev.pointerId);
+    h0.onpointermove = e => {
+      const i = lineAt(e.clientY);
+      if (which === 'top') a = Math.max(lo, Math.min(i, b)); else b = Math.min(hi, Math.max(i, a));
+      // 칸 가장자리에 가까우면 대본 칸을 굴린다
+      const R = sp.getBoundingClientRect(); if (e.clientY < R.top + 30) sp.scrollTop -= 12; else if (e.clientY > R.bottom - 30) sp.scrollTop += 12;
+      paint();
+    };
+    h0.onpointerup = h0.onpointercancel = () => { h0.onpointermove = h0.onpointerup = h0.onpointercancel = null; flowRangeBox(pane, sp, c, orig, a, b); };
+  };
+  top.onpointerdown = drag('top'); bot.onpointerdown = drag('bot');
+}
+function flowRangeBox(pane, sp, c, orig, a, b) {
+  pane.querySelectorAll('.rngbox').forEach(x => x.remove());
+  const now = []; for (let i = a; i <= b; i++) now.push(i);
+  const same = now.length === orig.length && now.every((x, k) => x === orig[k]);
+  if (same) return;
+  const rows = S.flowRows || [], txt = i => rows[i]?.text || '';
+  const added = now.filter(i => !orig.includes(i)), removed = orig.filter(i => !now.includes(i));
+  // 겹치는 옆 컷: 그 컷 범위에서 이 범위를 뺀다
+  const others = (S.flowScenes[c.scene_no] || []).filter(x => x.id !== c.id).map(x => ({ x, lines: (S.flowMap.cutLines[x.id] || []) }))
+    .filter(o => o.lines.some(i => now.includes(i)));
+  const card = pane.querySelector(`[data-fcut="${c.id}"]`); if (!card) return;
+  const box = document.createElement('div'); box.className = 'rngbox';
+  box.innerHTML = `<b>C${c.cut_no} 대본 범위를 바꿨습니다</b> — ${orig.length}줄 → ${now.length}줄
+    ${added.length ? `<div>＋ 넣음: ${added.map(i => esc(txt(i).slice(0, 40))).join(' / ')}</div>` : ''}
+    ${removed.length ? `<div>－ 뺌: ${removed.map(i => esc(txt(i).slice(0, 40))).join(' / ')}</div>` : ''}
+    ${others.length ? `<label style="display:flex;gap:6px;align-items:center;margin:4px 0"><input type="checkbox" class="rngOther" checked style="width:auto"> 겹치는 컷(${others.map(o => 'C' + o.x.cut_no).join(', ')})에서는 이 줄들을 빼고 다시 설계</label>` : ''}
+    <div class="row" style="gap:6px;margin-top:6px"><button class="btn small primary" data-rng="gen">이 범위로 다시 만들기 · ${usdKrw(c.est_usd, ctx0rate())}</button>
+      <button class="btn small" data-rng="only">감독 설계만(생성은 나중에)</button><button class="btn small" data-rng="x">되돌리기</button></div>`;
+  card.appendChild(box);
+  box.querySelector('[data-rng="x"]').onclick = () => { box.remove(); renderProduction(S.flowEp, true); };
+  box.querySelectorAll('[data-rng]:not([data-rng="x"])').forEach(bt => bt.onclick = guard(async () => {
+    const gen = bt.dataset.rng === 'gen', ep = S.flowEp;
+    const send = async (cut, lines, why) => {
+      const range = lines.map(txt).join('\n');
+      const genIt = gen && cut.id === c.id;
+      await q(S.sb.from('production_cuts').update({ fix_request: `[대표 지시 — 최우선] ${why}`, status: genIt ? 'approved' : 'designed' }).eq('id', cut.id));
+      await q(S.sb.from('pipeline_tasks').insert({ kind: 'director', episode_id: ep.id, scene_no: cut.scene_no, cut_id: cut.id, payload: { cut_id: cut.id, script_range: range, ...(genIt ? { then_generate: true } : {}) } }));
+      if (genIt) await q(S.sb.from('pipeline_tasks').insert({ kind: 'generate', episode_id: ep.id, scene_no: cut.scene_no, cut_id: cut.id, payload: { after_director: true } }));
+    };
+    await send(c, now, `제작 탭에서 이 컷이 맡을 대본 범위를 바꿈(${added.length ? '넣음 ' + added.length + '줄' : ''}${added.length && removed.length ? ', ' : ''}${removed.length ? '뺌 ' + removed.length + '줄' : ''})`);
+    await ownerFixRecord(ep.id, c, `C${c.cut_no} 대본 범위 조정: ${added.length ? '넣음 — ' + added.map(txt).join(' / ') : ''}${removed.length ? ' 뺌 — ' + removed.map(txt).join(' / ') : ''}`.slice(0, 1500), '제작실');
+    let n = 0;
+    if (box.querySelector('.rngOther')?.checked) for (const o of others) {
+      const rest = o.lines.filter(i => !now.includes(i));
+      if (rest.length) { await send(o.x, rest, `옆 컷 C${c.cut_no}이 이 컷의 대본 일부를 가져감 — 남은 범위로 다시 설계`); n++; }
+      else { await q(S.sb.from('production_cuts').update({ status: 'hold', fix_request: `[대표 지시] 대본이 모두 C${c.cut_no}로 옮겨져 보류` }).eq('id', o.x.id)); n++; }
+    }
+    toast(gen ? `감독이 C${c.cut_no}을(를) 새 범위로 다시 설계한 뒤 바로 만듭니다${n ? ` · 옆 컷 ${n}개 조정` : ''}` : `감독이 새 범위로 다시 설계합니다${n ? ` · 옆 컷 ${n}개 조정` : ''}`);
+    renderProduction(ep, true);
+  }));
+}
+const ctx0rate = () => S.prodRate || 1340;
+// 컷에 없는 대사: 앞·뒤 컷에 붙이거나 씬을 다시 설계
+async function flowAddMissing(li) {
+  const rows = S.flowRows || [], r = rows[li]; if (!r) return;
+  const cs = (S.flowScenes[r.sc] || []).slice().sort((x, y) => x.cut_no - y.cut_no);
+  const M = S.flowMap.cutLines;
+  const prev = [...cs].reverse().find(c => (M[c.id] || []).some(i => i < li)), next = cs.find(c => (M[c.id] || []).some(i => i > li));
+  const opts = [];
+  if (prev) opts.push({ value: 'prev', label: `앞 컷 C${prev.cut_no}에 넣기`, desc: '감독이 그 컷이 이 대사까지 맡도록 다시 설계(대사·길이·프롬프트)' , primary: true });
+  if (next) opts.push({ value: 'next', label: `뒤 컷 C${next.cut_no}에 넣기`, desc: '감독이 그 컷이 이 대사부터 맡도록 다시 설계' });
+  opts.push({ value: 'scene', label: `S#${r.sc} 컷 다시 설계`, desc: '빠진 대사를 넣어 씬 전체를 다시 나눕니다(이미 만든 영상 컷은 그대로)' });
+  const how = await askChoice('컷에 없는 대사', r.text, opts); if (!how) return;
+  const ep = S.flowEp;
+  if (how === 'scene') {
+    await q(S.sb.from('episode_notes').insert({ episode_id: ep.id, scene_no: r.sc, priority: 'must', important: true, content: `[대표 지시 · 제작 탭] S#${r.sc}: 컷에 빠진 대사를 꼭 넣는다 — ${r.text}` }));
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'director', episode_id: ep.id, scene_no: r.sc, payload: { scenes: [r.sc], prepped: true } }));
+    return toast(`감독이 S#${r.sc}을(를) 빠진 대사까지 넣어 다시 설계합니다`);
+  }
+  const c = how === 'prev' ? prev : next;
+  const cur = (M[c.id] || []).slice();
+  const lo = Math.min(...cur, li), hi = Math.max(...cur, li);
+  const lines = rows.filter(x => x.sc === r.sc && !x.head && x.i >= lo && x.i <= hi).map(x => x.text);
+  await q(S.sb.from('production_cuts').update({ fix_request: `[대표 지시 — 최우선] 컷에 빠진 대사 "${r.text}"를 이 컷에 넣음`, status: 'designed' }).eq('id', c.id));
+  await q(S.sb.from('pipeline_tasks').insert({ kind: 'director', episode_id: ep.id, scene_no: c.scene_no, cut_id: c.id, payload: { cut_id: c.id, script_range: lines.join('\n') } }));
+  await ownerFixRecord(ep.id, c, `빠진 대사를 C${c.cut_no}에 넣음: ${r.text}`, '제작실');
+  toast(`감독이 C${c.cut_no}에 빠진 대사를 넣어 다시 설계합니다(생성은 승인 후)`);
+}
+// 프롬프트 팝업: 항목별로 나눠 보고, 앞뒤 컷과 레퍼런스가 이어지는지 함께 본다
+function promptSections(p) {
+  const out = {}; let cur = '_';
+  for (const line of String(p || '').split(/\n/)) {
+    const m = line.match(/^\s*(SHOT|FRAME|LIGHT|CHARACTERS?|HANDS|ACTION[^:]*|DIALOGUE|CONTINUITY|ANATOMY)\s*:\s*(.*)$/i);
+    if (m) { cur = m[1].toUpperCase().startsWith('ACTION') ? 'ACTION' : m[1].toUpperCase().replace(/S$/, '') === 'CHARACTER' ? 'CHARACTERS' : m[1].toUpperCase();
+      out[cur] = (out[cur] ? out[cur] + '\n' : '') + (m[1].toUpperCase().startsWith('ACTION') && m[1].length > 6 ? m[1].slice(6).trim() + ' ' : '') + m[2]; }
+    else if (line.trim()) out[cur] = (out[cur] ? out[cur] + '\n' : '') + line;
+  }
+  return out;
+}
+function flowPromptPopup(id) {
+  const c = flowCutById(id); if (!c) return;
+  const cs = (S.flowScenes[c.scene_no] || []).slice().sort((x, y) => x.cut_no - y.cut_no);
+  const k = cs.indexOf(c), prev = cs[k - 1], next = cs[k + 1];
+  const plan = ((S.flowPkgs || []).find(x => +x.scene_no === +c.scene_no) || {}).plan || {};
+  const P = promptSections(c.prompt), st = c.staging || {}, B = S.bibleInfo || {};
+  const refs = (x, cat) => (x?.reference_names || []).filter(n => (B[n]?.cat || (cat === 'character' ? 'character' : '')) === cat || (cat === 'location' && B[n]?.cat === 'background'));
+  const beats = (Array.isArray(c.expression_beats) ? c.expression_beats : []).map(b => `${b.t}초 ${b.who || ''}: ${b.face || ''}`).join('\n');
+  const speakers = [...new Set(parseDlg(c.dialogue).map(d => d.speaker))];
+  const chip = (s, t) => `<span class="${s === 'ok' ? 'ok' : s === 'wn' ? 'wn' : 'no'}" style="font-size:12px">${s === 'ok' ? '✓' : s === 'wn' ? '⚠' : '—'} ${esc(t)}</span>`;
+  const cmp = (cat, label) => {
+    const me = refs(c, cat), pv = refs(prev, cat), nx = refs(next, cat);
+    const lines = [`이 컷: ${me.join(', ') || '없음'}`, prev ? `앞 컷 C${prev.cut_no}: ${pv.join(', ') || '없음'}` : '앞 컷: (씬 첫 컷)', next ? `뒤 컷 C${next.cut_no}: ${nx.join(', ') || '없음'}` : '뒤 컷: (씬 마지막 컷)'];
+    const diff = (prev && pv.length && me.length && !pv.some(n => me.includes(n))) || (next && nx.length && me.length && !nx.some(n => me.includes(n)));
+    return { lines, s: !me.length ? 'no' : diff ? 'wn' : 'ok', t: !me.length ? `${label} 레퍼런스 없음(글로만)` : diff ? `앞뒤 컷과 ${label} 레퍼런스가 다름` : `앞뒤 컷과 ${label} 이어짐` };
+  };
+  const ch = cmp('character', '인물'), lc = cmp('location', '장소'), pr = cmp('prop', '소품');
+  const missSpk = speakers.filter(s => !(c.reference_names || []).includes(s) && B[s]);
+  const noPhoto = refs(c, 'character').filter(n => !B[n]?.photo);
+  const sec = (icon, title, status, body) => `<h4>${icon} ${esc(title)} ${status}</h4><pre class="pc">${esc(body || '—')}</pre>`;
+  const html = `<div class="pbox">
+    <div class="quiet">${esc(c.code || '')} · ${c.seconds}초 · ${esc(c.summary || '')}${Object.keys(P).length <= 1 ? ' · 이 프롬프트는 항목 구분 없이 쓰였습니다(다음 설계부터 항목별로 씁니다)' : ''}</div>
+    ${sec('⏱', '시간 흐름에 따른 움직임', chip(P.ACTION || st.blocking ? 'ok' : 'wn', P.ACTION ? '구간별 동작 있음' : '구간별 동작이 프롬프트에 없음'), [P.ACTION, st.blocking ? '연출: ' + st.blocking : ''].filter(Boolean).join('\n'))}
+    ${sec('🔗', '앞뒤 컷·씬 연결', chip(P.CONTINUITY || st.connect || c.continue_prev ? 'ok' : 'wn', c.continue_prev ? '앞 컷 마지막 장면에서 이어 시작' : P.CONTINUITY ? '연결 적힘' : '연결이 적혀 있지 않음'),
+      [P.CONTINUITY, st.connect ? '다음 컷으로: ' + st.connect : '', !prev && plan.transition_in ? '앞 씬에서: ' + plan.transition_in : '', !next && plan.transition_out ? '다음 씬으로: ' + plan.transition_out : '', plan.flow ? '씬 흐름: ' + plan.flow : ''].filter(Boolean).join('\n'))}
+    ${sec('🎭', '캐릭터 감정·액션·제스처', chip(beats || P.HANDS ? 'ok' : 'wn', P.HANDS ? '손동작까지 적힘' : '손동작(HANDS)이 없음'), [c.emotion ? '감정: ' + c.emotion : '', beats, P.HANDS ? '손: ' + P.HANDS : ''].filter(Boolean).join('\n'))}
+    ${sec('👤', '인물 레퍼런스 (앞뒤 반영)', chip(missSpk.length || noPhoto.length ? 'wn' : ch.s, missSpk.length ? `대사 화자 ${missSpk.join(', ')}가 레퍼런스에 없음` : noPhoto.length ? `${noPhoto.join(', ')} 바이블 사진 없음` : ch.t), [...ch.lines, P.CHARACTERS ? '묘사: ' + P.CHARACTERS : ''].filter(Boolean).join('\n'))}
+    ${sec('🏠', '배경·장소 (앞뒤 반영)', chip(lc.s, lc.t), [...lc.lines, c.scene_heading ? '씬: ' + c.scene_heading : '', plan.composition ? '씬 화면 구성: ' + plan.composition : ''].filter(Boolean).join('\n'))}
+    ${sec('🧸', '사용 소품 (앞뒤 반영)', chip(pr.s, pr.t), pr.lines.join('\n'))}
+    ${sec('🎥', '구도·조명', chip(P.SHOT || st.composition ? 'ok' : 'wn', P.SHOT ? '샷·화면 배치 적힘' : '구도가 프롬프트에 없음'), [P.SHOT ? 'SHOT: ' + P.SHOT : '', P.FRAME ? 'FRAME: ' + P.FRAME : '', P.LIGHT ? 'LIGHT: ' + P.LIGHT : '', st.composition ? '구도: ' + st.composition : '', st.lighting ? '조명: ' + st.lighting : '', c.camera ? '카메라: ' + c.camera : ''].filter(Boolean).join('\n'))}
+    ${sec('💬', '대사', chip(c.dialogue ? 'ok' : 'no', c.dialogue ? `${parseDlg(c.dialogue).length}줄` : '대사 없음'), [P.DIALOGUE, !P.DIALOGUE ? c.dialogue : ''].filter(Boolean).join('\n'))}
+    ${sec('✋', '신체 규칙(손·팔 개수)', chip('ok', P.ANATOMY ? '프롬프트에 있음' : '만들 때 자동으로 붙음'), P.ANATOMY || '영상을 만들 때 "사람마다 팔 2·손 2·손가락 5, 손 겹침·사람 늘어남 없음" 줄이 자동으로 붙습니다')}
+    <details style="margin-top:12px"><summary class="quiet">프롬프트 원문 전체</summary><pre class="pc">${esc(c.prompt || '')}</pre></details>
+  </div>`;
+  document.getElementById('zoomBox')?.remove();
+  const box = document.createElement('div'); box.id = 'zoomBox'; box.className = 'zoombox';
+  box.innerHTML = `<div class="zoomin" style="background:var(--panel);color:var(--ink);padding:16px;max-width:760px;width:92vw;max-height:88vh;overflow:auto;border-radius:12px">
+    <div class="row" style="justify-content:space-between"><b>📝 S#${c.scene_no} C${c.cut_no} 프롬프트 — 항목별</b><button class="btn small" id="zClose">닫기 (Esc)</button></div>${html}</div>`;
+  const key = ev => { if (ev.key === 'Escape') close(); };
+  function close() { box.remove(); document.removeEventListener('keydown', key); }
+  box.onclick = ev => { if (ev.target === box) close(); };
+  box.querySelector('#zClose').onclick = close;
+  document.addEventListener('keydown', key);
+  document.body.appendChild(box);
 }
 function sceneCard(no, cs, takes, urls, pkg, rate, hasWin, isOpen, info, last) {
   info = info || {};
