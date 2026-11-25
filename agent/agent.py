@@ -1774,6 +1774,35 @@ def voice_for(ctx, speaker):
     return None, None
 
 
+_EL_VOICES = {"list": None, "at": 0}
+
+
+def recommend_voice(ctx, speaker):
+    """바이블에 목소리가 아직 없는 인물 → ElevenLabs 기본 목소리 중 성별·나이가 맞는 것을 추천해 임시로 쓴다.
+    같은 인물은 언제나 같은 목소리(이름으로 고정 선택) → 컷마다 목소리가 바뀌지 않는다. 바이블 확정은 대표가 한다."""
+    if time.time() - _EL_VOICES["at"] > 3600 or not _EL_VOICES["list"]:
+        data = el_json("/v1/voices", method="GET", timeout=30) or {}
+        _EL_VOICES["list"] = [v for v in (data.get("voices") or []) if v.get("voice_id") and v.get("category") in ("premade", "professional", "generated", "cloned", None)]
+        _EL_VOICES["at"] = time.time()
+    voices = sorted(_EL_VOICES["list"] or [], key=lambda v: v["voice_id"])
+    if not voices:
+        return None, None
+    b = bible_entry(ctx, speaker) or {}
+    txt = " ".join(str(b.get(k) or "") for k in ("name", "description", "details", "prompt_en")) + " " + speaker
+    fem = len(re.findall(r"여자|여성|소녀|그녀|언니|누나|엄마|어머니|할머니|아가씨|female|woman|girl|\bshe\b|\bher\b", txt, re.I))
+    mal = len(re.findall(r"남자|남성|소년|그는|오빠|형|아빠|아버지|할아버지|아저씨|\bmale\b|\bman\b|\bboy\b|\bhe\b|\bhis\b", txt, re.I))
+    gender = "female" if fem > mal else "male" if mal > fem else None
+    age = ("old" if re.search(r"노인|할머니|할아버지|[6-8]0대|elderly|old (wo)?man", txt, re.I)
+           else "middle_aged" if re.search(r"중년|[4-5]0대|middle.aged|아저씨|아주머니", txt, re.I)
+           else "young" if re.search(r"[1-2]0대|소녀|소년|학생|아이돌|young|teen|girl|boy", txt, re.I) else None)
+    lab = lambda v: {k: str(v2).lower().replace(" ", "_") for k, v2 in (v.get("labels") or {}).items()}
+    pool = [v for v in voices if not gender or lab(v).get("gender") == gender] or voices
+    pool = [v for v in pool if not age or lab(v).get("age") == age] or pool
+    import hashlib
+    v = pool[int(hashlib.md5((b.get("name") or speaker).encode()).hexdigest(), 16) % len(pool)]
+    return v["voice_id"], v.get("name")
+
+
 def tts_line(voice_id, text, tags, model):
     key = el_key()
     body = {"text": (tags + " " if tags else "") + text, "model_id": model or "eleven_v3"}
@@ -2382,8 +2411,17 @@ def t_prep_cut(t):
                 ln["error"] = "설정에서 대사 도구를 '쓰지 않음'으로 해 두어 미리 듣기를 만들지 않았습니다"
                 continue
             vid, vname = voice_for(ctx, ln.get("speaker") or "")
+            ln.pop("voice_note", None)
+            if not vid:   # 바이블에 목소리가 아직 없으면 → 추천 목소리로 먼저 들어 볼 수 있게(임시, 바이블 확정은 대표)
+                try:
+                    vid, vname = recommend_voice(ctx, ln.get("speaker") or "")
+                except Exception as ex:
+                    vid, vname = None, None
+                    log(f"추천 목소리 찾기 실패: {ex}")
+                if vid:
+                    ln["voice_note"] = f"추천 목소리(임시): {vname} — 바이블 → 목소리에서 이 인물 목소리를 정하면 그 목소리로 바뀝니다"
             if not vid:
-                ln["error"] = "바이블에 이 인물의 목소리가 없습니다(바이블 → 목소리 디자인)"
+                ln["error"] = "바이블에 이 인물의 목소리가 없고, 추천 목소리도 찾지 못했습니다(ElevenLabs 키·연결 확인)"
                 problems.append(f"{ln.get('speaker')} 목소리 없음")
                 continue
             progress(f"{code} 대사 {i + 1}/{len(lines)} 미리 듣기 만드는 중 ({vname})")

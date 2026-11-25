@@ -315,7 +315,7 @@
   .tl .num::after { content: ''; position: absolute; top: 44px; bottom: -2px; width: 2px; background: var(--line); } .tl .num.last::after { display: none; }
   .tl .num.good span { border-color: var(--good); color: var(--good); } .tl .num.warn span { border-color: var(--warn); color: var(--warn); }
   .tl .num.accent span { border-color: var(--accent); color: var(--accent); } .tl .num.bad span { border-color: var(--bad); color: var(--bad); }
-  .tl .body { padding: 8px 0 22px; min-width: 0; scroll-margin-top: 70px; }
+  .tl > .body { padding: 8px 0 22px; min-width: 0; scroll-margin-top: 70px; }
   .sc-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; line-height: 1.5; }
   .sc-head .pl { font-size: 16.5px; font-weight: 700; } .sc-head .meta { font-size: 14px; color: var(--quiet); }
   .sc-head .st { margin-left: auto; font-size: 13px; font-weight: 600; color: var(--quiet); }
@@ -332,7 +332,11 @@
   .cut { display: grid; grid-template-columns: 112px 1fr; gap: 12px; border: 1px solid var(--line); border-radius: 10px; padding: 10px; background: var(--bg); }
   .cut .media video, .cut .media img, .cut .ph { width: 112px; aspect-ratio: 9 / 16; object-fit: cover; border-radius: 8px; background: #000; display: flex; align-items: center; justify-content: center; color: #aaa; font-size: 13px; }
   .cut .media video { display: block; }
-  .cut .body { min-width: 0; }
+  .cut .body { min-width: 0; padding: 0; }
+  .cut.nomedia { grid-template-columns: minmax(0, 1fr); }
+  .cut, .cut .sum, .cut .dlg, .cut .vline, .cut .beats span { word-break: keep-all; overflow-wrap: anywhere; }
+  .cut .chead { gap: 6px 8px; flex-wrap: wrap; } .cut .chead .code { white-space: nowrap; }
+  .beats span { white-space: nowrap; }
   .cut .sum { margin-top: 4px; font-size: 14px; }
   .cut .dlg { margin-top: 4px; font-size: 13.5px; padding: 6px 8px; border-left: 3px solid var(--accent); background: var(--panel); border-radius: 4px; white-space: pre-wrap; }
   .beats { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
@@ -2135,6 +2139,35 @@ def voice_for(ctx, speaker):
     return None, None
 
 
+_EL_VOICES = {"list": None, "at": 0}
+
+
+def recommend_voice(ctx, speaker):
+    """바이블에 목소리가 아직 없는 인물 → ElevenLabs 기본 목소리 중 성별·나이가 맞는 것을 추천해 임시로 쓴다.
+    같은 인물은 언제나 같은 목소리(이름으로 고정 선택) → 컷마다 목소리가 바뀌지 않는다. 바이블 확정은 대표가 한다."""
+    if time.time() - _EL_VOICES["at"] > 3600 or not _EL_VOICES["list"]:
+        data = el_json("/v1/voices", method="GET", timeout=30) or {}
+        _EL_VOICES["list"] = [v for v in (data.get("voices") or []) if v.get("voice_id") and v.get("category") in ("premade", "professional", "generated", "cloned", None)]
+        _EL_VOICES["at"] = time.time()
+    voices = sorted(_EL_VOICES["list"] or [], key=lambda v: v["voice_id"])
+    if not voices:
+        return None, None
+    b = bible_entry(ctx, speaker) or {}
+    txt = " ".join(str(b.get(k) or "") for k in ("name", "description", "details", "prompt_en")) + " " + speaker
+    fem = len(re.findall(r"여자|여성|소녀|그녀|언니|누나|엄마|어머니|할머니|아가씨|female|woman|girl|\bshe\b|\bher\b", txt, re.I))
+    mal = len(re.findall(r"남자|남성|소년|그는|오빠|형|아빠|아버지|할아버지|아저씨|\bmale\b|\bman\b|\bboy\b|\bhe\b|\bhis\b", txt, re.I))
+    gender = "female" if fem > mal else "male" if mal > fem else None
+    age = ("old" if re.search(r"노인|할머니|할아버지|[6-8]0대|elderly|old (wo)?man", txt, re.I)
+           else "middle_aged" if re.search(r"중년|[4-5]0대|middle.aged|아저씨|아주머니", txt, re.I)
+           else "young" if re.search(r"[1-2]0대|소녀|소년|학생|아이돌|young|teen|girl|boy", txt, re.I) else None)
+    lab = lambda v: {k: str(v2).lower().replace(" ", "_") for k, v2 in (v.get("labels") or {}).items()}
+    pool = [v for v in voices if not gender or lab(v).get("gender") == gender] or voices
+    pool = [v for v in pool if not age or lab(v).get("age") == age] or pool
+    import hashlib
+    v = pool[int(hashlib.md5((b.get("name") or speaker).encode()).hexdigest(), 16) % len(pool)]
+    return v["voice_id"], v.get("name")
+
+
 def tts_line(voice_id, text, tags, model):
     key = el_key()
     body = {"text": (tags + " " if tags else "") + text, "model_id": model or "eleven_v3"}
@@ -2743,8 +2776,17 @@ def t_prep_cut(t):
                 ln["error"] = "설정에서 대사 도구를 '쓰지 않음'으로 해 두어 미리 듣기를 만들지 않았습니다"
                 continue
             vid, vname = voice_for(ctx, ln.get("speaker") or "")
+            ln.pop("voice_note", None)
+            if not vid:   # 바이블에 목소리가 아직 없으면 → 추천 목소리로 먼저 들어 볼 수 있게(임시, 바이블 확정은 대표)
+                try:
+                    vid, vname = recommend_voice(ctx, ln.get("speaker") or "")
+                except Exception as ex:
+                    vid, vname = None, None
+                    log(f"추천 목소리 찾기 실패: {ex}")
+                if vid:
+                    ln["voice_note"] = f"추천 목소리(임시): {vname} — 바이블 → 목소리에서 이 인물 목소리를 정하면 그 목소리로 바뀝니다"
             if not vid:
-                ln["error"] = "바이블에 이 인물의 목소리가 없습니다(바이블 → 목소리 디자인)"
+                ln["error"] = "바이블에 이 인물의 목소리가 없고, 추천 목소리도 찾지 못했습니다(ElevenLabs 키·연결 확인)"
                 problems.append(f"{ln.get('speaker')} 목소리 없음")
                 continue
             progress(f"{code} 대사 {i + 1}/{len(lines)} 미리 듣기 만드는 중 ({vname})")
@@ -8968,6 +9010,8 @@ async function renderProduction(ep, quietRefresh = false) {
     wr: p => btn('pWr', versions.length ? '작가실 정리 실행' : '작가실 정리(원고 필요)', versions.length, p),
     emo: p => btn('pEmo', `감정 감수${toReview.length ? ` (${rvDone('emotion')}/${toReview.length})` : ''}`, toReview.length && !busyKinds.has('cut_review'), p),
     vid: p => btn('pVid', `영상 감수${toReview.length ? ` (${rvDone('video')}/${toReview.length})` : ''}`, toReview.length && !busyKinds.has('cut_review'), p),
+    prep: p => { const n = toReview.filter(c => ['none', 'failed', 'fix'].includes(c.prep_status)).length;
+      return n ? btn('pPrep', `사진·목소리 준비 (${n}컷)`, !busyKinds.has('prep_cut'), p) : ''; },
     dir: p => btn('pDir', `컷 ${cuts.length ? '다시 설계' : '설계'}`, !!confirmed, p),
     ap: p => designedCost ? btn('pApproveAll', `승인 대기 컷 전체 생성 · 예상 ${usdKrw(designedCost, rate)}`, true, p) : '',
     ed: p => passed ? btn('pEdit', `편집실 열기 (통과 ${passed}컷)`, true, p) : '',
@@ -8986,7 +9030,7 @@ async function renderProduction(ep, quietRefresh = false) {
     : inProg ? { t: '영상 만드는 중', d: `${inProg}컷 생성·감수 중 · 통과 ${passed}/${cuts.length}` }
     : passed ? { t: '편집실에서 이어 붙이기', d: `통과 ${passed}/${cuts.length}컷`, k: 'ed' }
     : { t: '컷 상태 확인', d: '아래 씬에서 불합격·보류 컷을 확인하세요' };
-  const others = ['wr', 'emo', 'vid', 'dir', 'ap', 'ed'].filter(k => k !== next.k).map(k => B[k](false)).join('');
+  const others = ['wr', 'emo', 'vid', 'prep', 'dir', 'ap', 'ed'].filter(k => k !== next.k).map(k => B[k](false)).join('');
 
   pane.innerHTML = `
   ${stale.length ? `<div class="msg warn"><b>PPL 수정 전에 만든 컷 ${stale.length}개</b> — ${[...new Set(stale.map(c => c.scene_no))].map(s => 'S' + s).join(', ')}에 PPL이 들어갔지만 이 컷들은 그 전에 설계·생성됐습니다(비용 때문에 자동으로 다시 만들지 않음).
@@ -9117,22 +9161,31 @@ function sceneCard(no, cs, takes, urls, pkg, rate, hasWin, isOpen, info, last) {
 const PREP = { none: ['준비 전', ''], preparing: ['준비 중', 'warn'], ready: ['사진·목소리 확인됨', 'good'], fix: ['감수 지적 있음', 'bad'], failed: ['준비 실패', 'bad'] };
 // 컷 설계 ②③: 대사 미리 듣기 + 장면 사진(첫·끝) + 사전 감수
 function prepBlock(c, urls) {
-  const lines = c.voice_lines || [], ff = c.frame_first || {}, fl = c.frame_last || {}, pr = c.prep_review || {};
+  const ff = c.frame_first || {}, fl = c.frame_last || {}, pr = c.prep_review || {};
+  const lines = (c.voice_lines || []).length ? c.voice_lines : parseDlg(c.dialogue);
   if (!lines.length && !ff.prompt && c.prep_status === 'none') return '';
+  const heard = lines.filter(l => l.path && urls[l.path]).length;
   const [pl, pk] = PREP[c.prep_status] || [c.prep_status, ''];
   const frame = (f, label) => f.path && urls[f.path] ? `<a href="${esc(urls[f.path])}" target="_blank" class="kf"><img src="${esc(urls[f.path])}"><span>${label}</span></a>`
     : f.status === 'failed' ? `<div class="kf ph" title="${esc(f.error || '')}">${label}<br>실패</div>` : f.prompt ? `<div class="kf ph">${label}<br>${c.prep_status === 'preparing' ? '<span class="spin"></span>' : '대기'}</div>` : '';
   const iss = [...((pr.video || {}).issues || []).map(i => '영상감수: ' + i), ...((pr.emotion || {}).issues || []).map(i => '감정감수: ' + i), ...(pr.problems || [])].filter(Boolean);
-  return `<div class="prep"><div class="row" style="gap:6px"><b style="font-size:13px">컷 설계 확인</b>${pill(pl, pk)}${c.continue_prev ? pill('앞 컷에서 이어짐') : ''}${c.use_end_frame ? pill('끝 장면 고정') : ''}</div>
+  return `<div class="prep"><div class="row" style="gap:6px"><b style="font-size:13px">사진·목소리</b>${pill(pl, pk)}${lines.length ? `<span class="quiet">대사 ${heard}/${lines.length}줄 들을 수 있음</span>` : ''}${c.continue_prev ? pill('앞 컷에서 이어짐') : ''}${c.use_end_frame ? pill('끝 장면 고정') : ''}</div>
     ${ff.prompt || fl.prompt ? `<div class="kfs">${frame(ff, '첫 장면')}${c.use_end_frame ? frame(fl, '끝 장면') : ''}</div>` : ''}
     ${lines.map(l => `<div class="vline"><span class="sp">${esc(l.speaker || '')}</span><span class="tx">${esc(l.text || '')}</span>
       ${l.direction || l.tags ? `<span class="quiet dir">${esc(l.direction || '')} ${l.tags ? `<code>${esc(l.tags)}</code>` : ''}</span>` : ''}
-      ${l.path && urls[l.path] ? `<audio src="${esc(urls[l.path])}" controls preload="none"></audio>` : l.error ? `<span class="quiet" style="color:var(--bad)">${esc(l.error)}</span>` : ''}
+      ${l.path && urls[l.path] ? `<audio src="${esc(urls[l.path])}" controls preload="none"></audio>` : l.error ? `<span class="quiet" style="color:var(--bad)">${esc(l.error)}</span>`
+        : `<span class="quiet dir">🔊 미리 듣기 ${c.prep_status === 'preparing' ? '만드는 중 <span class="spin"></span>' : '아직 없음'}</span>`}
+      ${l.voice_note ? `<span class="quiet dir">🎙 ${esc(l.voice_note)}</span>` : ''}
       ${l.analysis?.per_second?.length ? `<span class="curve" title="1초마다 소리 크기">${l.analysis.per_second.map(p => `<i style="height:${Math.max(8, Math.min(100, (p.db + 50) * 2))}%"></i>`).join('')}</span>` : ''}</div>`).join('')}
     ${pr.summary || iss.length ? `<div class="quiet" style="margin-top:4px">${esc(pr.summary || '')}${iss.length ? `<ul>${iss.map(i => `<li>${esc(i)}</li>`).join('')}</ul>` : ''}${(pr.auto_fixed || []).length ? ` · 스스로 고친 것: ${esc(pr.auto_fixed.join(', '))}` : ''}</div>` : ''}
   </div>`;
 }
 
+// 컷 대사 → 줄별(화자: 대사). 목소리 준비 전에도 어떤 대사가 들어가는지 보이게
+function parseDlg(d) {
+  return String(d || '').split('\n').map(s => s.match(/^\s*([^:：]{1,15})[:：]\s*(.+)/)).filter(Boolean)
+    .map(m => ({ speaker: m[1].trim(), text: m[2].replace(/\([^)]*\)/g, '').trim(), direction: (m[2].match(/\(([^)]*)\)/g) || []).join(' ') })).filter(l => l.text);
+}
 // 컷 코드 풀이: E01-S01-C04 → "1화 · 1씬 · 4번째 컷"
 function codeMeaning(c) {
   const m = String(c.code || '').match(/E(\d+)\D*S(\d+)\D*C(\d+)/i);
@@ -9146,18 +9199,19 @@ function cutCard(c, ts, urls, rate) {
   const beats = Array.isArray(c.expression_beats) ? c.expression_beats : [];
   const rv = shown?.review;
   const canApprove = ['designed', 'failed', 'hold'].includes(c.status);
-  return `<div class="cut">
-    <div class="media">${u ? `<video src="${esc(u)}" ${poster ? `poster="${esc(poster)}"` : ''} controls preload="none" playsinline></video>`
-      : poster ? `<img src="${esc(poster)}">` : `<div class="ph">${c.status === 'generating' ? `<span class="spin"></span> 생성 중<br><span style="font-size:11px">⏱ ${esc(etaText('generate'))}</span>` : `${c.seconds}초`}</div>`}</div>
+  const hasMedia = !!(u || poster);   // 영상이 생기기 전에는 빈 검은 칸을 두지 않는다(글 칸이 좁아져 글자가 깨지던 문제)
+  return `<div class="cut${hasMedia ? '' : ' nomedia'}">
+    ${hasMedia ? `<div class="media">${u ? `<video src="${esc(u)}" ${poster ? `poster="${esc(poster)}"` : ''} controls preload="none" playsinline></video>` : `<img src="${esc(poster)}">`}</div>` : ''}
     <div class="body">
-      <div class="row"><b class="cno" title="${esc(codeMeaning(c))}">${c.cut_no}번째 컷</b><span class="quiet">${c.seconds}초</span>${pill(label, kind)}
+      <div class="row chead"><b class="cno" title="${esc(codeMeaning(c))}">${c.cut_no}번째 컷</b><span class="quiet" title="이 컷의 길이">⏱ ${c.seconds}초</span>${pill(label, kind)}
+        ${c.status === 'generating' ? `<span class="quiet"><span class="spin"></span> ${esc(etaText('generate'))}</span>` : ''}
         <span class="quiet code" title="${esc(codeMeaning(c))}">${esc(c.code || '')} · ${esc(c.resolution || '')}</span>
         ${shown?.score != null ? pill(shown.score + '점', shown.verdict === 'pass' ? 'good' : 'bad') : ''}</div>
       ${['designed', 'failed', 'hold'].includes(c.status) || c.reviews?.emotion || c.reviews?.video ? `<div class="rvbadges">${['emotion', 'video'].map(m => { const r = c.reviews?.[m]; const nm = m === 'emotion' ? '감정' : '영상';
         return r ? `<span class="rvb ${r.verdict === 'pass' ? 'ok' : r.verdict === 'fixed' ? 'fx' : 'bad'}" title="${esc((r.issues || []).join(' / '))}">${nm} ${r.verdict === 'pass' ? '✓' : r.verdict === 'fixed' ? '🔧 고침' : '⚠ 확인'}</span>` : `<span class="rvb">${nm} 감수 전</span>`; }).join('')}
         ${['emotion', 'video'].some(m => (c.reviews?.[m]?.issues || []).length) ? `<details><summary class="quiet">감수 내용</summary>${['emotion', 'video'].filter(m => (c.reviews?.[m]?.issues || []).length).map(m => `<div class="quiet">${m === 'emotion' ? '감정' : '영상'}: ${esc(c.reviews[m].issues.join(' / '))}</div>`).join('')}</details>` : ''}</div>` : ''}
       <div class="sum">${esc(c.summary || '')}</div>
-      ${c.dialogue ? `<div class="dlg">${esc(c.dialogue)}</div>` : ''}
+      ${c.dialogue && !(c.voice_lines || []).length && !parseDlg(c.dialogue).length ? `<div class="dlg">${esc(c.dialogue)}</div>` : ''}
       ${beats.length ? `<div class="beats">${beats.map(b => `<span title="${esc(b.who || '')}"><i>${esc(b.t)}초</i>${esc(b.face || '')}</span>`).join('')}</div>` : ''}
       ${prepBlock(c, urls)}
       ${voice ? `<label style="margin:6px 0 0">영상의 대사·현장음만</label><audio src="${esc(voice)}" controls preload="none"></audio>` : ''}
@@ -9222,6 +9276,14 @@ function bindProduction(ep, ctx) {
     if (!n) return toast('감수할 컷이 없습니다(컷 설계 전이거나 모두 생성됨)');
     if (!confirm(`${mode === 'emotion' ? '감정감수자' : '영상감수자'}가 컷 ${n}개를 감수합니다. 고칠 것은 프롬프트를 바로 고칩니다(Claude 비용, 수백 원).`)) return;
     await addTask({ kind: 'cut_review', payload: { mode } }); toast('감수를 맡겼습니다'); again();
+  });
+  const pp1 = $('#pPrep'); if (pp1) pp1.onclick = guard(async () => {
+    const todo = ctx.cuts.filter(c => ['designed', 'failed', 'hold'].includes(c.status) && ['none', 'failed', 'fix'].includes(c.prep_status));
+    const scenes = [...new Set(todo.map(c => c.scene_no))];
+    if (!scenes.length) return toast('준비할 컷이 없습니다');
+    if (!confirm(`컷 ${todo.length}개(${scenes.length}씬)의 대사 미리 듣기와 첫 장면 사진을 만듭니다.\n바이블에 목소리가 없는 인물은 추천 목소리로 먼저 들려 드립니다(ElevenLabs·사진 비용 소액).`)) return;
+    for (const sc of scenes) await addTask({ kind: 'prep_cut', scene_no: sc, payload: {} });
+    toast('사진·목소리 준비를 맡겼습니다'); again();
   });
   const pe1 = $('#pEmo'); if (pe1) pe1.onclick = runReview('emotion');
   const pv1 = $('#pVid'); if (pv1) pv1.onclick = runReview('video');
