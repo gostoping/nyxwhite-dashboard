@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.29.2"
+VERSION = "1.30.1"
 
 import base64
 import glob
@@ -1408,10 +1408,54 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
     return f"씬 {len(by_scene)}개 · 컷 {n}개 설계 (감수 수정 {len(fixes)}건) · 생성 예상 ${total:.2f}" + (f" · 실패 씬 {len(failed)}개는 감독이 한 번 더 시도" if failed else "")
 
 
+def owner_to_bible(ctx, ep, cut, text):
+    """제작이 최우선, 대표 지시가 최우선: 보완 요청 중 '계속 유지할 변경'(인물 생김새·의상 기본값·장소·소품·목소리)은 바이블에도 저장한다.
+    이 컷만의 연출(표정·카메라·동작·타이밍)은 바이블에 넣지 않는다. 바이블 변경은 대표 본인의 지시라 바로 적용한다."""
+    names = [{"name": b.get("name"), "category": b.get("category")} for b in ctx.get("bible") or []]
+    if not names:
+        return []
+    out, _ = claude("claude-sonnet-5-5", """너는 코디네이터다. 대표가 제작 중 컷에 남긴 수정 요청을 읽고, 바이블(시리즈 고정 설정)에 저장해야 할 '계속 유지할 변경'만 뽑는다.
+- 저장: 인물의 생김새·머리·체형·기본 의상·소품·장소의 모습처럼 다른 장면에서도 계속 그래야 하는 것, 그리고 목소리(톤·밝기·나이감·말투).
+- 저장 안 함: 이 컷의 표정·동작·카메라·타이밍·대사 연기처럼 이 장면에만 해당하는 연출. 애매하면 저장 안 함.
+- name은 아래 바이블 이름 그대로. change는 바이블 묘사에 반영할 한국어 한두 문장(무엇을 어떻게). 목소리면 kind=voice, voice_hint에 원하는 목소리.
+답: <json>{"changes": [{"name": "", "kind": "look|voice", "change": "", "voice_hint": ""}]}</json>""",
+        json.dumps({"수정 요청": text, "컷": {k: cut.get(k) for k in ("code", "summary", "dialogue", "reference_names")}, "바이블 항목": names}, ensure_ascii=False),
+        max_tokens=1500, stage="other", episode_id=ep, note="대표 보완 요청 → 바이블 저장 판단")
+    done = []
+    for c in (safe_json(out) or {}).get("changes") or []:
+        if not isinstance(c, dict) or not c.get("name"):
+            continue
+        try:
+            if c.get("kind") == "voice":
+                eid = rpc("agent_bible_owner_change", p_token=TOKEN, p_episode=ep, p_name=c["name"], p_reason="")
+                if eid:
+                    rpc("agent_add_task", p_token=TOKEN, p={"kind": "voice_cast", "series_id": (ctx.get("series") or {}).get("id"),
+                        "payload": {"series_id": (ctx.get("series") or {}).get("id"), "entry_ids": [eid], "redo": True, "auto": True, "force": True,
+                                    "hint": (c.get("voice_hint") or c.get("change") or text)[:300]}})
+                    done.append(f"{c['name']} 목소리 → {(c.get('voice_hint') or c.get('change') or '')[:60]}")
+            elif (c.get("change") or "").strip():
+                why = re.sub(r"목소리", "말소리", c["change"].strip())[:300]
+                if rpc("agent_bible_owner_change", p_token=TOKEN, p_episode=ep, p_name=c["name"], p_reason=why):
+                    done.append(f"{c['name']}: {why[:60]}")
+        except Exception as ex:
+            log(f"바이블 저장 실패({c.get('name')}): {ex}")
+    if done:
+        notify("제작 중 대표 지시를 바이블에도 저장", "\n".join(done)[:600])
+    return done
+
+
 def director_revise(t, cut_id):
     cut = rpc("agent_get_cut", p_token=TOKEN, p_id=cut_id)
     ep = cut["episode_id"]
     ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep, p_version=cut.get("script_version_id"))
+    fr = (cut.get("fix_request") or "").strip()
+    if fr and not fr.startswith("[자동 재시도") and not (t.get("payload") or {}).get("auto_retry") and not (t.get("payload") or {}).get("bible_synced"):
+        try:
+            saved = owner_to_bible(ctx, ep, cut, fr)
+            if saved:
+                log("대표 지시 → 바이블 저장: " + " / ".join(saved))
+        except Exception as ex:
+            log(f"대표 지시 바이블 저장 판단 실패(컷 수정은 계속): {ex}")
     last = (cut.get("takes") or [{}])[-1] if cut.get("takes") else {}
     dmodel = setting(ctx, "generation", "claude_director", "claude-opus-5-5")
     progress(f"감독이 {cut.get('code')} 프롬프트를 고치는 중")
@@ -3180,7 +3224,7 @@ def t_photo_design(t):
         raise RuntimeError("후보가 만들어지지 않았습니다")
     rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "ready", "previews": previews})
     rpc("agent_add_task", p_token=TOKEN, p={"kind": "coord_review", "payload": {"design_id": did, "entry_id": d.get("entry_id"), "series_id": d.get("series_id")}})
-    notify(f"{name} 사진 후보 {len(previews)}장 도착", "바이블 탭에서 마음에 드는 사진을 골라 주세요")
+    notify(f"{name} 사진 후보 {len(previews)}장 도착", "코디네이터가 확인해 추천 사진으로 바이블까지 자동 반영합니다" if d.get("auto_apply") else "바이블 탭에서 마음에 드는 사진을 골라 주세요")
     return f"{name} 사진 후보 {len(previews)}장"
 
 
@@ -3234,7 +3278,7 @@ def t_photo_set(t):
         raise
     rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"status": "set_ready", "soul_id": soul_id, "ref_set": ref_set})
     rpc("agent_add_task", p_token=TOKEN, p={"kind": "coord_review", "payload": {"design_id": did, "entry_id": d.get("entry_id"), "series_id": d.get("series_id")}})
-    notify(f"{name} 얼굴 고정 완료", f"같은 얼굴 기준 사진 {len(ref_set)}장을 바이블 탭에서 확인하고 적용해 주세요")
+    notify(f"{name} 얼굴 고정 완료", f"기준 사진 {len(ref_set)}장 — " + ("코디네이터 확인 뒤 바이블에 자동 반영합니다" if d.get("auto_apply") else "바이블 탭에서 확인하고 적용해 주세요"))
     return f"{name} {'나노바나나 프로 참고 사진 고정' if use_nano else 'Soul ID'} + 기준 사진 {len(ref_set)}장"
 
 
@@ -3986,7 +4030,70 @@ avoid에 생성 모델에 넣을 금지 사항(영어 짧은 구, 예: "no ID ba
             log(f"자동 다시 만들기 실패: {ex}")
         if redo:
             notify(f"코디네이터: {name} 후보를 고친 프롬프트로 다시 만드는 중", str(r.get("improve_note") or r.get("summary") or "")[:200])
-    return f"{name} 사진 {len(out)}장 확인: 문제 {bad}장" + (" · 고친 프롬프트로 자동 다시 만드는 중" if redo else " · 다음 후보용 프롬프트 개선" if improved or avoid else "")
+    auto_msg = ""
+    if d.get("auto_apply") and not redo:   # 대표가 '추천하고 자동 반영'을 고른 사진: 추천 사진으로 다음 단계까지 이어서
+        try:
+            auto_msg = " · " + photo_auto_continue(d, out, r.get("best") or [])
+        except Exception as ex:
+            log(f"자동 반영 이어 하기 실패: {ex}")
+            notify(f"{name} 사진 자동 반영을 끝내지 못했습니다", f"{str(ex)[:200]} — 바이블 탭에서 직접 골라 적용해 주세요", "warning")
+    return f"{name} 사진 {len(out)}장 확인: 문제 {bad}장" + (" · 고친 프롬프트로 자동 다시 만드는 중" if redo else " · 다음 후보용 프롬프트 개선" if improved or avoid else "") + auto_msg
+
+
+def bible_photo_upload(did, series_id, entry_id, item, i):
+    """takes 저장소의 사진 → 바이블 저장소(그 항목 폴더)로 복사. 자동 반영으로 맡긴 디자인만 허가된다."""
+    tmp = os.path.join(HOME, "work", f"bp_{uuid.uuid4().hex[:6]}.jpg")
+    try:
+        fetch_to(storage_signed_url(item.get("bucket") or "takes", item["path"], 900), tmp)
+        path = f"{series_id}/{entry_id}/{int(time.time() * 1000)}-auto{i}.jpg"
+        rpc("agent_bible_photo_grant", p_token=TOKEN, p_design=did, p_path=path)
+        with open(tmp, "rb") as f:
+            data = f.read()
+        req = urllib.request.Request(f"{URL}/storage/v1/object/bible/{path}", data=data, method="POST",
+                                     headers=sb_headers({"Content-Type": "image/jpeg", "x-upsert": "false", "cache-control": "3600"}))
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                resp.read()
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"바이블 저장소 올리기 실패 {e.code}: {e.read()[:200]!r}") from None
+        return path
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def photo_auto_continue(d, items, best):
+    """자동 반영: 후보 확인 뒤 → 추천 사진 고르기 → (인물) 얼굴 고정·기준 사진 → 기준 사진 확인 뒤 → 바이블 적용."""
+    did, name = d["id"], d.get("entry_name")
+    ok = [x for x in items if x.get("ok")]
+    if d.get("status") == "ready":
+        okp = {x["path"] for x in ok}
+        prev = d.get("previews") or []
+        pick = [prev[n - 1] for n in best if isinstance(n, int) and 0 < n <= len(prev) and prev[n - 1].get("path") in okp]
+        pick += [x for x in prev if x.get("path") in okp and x not in pick]   # 추천 순서 먼저, 나머지 문제없는 사진으로 채움
+        pick = [{"path": x["path"], "bucket": x.get("bucket") or "takes"} for x in pick][:4]
+        if not pick:
+            notify(f"{name}: 추천할 만한 사진이 없습니다", "코디네이터 확인에서 모든 후보에 문제가 있었습니다. 바이블 탭에서 '새로 만들기'를 눌러 주세요", "warning")
+            return "추천할 사진 없음"
+        if d.get("category") == "character":
+            rpc("agent_update_photo_design", p_token=TOKEN, p_id=did, p={"chosen": pick, "status": "training"})
+            rpc("agent_add_task", p_token=TOKEN, p={"kind": "photo_set", "payload": {"design_id": did}})
+            return f"추천 사진 {len(pick)}장으로 얼굴 고정 시작(자동 반영)"
+        paths = [bible_photo_upload(did, d["series_id"], d["entry_id"], x, i) for i, x in enumerate(pick, 1)]
+        res = rpc("agent_photo_auto_apply", p_token=TOKEN, p_design=did, p_paths=paths, p_soul="")
+        notify(f"{name} 사진을 바이블에 넣었습니다(자동 반영)", f"코디네이터 추천 {len(paths)}장")
+        return f"추천 사진 {len(paths)}장 바이블 적용({res})"
+    if d.get("status") == "set_ready":
+        okp = {x["path"] for x in ok}
+        lst = [x for x in (d.get("chosen") or []) + (d.get("ref_set") or []) if x.get("path") and (x["path"] in okp or x in (d.get("chosen") or []))]
+        if not [x for x in (d.get("ref_set") or []) if x.get("path") in okp]:
+            notify(f"{name}: 기준 사진에 모두 문제가 있어 자동 반영을 멈췄습니다", "바이블 탭에서 확인해 주세요", "warning")
+            return "기준 사진 모두 문제 → 자동 반영 멈춤"
+        paths = [bible_photo_upload(did, d["series_id"], d["entry_id"], x, i) for i, x in enumerate(lst, 1)]
+        res = rpc("agent_photo_auto_apply", p_token=TOKEN, p_design=did, p_paths=paths, p_soul=d.get("soul_id") or "")
+        notify(f"{name} 얼굴 고정·기준 사진을 바이블에 넣었습니다(자동 반영)", f"사진 {len(paths)}장")
+        return f"기준 사진 {len(paths)}장 바이블 적용({res})"
+    return ""
 
 
 VIDEO_REVIEW_RULES = """[영상감수자 — 영상을 만들기 전에 컷 설계(프롬프트)를 본다. 영상 생성 모델에서 의도대로 나오게 하는 것이 책임이다]
@@ -4394,7 +4501,7 @@ def t_voice_cast(t):
 - sample_text: 그 인물이 대본에서 할 법한 한국어 대사 130~250자. 감정이 두세 번 바뀌게(설렘→긴장→다짐 등) 써서 목소리 폭을 들을 수 있게.
 - singing_hint: 노래 장면이 있다면 어울리는 노래 음색 한 줄(한국어). 없으면 빈 문자열.
 답 형식: <json>{"voices": [{"entry_id": "", "name": "", "voice_description": "", "sample_text": "", "singing_hint": ""}]}</json>"""
-    user = f"시리즈: {title}\n\n[인물]\n" + json.dumps([{k: c.get(k) for k in ("entry_id", "name", "summary", "description", "details")} for c in chars], ensure_ascii=False) \
+    user = (f"[대표 지시 — 최우선으로 반영]\n{p['hint']}\n\n" if p.get("hint") else "") + f"시리즈: {title}\n\n[인물]\n" + json.dumps([{k: c.get(k) for k in ("entry_id", "name", "summary", "description", "details")} for c in chars], ensure_ascii=False) \
         + "\n\n[대본 앞부분]\n" + "\n\n".join(f"{s['number']}화 {s.get('title') or ''}\n{s.get('text') or ''}" for s in cast.get("scripts") or [])[:40000]
     text, _ = claude("claude-opus-5-5", system, user, max_tokens=8000, stage="other", note=f"시리즈 목소리 설계: {title}")
     voices = (safe_json(text) or {}).get("voices") or []
