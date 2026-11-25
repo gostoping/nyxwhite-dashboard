@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.38.1"
+VERSION = "1.38.2"
 
 import base64
 import glob
@@ -1065,8 +1065,10 @@ def prompt_ko_task(t, cut, ctx):
 [이번 일] 대표가 한국어판 프롬프트를 직접 고쳤다. 고친 한국어판이 기준이다(대표 지시 — 최우선).
 - 영어 프롬프트를 고친 한국어판과 같은 내용이 되게 다시 쓴다. 대표가 바꾼 곳은 빠짐없이 반영하고, 바꾸지 않은 곳은 지금 영어 표현을 그대로 둔다.
 - 줄 머리말(SHOT: FRAME: …)은 영어 그대로. 따옴표 안 한국어 대사는 글자 그대로. 인물 고정 묘사는 대표가 바꾸지 않았다면 지금 영어 그대로.
-- 답: <json>{"prompt": "영어 프롬프트 전체", "summary": "무엇을 바꿨는지 한 줄(한국어)"}</json>"""
+- 답: <json>{"prompt": "영어 프롬프트 전체", "prompt_ko": "(대표 추가 지시가 있을 때만) 그 지시까지 반영한 한국어판 전체", "summary": "무엇을 바꿨는지 한 줄(한국어)"}</json>"""
     user = f"[지금 영어 프롬프트]\n{cut.get('prompt') or ''}\n\n[고치기 전 한국어판]\n{cut.get('prompt_ko') or p.get('old_ko') or '(없음)'}\n\n[대표가 고친 한국어판 — 기준]\n{new_ko}"
+    if (p.get("note") or "").strip():
+        user += f"\n\n[대표 추가 지시 — 최우선. 한국어판과 영어 프롬프트 모두에 반영하고, 반영한 한국어판을 prompt_ko로도 준다]\n{p['note'].strip()}"
     r = {}
     for attempt in range(2):
         text, _ = claude(dmodel, system, user + ("" if not attempt else "\n\n[중요] 설명 없이 <json>{\"prompt\": \"...\", \"summary\": \"...\"}</json> 하나만."),
@@ -1078,7 +1080,7 @@ def prompt_ko_task(t, cut, ctx):
     if not r.get("prompt"):
         raise RuntimeError("감독이 영어 프롬프트를 만들지 못했습니다 — " + ("답이 길이 제한에 잘림" if CURRENT.get("last_stop") == "max_tokens" else "답 형식(JSON)이 깨짐") + " (두 번 시도)")
     then_gen = bool(p.get("then_generate"))
-    rpc("agent_update_cut", p_token=TOKEN, p_id=cid, p={"prompt": tidy_prompt(r["prompt"]), "prompt_ko": new_ko, "clear_fix": True,
+    rpc("agent_update_cut", p_token=TOKEN, p_id=cid, p={"prompt": tidy_prompt(r["prompt"]), "prompt_ko": (r.get("prompt_ko") or "").strip() or new_ko, "clear_fix": True,
                                                          "status": "approved" if then_gen else "designed",
                                                          "director_note": "대표가 한글 프롬프트를 직접 고침: " + (r.get("summary") or "")[:200]})
     notify(f"{cut.get('code')} 한글 프롬프트 반영", (r.get("summary") or "영어 프롬프트를 고친 한국어판에 맞췄습니다")[:300])

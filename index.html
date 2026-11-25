@@ -301,6 +301,7 @@
   .ppop .ko-wait { min-height: 220px; display: flex; align-items: center; justify-content: center; gap: 6px; color: var(--quiet); }
   .ppop #pKo { width: 100%; box-sizing: border-box; min-height: 220px; font-size: 12.5px; font-family: inherit; line-height: 1.55; }
   .ppop .psec h4 { margin: 14px 0 4px; font-size: 13.5px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .ppop .pnote { width: 100%; box-sizing: border-box; min-height: 84px; resize: vertical; font-size: 13px; font-family: inherit; line-height: 1.55; white-space: pre-wrap; }
   .ppop .secin { display: flex; gap: 6px; margin-top: 4px; align-items: flex-start; }
   .ppop .secin textarea { flex: 1; min-height: 34px; height: 34px; font-size: 12.5px; font-family: inherit; box-sizing: border-box; }
   .ppop .secin textarea:focus { height: 70px; }
@@ -469,7 +470,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.38.1"
+VERSION = "1.38.2"
 
 import base64
 import glob
@@ -1524,8 +1525,10 @@ def prompt_ko_task(t, cut, ctx):
 [이번 일] 대표가 한국어판 프롬프트를 직접 고쳤다. 고친 한국어판이 기준이다(대표 지시 — 최우선).
 - 영어 프롬프트를 고친 한국어판과 같은 내용이 되게 다시 쓴다. 대표가 바꾼 곳은 빠짐없이 반영하고, 바꾸지 않은 곳은 지금 영어 표현을 그대로 둔다.
 - 줄 머리말(SHOT: FRAME: …)은 영어 그대로. 따옴표 안 한국어 대사는 글자 그대로. 인물 고정 묘사는 대표가 바꾸지 않았다면 지금 영어 그대로.
-- 답: <json>{"prompt": "영어 프롬프트 전체", "summary": "무엇을 바꿨는지 한 줄(한국어)"}</json>"""
+- 답: <json>{"prompt": "영어 프롬프트 전체", "prompt_ko": "(대표 추가 지시가 있을 때만) 그 지시까지 반영한 한국어판 전체", "summary": "무엇을 바꿨는지 한 줄(한국어)"}</json>"""
     user = f"[지금 영어 프롬프트]\n{cut.get('prompt') or ''}\n\n[고치기 전 한국어판]\n{cut.get('prompt_ko') or p.get('old_ko') or '(없음)'}\n\n[대표가 고친 한국어판 — 기준]\n{new_ko}"
+    if (p.get("note") or "").strip():
+        user += f"\n\n[대표 추가 지시 — 최우선. 한국어판과 영어 프롬프트 모두에 반영하고, 반영한 한국어판을 prompt_ko로도 준다]\n{p['note'].strip()}"
     r = {}
     for attempt in range(2):
         text, _ = claude(dmodel, system, user + ("" if not attempt else "\n\n[중요] 설명 없이 <json>{\"prompt\": \"...\", \"summary\": \"...\"}</json> 하나만."),
@@ -1537,7 +1540,7 @@ def prompt_ko_task(t, cut, ctx):
     if not r.get("prompt"):
         raise RuntimeError("감독이 영어 프롬프트를 만들지 못했습니다 — " + ("답이 길이 제한에 잘림" if CURRENT.get("last_stop") == "max_tokens" else "답 형식(JSON)이 깨짐") + " (두 번 시도)")
     then_gen = bool(p.get("then_generate"))
-    rpc("agent_update_cut", p_token=TOKEN, p_id=cid, p={"prompt": tidy_prompt(r["prompt"]), "prompt_ko": new_ko, "clear_fix": True,
+    rpc("agent_update_cut", p_token=TOKEN, p_id=cid, p={"prompt": tidy_prompt(r["prompt"]), "prompt_ko": (r.get("prompt_ko") or "").strip() or new_ko, "clear_fix": True,
                                                          "status": "approved" if then_gen else "designed",
                                                          "director_note": "대표가 한글 프롬프트를 직접 고침: " + (r.get("summary") or "")[:200]})
     notify(f"{cut.get('code')} 한글 프롬프트 반영", (r.get("summary") or "영어 프롬프트를 고친 한국어판에 맞췄습니다")[:300])
@@ -9882,10 +9885,24 @@ async function retryTask(t) {
     cut_id: t.cut_id, take_id: t.take_id, platform: t.platform }));
   return true;
 }
+// 실패 위치: 어느 씬·컷의 어떤 일인지 한눈에
+function failWhere(t) {
+  const c = t.cut_id ? (S.prodCuts || []).find(x => x.id === t.cut_id) : null;
+  const pl = t.payload || {};
+  const what = t.kind === 'director' && t.cut_id ? (pl.mode === 'ko' ? '한글 프롬프트 만들기' : pl.mode === 'from_ko' ? '한글 프롬프트 → 영어 반영' : pl.script_range ? '대본 범위 조정' : '프롬프트 수정(대표 지시 반영)')
+    : t.kind === 'director' ? (pl.scenes?.length ? `컷 설계 (S#${pl.scenes.join(', S#')})` : '컷 설계(화 전체)')
+    : t.kind === 'generate' ? '영상 만들기' : t.kind === 'prep_cut' ? '장면 준비' : t.kind === 'cut_review' ? (pl.mode === 'script' ? '대본 감수' : pl.mode === 'flow' ? '흐름 감수' : '컷 감수')
+    : t.kind === 'writers_room' ? '작가실 정리' : (TASK_LABEL[t.kind] || t.kind);
+  const sc = c?.scene_no ?? t.scene_no;
+  const where = c ? `S#${c.scene_no} C${c.cut_no}${c.summary ? ' — ' + c.summary.slice(0, 40) : ''}` : sc ? `S#${sc} (씬 전체)` : `${t.episode_id ? '이 화 전체' : '시리즈'}`;
+  return { what, where, cut: c };
+}
 function failCard(t) {
   const x = explainFail(t.kind, t.error);
+  const W = failWhere(t);
   return `<div class="failcard" data-fid="${esc(t.id)}">
-    <div class="row" style="gap:6px">${pill((TASK_LABEL[t.kind] || t.kind) + ' 실패', 'bad')}<span class="quiet">${esc(agoText(t.finished_at || t.created_at))}${t.scene_no ? ` · S${t.scene_no}` : ''}</span></div>
+    <div class="row" style="gap:6px">${pill(W.what + ' 실패', 'bad')}<b style="font-size:13.5px">📍 ${esc(W.where)}</b><span class="quiet">· ${esc(agoText(t.finished_at || t.created_at))}</span>
+      ${W.cut ? `<button class="btn small" data-fgoto="${esc(W.cut.id)}">이 컷으로 가기</button>` : (W.cut == null && t.scene_no ? `<button class="btn small" data-fgoscene="${t.scene_no}">이 씬으로 가기</button>` : '')}</div>
     <div style="margin-top:4px"><b>무슨 일인가요?</b> ${esc(x.what)}</div>
     <div><b>이렇게 하세요:</b> ${esc(x.how)}</div>
     <details style="margin-top:2px" ${/^씬별 결과/.test(t.error || '') ? 'open' : ''}><summary class="quiet">원인 원문</summary><div class="quiet" style="white-space:pre-wrap">${esc(t.error || '기록 없음')}</div></details>
@@ -10117,7 +10134,7 @@ async function renderProduction(ep, quietRefresh = false) {
     q(S.sb.from('cost_settings').select('krw_per_usd').eq('id', 1).maybeSingle()),
     q(S.sb.from('app_settings').select('key,value').in('key', ['generation', 'storage'])),
   ]);
-  const rate = costSet?.krw_per_usd || 1340; S.prodRate = rate;
+  const rate = costSet?.krw_per_usd || 1340; S.prodRate = rate; S.prodCuts = cuts;
   // PPL 메모가 들어온 뒤에도 그 전에 만든 컷이 남아 있으면 알려 준다(이미 생성된 컷은 비용 때문에 자동으로 다시 만들지 않음)
   const pplNotes = await q(S.sb.from('episode_notes').select('scene_no,content,created_at').eq('episode_id', ep.id).ilike('content', '%PPL%')).catch(() => []);
   try {
@@ -10273,6 +10290,15 @@ async function renderProduction(ep, quietRefresh = false) {
   bindProduction(ep, { confirmed, cuts, tasks: openTasks, rate, takes });
   bindFlowView(pane);
   bindFailCards(pane, failedNow, () => renderProduction(ep));
+  pane.querySelectorAll('[data-fgoto]').forEach(b => b.onclick = () => {
+    const card = pane.querySelector(`[data-fcut="${b.dataset.fgoto}"]`); if (!card) return toast('이 컷이 지금 목록에 없습니다');
+    const d = card.closest('details'); if (d) d.open = true;
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' }); card.querySelector('dl')?.click();
+  });
+  pane.querySelectorAll('[data-fgoscene]').forEach(b => b.onclick = () => {
+    const sc = pane.querySelector(`.pscene[data-scene="${b.dataset.fgoscene}"]`); if (!sc) return;
+    sc.scrollIntoView({ behavior: 'smooth', block: 'start' }); sc.querySelector('[data-fscene] .t')?.click();
+  });
 }
 
 // 확정 대본 글(씬 순서·요약용). 같은 대본은 한 번만 받아 둔다
@@ -10643,10 +10669,11 @@ function flowPromptPopup(id) {
   const render = () => {
     const keep = inner.querySelector('.ppbody')?.scrollTop || 0;
     const drafts = {}; inner.querySelectorAll('[data-secin]').forEach(t => { drafts[t.dataset.secin] = t.value; });
-    const koDraft = inner.querySelector('#pKo')?.value;
+    const koDraft = inner.querySelector('#pKo')?.value, noteDraft = inner.querySelector('#pNote')?.value;
     inner.innerHTML = promptPopupHtml(c, busy);
     inner.querySelectorAll('[data-secin]').forEach(t => { if (drafts[t.dataset.secin]) t.value = drafts[t.dataset.secin]; });
     if (koDraft != null && inner.querySelector('#pKo') && koDraft !== (c.prompt_ko || '')) inner.querySelector('#pKo').value = koDraft;
+    if (noteDraft && inner.querySelector('#pNote')) inner.querySelector('#pNote').value = noteDraft;
     const bd = inner.querySelector('.ppbody'); if (bd) bd.scrollTop = keep;
     bindPromptPopup(inner, c, close, msg => { if (msg !== undefined) busy = msg; render(); });
   };
@@ -10680,8 +10707,11 @@ function flowPromptPopup(id) {
     const changed = r.prompt !== c.prompt || r.prompt_ko !== c.prompt_ko || r.fix_request !== c.fix_request;
     if (changed) Object.assign(c, r);
     const failed = (open || [])[0]?.status === 'failed' ? (open[0].error || '실패') : '';
-    const nb = run ? (run.progress || busy) : failed ? '실패: ' + failed : '';
-    if (changed || nb !== busy) { busy = nb; render(); if (!run && !failed) toast('감독이 반영했습니다'); }
+    const nb = run ? (run.progress || busy) : '';
+    if (changed || nb !== busy || (failed && !run)) {
+      busy = nb; if (!run && failed) c._fail = failed;
+      render(); if (!run) toast(failed ? '반영하지 못했습니다 — 위에 이유가 나옵니다' : '감독이 반영했습니다');
+    }
   }, 4000);
 }
 // 팝업 내용: 왼쪽 영상, 오른쪽 한글↔영어 프롬프트와 항목별(항목마다 지시를 적어 반영)
@@ -10704,8 +10734,7 @@ function promptPopupHtml(c, busy) {
   const missSpk = speakers.filter(s => !(c.reference_names || []).includes(s) && B[s]);
   const noPhoto = refs(c, 'character').filter(n => !B[n]?.photo);
   const dis = busy ? 'disabled' : '';
-  const sec = (key, icon, title, status, body, ph) => `<div class="psec"><h4>${icon} ${esc(title)} ${status}</h4><pre class="pc">${esc(body || '—')}</pre>
-    <div class="secin"><textarea data-secin="${key}" placeholder="${esc(ph)}" ${dis}></textarea><button class="btn small" data-secgo="${key}" data-sectitle="${esc(title)}" ${dis}>반영해 주기</button></div></div>`;
+  const sec = (key, icon, title, status, body) => `<div class="psec"><h4>${icon} ${esc(title)} ${status}</h4><pre class="pc">${esc(body || '—')}</pre></div>`;
   const ts = takesOf(c.id), U = S.flowUrls || {};
   const sh = ts.find(x => x.id === c.best_take_id && U[x.files?.preview]) || ts.filter(x => U[x.files?.preview]).at(-1);
   const video = sh ? `<video src="${esc(U[sh.files.preview])}" ${U[sh.files?.poster] ? `poster="${esc(U[sh.files.poster])}"` : ''} controls playsinline loop></video><div class="quiet" style="font-size:12px;margin-top:4px">테이크 ${sh.take_no || ''} · ${c.seconds}초</div>`
@@ -10717,6 +10746,7 @@ function promptPopupHtml(c, busy) {
   return `<div class="row pphead"><b>📝 S#${c.scene_no} C${c.cut_no} 프롬프트</b><span class="quiet" style="font-size:12.5px">${esc(c.code || '')} · ${c.seconds}초 · ${esc((c.summary || '').slice(0, 80))}</span>
       <button class="btn small" id="zClose" style="margin-left:auto">닫기 (Esc)</button></div>
     ${busy ? `<div class="ppbusy"><span class="spin"></span> ${esc(busy)}</div>` : ''}
+    ${c._fail ? `<div class="ppbusy" style="background:#fde4e4;color:#8a1010">⚠ 반영 실패: ${esc(c._fail)} <button class="btn small" id="pFailX" style="margin-left:8px">닫기</button> <span style="font-size:12px">— 지시를 고쳐 다시 "프롬프트 반영"을 누르면 됩니다</span></div>` : ''}
     <div class="ppgrid"><div class="ppvid">${video}${genBtn}</div><div class="ppbody">
     <div class="pedit">
       <div class="row" style="justify-content:space-between"><b style="font-size:13.5px">한글 프롬프트 ↔ 영어 프롬프트</b>
@@ -10726,9 +10756,11 @@ function promptPopupHtml(c, busy) {
           ${c.prompt_ko ? `<textarea id="pKo" ${dis}>${esc(c.prompt_ko)}</textarea>` : `<div class="pc ko-wait">${busy ? '<span class="spin"></span> 한글판을 만드는 중입니다…' : '한글판이 없습니다'}</div>`}</div>
         <div><div class="quiet" style="font-size:12px">영어 (영상 생성에 쓰임)</div><pre class="pc en">${esc(c.prompt || '')}</pre></div>
       </div>
-      ${c.prompt_ko ? `<div class="row" style="gap:6px;margin-top:8px"><button class="btn small primary" id="pKoApply" ${dis}>프롬프트 반영</button><span class="quiet" style="font-size:12px">프롬프트 글만 고칩니다(영상은 왼쪽 버튼으로) · 바꾼 줄은 대표 지시로 기록, 계속 유지할 변경은 바이블에도</span></div>` : ''}
+      <div style="margin-top:10px"><div class="quiet" style="font-size:12px">대표 지시 (여러 줄로 써도 됩니다 · 한글 칸을 직접 고쳐도 함께 반영)</div>
+        <textarea id="pNote" class="pnote" placeholder="예:&#10;0~2초 린이 문을 열고 들어옴 → 2~4초 멈춰서 탄을 봄&#10;탄은 화면 오른쪽, 카메라는 눈높이 바스트샷&#10;앞 컷에서 들고 있던 휴대폰은 계속 오른손에" ${dis}></textarea></div>
+      <div class="row" style="gap:6px;margin-top:6px"><button class="btn small primary" id="pKoApply" ${dis}>프롬프트 반영</button><span class="quiet" style="font-size:12px">감독이 지시를 반영해 한글·영어 프롬프트와 아래 항목을 모두 고칩니다(글만 · 영상은 왼쪽 버튼으로) · 지시는 대표 지시로 기록, 계속 유지할 변경은 바이블에도</span></div>
     </div>
-    <div class="quiet" style="font-size:12px;margin:10px 0 2px">항목마다 아래 칸에 지시를 적고 "반영해 주기"를 누르면 감독이 프롬프트 글(한글·영어)만 고치고, 아래 항목들이 새 내용으로 바뀝니다. 영상은 왼쪽 "영상 만들기"로.${Object.keys(P).length <= 1 ? ' · 이 프롬프트는 항목 구분 없이 쓰였습니다(반영하면 항목별로 다시 씁니다)' : ''}</div>
+    <div class="quiet" style="font-size:12px;margin:12px 0 2px">아래는 지금 프롬프트를 항목별로 나눠 본 것입니다(반영하면 함께 바뀝니다).${Object.keys(P).length <= 1 ? ' · 이 프롬프트는 항목 구분 없이 쓰였습니다(반영하면 항목별로 다시 씁니다)' : ''}</div>
     ${sec('move', '⏱', '시간 흐름에 따른 움직임', chip(P.ACTION ? 'ok' : 'wn', P.ACTION ? '구간별 동작 있음' : '구간별 동작이 프롬프트에 없음'), [P.ACTION, st.blocking ? '연출: ' + st.blocking : ''].filter(Boolean).join('\n'), '예: 0~2초 린이 문을 열고 들어옴 → 2~4초 멈춰서 탄을 봄 → 4~6초 천천히 다가감')}
     ${sec('link', '🔗', '앞뒤 컷·씬 연결', chip(P.CONTINUITY || st.connect || c.continue_prev ? 'ok' : 'wn', c.continue_prev ? '앞 컷 마지막 장면에서 이어 시작' : P.CONTINUITY ? '연결 적힘' : '연결이 적혀 있지 않음'),
       [P.CONTINUITY, st.connect ? '다음 컷으로: ' + st.connect : '', !prev && plan.transition_in ? '앞 씬에서: ' + plan.transition_in : '', !next && plan.transition_out ? '다음 씬으로: ' + plan.transition_out : '', plan.flow ? '씬 흐름: ' + plan.flow : ''].filter(Boolean).join('\n'), '예: 앞 컷에서 손을 뻗던 동작 그대로 시작, 끝은 문 쪽을 돌아보며 다음 컷으로')}
@@ -10752,30 +10784,23 @@ function bindPromptPopup(inner, c, close, setBusy) {
     c.status = 'approved'; setBusy(undefined);
     toast('영상을 만들기 시작했습니다. 끝나면 이 컷에 새 영상이 나옵니다');
   });
-  inner.querySelectorAll('[data-secgo]').forEach(b => b.onclick = guard(async () => {
-    const t = inner.querySelector(`[data-secin="${b.dataset.secgo}"]`).value.trim(); if (!t) return toast('반영할 내용을 적어 주세요');
-    const how = await ask(`${b.dataset.sectitle} — 반영`, `${c.code}\n${t}`); if (!how) return;
-    const ep = S.flowEp, gen = how === 'gen';
-    await q(S.sb.from('production_cuts').update({ fix_request: `[대표 지시 — 최우선 · ${b.dataset.sectitle}] ${t}`, status: gen ? 'approved' : 'designed' }).eq('id', c.id));
-    await q(S.sb.from('pipeline_tasks').insert({ kind: 'director', episode_id: ep.id, scene_no: c.scene_no, cut_id: c.id, payload: { cut_id: c.id, ...(gen ? { then_generate: true } : {}) } }));
-    if (gen) await q(S.sb.from('pipeline_tasks').insert({ kind: 'generate', episode_id: ep.id, scene_no: c.scene_no, cut_id: c.id, payload: { after_director: true } }));
-    await ownerFixRecord(ep.id, c, `(${b.dataset.sectitle}) ${t}`, '제작실');
-    c.fix_request = `[대표 지시 — 최우선 · ${b.dataset.sectitle}] ${t}`;
-    setBusy(`감독이 "${b.dataset.sectitle}"에 대표 지시를 반영하는 중…`);
-  }));
+  const fx = inner.querySelector('#pFailX'); if (fx) fx.onclick = () => { c._fail = ''; setBusy(undefined); };
   const ap = inner.querySelector('#pKoApply'); if (ap) ap.onclick = guard(async () => {
-    const ko = inner.querySelector('#pKo').value.trim();
-    if (!ko || ko === (c.prompt_ko || '').trim()) return toast('한글 프롬프트에서 바뀐 곳이 없습니다');
+    const note = (inner.querySelector('#pNote')?.value || '').trim();
+    const koEl = inner.querySelector('#pKo'), ko = (koEl?.value || '').trim();
+    const koChanged = !!koEl && ko && ko !== (c.prompt_ko || '').trim();
+    if (!note && !koChanged) return toast('대표 지시를 쓰거나 한글 프롬프트를 고쳐 주세요');
     const old = new Set((c.prompt_ko || '').split('\n').map(s => s.trim()));
-    const changed = ko.split('\n').map(s => s.trim()).filter(s => s && !old.has(s));
-    const how = await ask('한글 프롬프트 반영', `${c.code}\n바뀐 줄 ${changed.length}개:\n${changed.slice(0, 6).join('\n')}`); if (!how) return;
-    const ep = S.flowEp, gen = how === 'gen';
-    await q(S.sb.from('production_cuts').update({ fix_request: `[대표 지시 — 최우선] 한글 프롬프트를 직접 고침 — 바뀐 줄: ${changed.join(' / ')}`.slice(0, 3000), status: gen ? 'approved' : 'designed' }).eq('id', c.id));
-    await q(S.sb.from('pipeline_tasks').insert({ kind: 'director', episode_id: ep.id, scene_no: c.scene_no, cut_id: c.id, payload: { cut_id: c.id, mode: 'from_ko', ko, old_ko: c.prompt_ko || '', ...(gen ? { then_generate: true } : {}) } }));
-    if (gen) await q(S.sb.from('pipeline_tasks').insert({ kind: 'generate', episode_id: ep.id, scene_no: c.scene_no, cut_id: c.id, payload: { after_director: true } }));
-    await ownerFixRecord(ep.id, c, '한글 프롬프트 직접 수정: ' + changed.join(' / '), '제작실');
-    c.fix_request = 'x';
-    setBusy('감독이 고친 한글을 영어 프롬프트에 반영하는 중…');
+    const changed = koChanged ? ko.split('\n').map(s => s.trim()).filter(s => s && !old.has(s)) : [];
+    const ep = S.flowEp;
+    const fr = `[대표 지시 — 최우선] ${[note, changed.length ? '한글 프롬프트 직접 수정 — ' + changed.join(' / ') : ''].filter(Boolean).join('\n')}`.slice(0, 4000);
+    await q(S.sb.from('production_cuts').update({ fix_request: fr, status: 'designed' }).eq('id', c.id));
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'director', episode_id: ep.id, scene_no: c.scene_no, cut_id: c.id,
+      payload: koChanged ? { cut_id: c.id, mode: 'from_ko', ko, old_ko: c.prompt_ko || '', note } : { cut_id: c.id } }));
+    await ownerFixRecord(ep.id, c, [note, changed.length ? '한글 프롬프트 직접 수정: ' + changed.join(' / ') : ''].filter(Boolean).join(' / '), '제작실');
+    c.fix_request = fr; c._fail = '';
+    const nt = inner.querySelector('#pNote'); if (nt) nt.value = '';
+    setBusy('감독이 대표 지시를 한글·영어 프롬프트에 반영하는 중…');
   });
 }
 const takesOf = id => (S.flowTakes || []).filter(t => t.cut_id === id);
