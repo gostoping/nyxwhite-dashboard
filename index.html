@@ -7335,13 +7335,14 @@ async function viewBible(main) {
         ${PHOTO_CATS.includes(e.category) ? `<div class="brow"><span class="blbl">사진</span><div class="bbtns">
           ${hasPhotoSrc ? `<span class="seg" data-psrc="${esc(e.id)}" title="직접 올리기로 정하면 '사진 만들기'를 한꺼번에 눌러도 이 항목은 만들지 않습니다">
             <button type="button" data-v="auto" class="${e.photo_source !== 'upload' ? 'on' : ''}">자동으로 만들기</button><button type="button" data-v="upload" class="${e.photo_source === 'upload' ? 'on' : ''}">직접 올리기</button></span>` : ''}
+          ${c && ((c.image_paths || []).length || c.soul_id) ? `<button class="btn small" data-unapply="photo" data-ue="${esc(e.id)}" title="기준 사진${c.soul_id ? '·얼굴 고정' : ''}을 바이블에서 뺍니다(이전 버전은 이력에 남아 되돌릴 수 있음)">사진 적용 해제</button>` : ''}
           ${e.category === 'character' && c?.soul_id ? `<span class="quiet only-auto">✓ 얼굴 고정됨 · 바꾸려면 <b>고쳐쓰기</b>에서 "사진 후보 새로 만들기"를 체크</span>`
             : `<button class="btn small only-auto" data-pd="${esc(e.id)}">${e.category === 'character' ? '실사 사진 만들기·얼굴 고정' : '사진 만들기'}</button>`}
           <label class="btn small only-up" style="margin:0" title="외부에서 구한 사진을 기준 사진으로 넣고 바로 적용합니다. 코디네이터가 사진을 보고 묘사·영어 프롬프트를 자동으로 씁니다">사진 올리기<input type="file" accept="image/*" multiple hidden data-pup="${esc(e.id)}"></label>
           ${e.category === 'character' && (c?.image_paths || []).length ? `<button class="btn small only-up" data-pd="${esc(e.id)}" title="올린 사진으로 Soul ID를 학습해 같은 얼굴의 기준 사진을 만듭니다">${c?.soul_id ? '얼굴 다시 고정' : '이 사진으로 얼굴 고정'}</button>` : ''}</div></div>` : ''}
         ${['character', 'voice'].includes(e.category) ? `<div class="brow"><span class="blbl">목소리</span><div class="bbtns">
           <span class="vlive" id="vlive-${esc(e.id)}"></span>
-          ${c?.voice_id ? `<button class="btn small" data-vlisten="${esc(e.id)}">후보 보기·바꾸기</button>`
+          ${c?.voice_id ? `<button class="btn small" data-vlisten="${esc(e.id)}">후보 보기·바꾸기</button><button class="btn small" data-unapply="voice" data-ue="${esc(e.id)}" title="목소리를 바이블에서 뺍니다(동일인 카드도 함께). 만든 목소리는 남아 있어 다시 적용할 수 있습니다">목소리 적용 해제</button>`
             : e.same_as || entries.some(x => x.same_as === e.id) ? `<span class="quiet">동일인 카드 중 한쪽에서 목소리를 정하면 다른 쪽에도 같이 들어갑니다</span>` : `<span class="quiet">추천 목소리를 자동으로 만들어 넣습니다(후보 1번 먼저 적용)</span>`}
           <button class="btn small" data-vd="${esc(e.id)}">${c?.voice_id ? '목소리 다시 디자인' : '목소리 디자인'}</button>
           <label class="btn small" style="margin:0" title="녹음 파일(30초~2분, 잡음 적게)을 올리면 ElevenLabs가 그 목소리로 만들어 바로 바이블에 넣습니다. 사용 권리가 있는 목소리만 올려 주세요">목소리 파일 올리기<input type="file" accept="audio/*,.m4a,.mp3,.wav" data-vup="${esc(e.id)}" hidden></label></div></div>` : ''}
@@ -7609,6 +7610,15 @@ async function viewBible(main) {
     if (locked(e) && new Date(latest.created_at) < lockAt(e)) return;
     openPhotoDesign(e, cur(e.id), false);
   });
+  main.querySelectorAll('[data-unapply]').forEach(b => b.onclick = guard(async () => {
+    const e = entries.find(x => x.id === b.dataset.ue), what = b.dataset.unapply, c = cur(e.id);
+    const grp = entries.filter(x => x.id !== e.id && (x.same_as === (e.same_as || e.id) || x.id === e.same_as));
+    if (!confirm(what === 'voice'
+      ? `${e.name} 목소리를 바이블에서 뺍니다${grp.length ? `(동일인 ${grp.map(x => x.name).join(', ')}도 함께)` : ''}.\n만들어 둔 목소리는 남아 있어 '후보 보기'에서 다시 적용할 수 있고, 이전 버전은 이력에서 되돌릴 수 있습니다.\n목소리가 없는 동안 대사 미리 듣기는 임시 추천 목소리로 나옵니다.`
+      : `${e.name}의 기준 사진${c?.soul_id ? '과 얼굴 고정' : ''}을 바이블에서 뺍니다.\n이전 버전은 '이력'에서 되돌릴 수 있습니다. 새 사진은 '${e.category === 'character' ? '실사 사진 만들기·얼굴 고정' : '사진 만들기'}'로 만들면 됩니다.`)) return;
+    const n = await q(S.sb.rpc('owner_bible_unapply', { p_entry: e.id, p_what: what }));
+    toast(n ? `${e.name} ${what === 'voice' ? '목소리' : '사진'} 적용을 해제했습니다` : '해제할 것이 없습니다'); go('bible');
+  }));
   main.querySelectorAll('[data-vlisten]').forEach(b => b.onclick = () => {
     const e = entries.find(x => x.id === b.dataset.vlisten); openVoiceDesign(e, cur(e.id), false, true);
   });
@@ -7826,7 +7836,7 @@ async function fillVoiceRows(entries, cur, vds) {
     const fail = d && d.status === 'failed';
     if (from[e.id]) {   // 동일인의 다른 카드에서 정한 목소리 → 여기서는 듣기만, 디자인 칸은 없앤다
       const src = entries.find(x => x.id === from[e.id]);
-      el.parentElement.querySelectorAll('[data-vd],[data-vlisten],[data-vnew],label').forEach(x => x.remove());
+      el.parentElement.querySelectorAll('[data-vd],[data-vlisten],[data-vnew],[data-unapply],label').forEach(x => x.remove());
       [...el.parentElement.querySelectorAll('span.quiet')].filter(x => !el.contains(x)).forEach(x => x.remove());
       document.getElementById('vd-' + e.id)?.replaceChildren();
       el.innerHTML = `${u ? `<audio controls preload="none" src="${esc(u)}"></audio>` : ''}<span class="quiet">원래 인물 <b>${esc(src?.name || '')}</b> 카드와 같은 목소리 · 바꾸거나 새로 만들기는 ${esc(src?.name || '')} 카드에서</span>`;
@@ -7835,8 +7845,10 @@ async function fillVoiceRows(entries, cur, vds) {
     el.innerHTML = `${u ? `<audio controls preload="none" src="${esc(u)}" title="지금 바이블에 적용된 목소리"></audio>`
         : c?.voice_id ? `<span class="quiet">목소리 적용됨 · 들을 샘플이 없음(후보 보기에서 다시 만들기)</span>` : ''}
       ${busy ? `<span class="quiet"><span class="spin"></span> ${d.sample_path ? '올린 파일로 ElevenLabs가 목소리를 만드는 중' : d.status === 'saving' ? '목소리 저장 중' : '목소리 후보 만드는 중'}</span>` : ''}
+      ${!c?.voice_id && d && d.status === 'saved' && d.voice_id ? `<button class="btn small" data-vre="1">저장된 목소리 다시 적용·듣기</button>` : ''}
       ${fail ? `<span class="vfail">❌ ${d.sample_path ? '올린 목소리' : '목소리'} 실패: ${esc(explainFail('voice_design', d.error).what)} <span class="quiet">${esc((d.error || '').slice(0, 220))}</span></span>` : ''}`;
   });
+  entries.forEach(e => { const b = document.querySelector(`#vlive-${e.id} [data-vre]`); if (b) b.onclick = () => openVoiceDesign(e, cur(e.id), false, true); });
 }
 // 추천하기 / 새로 만들기: 작가실·코디네이터가 목소리를 설계 → 후보 3개 → 1번을 바로 바이블에. 설계 일이 실패하면 그 이유를 상자에 바로 보여 준다
 async function recommendVoice(entry, cur) {
