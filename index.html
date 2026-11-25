@@ -203,6 +203,7 @@
   .pkgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; margin-top: 8px; }
   .pk { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 0; cursor: pointer; color: var(--ink); } .pk.on { border-color: var(--accent); background: var(--accent-soft); }
   .pk input { width: auto; margin-right: 4px; } .pk { position: relative; } .pkhold { position: absolute; right: 8px; top: 6px; font-size: 12px; cursor: pointer; }
+  .vidpop video, .vidpop img { max-height: calc(100vh - 110px); max-width: 94vw; width: auto; border-radius: 8px; background: #000; display: block; }
   .zoombox { position: fixed; inset: 0; background: rgba(0,0,0,.82); z-index: 9999; display: flex; align-items: center; justify-content: center; }
   .zoomin { position: relative; max-width: 94vw; max-height: 94vh; display: flex; flex-direction: column; align-items: center; gap: 8px; }
   .zoomin img { max-width: 94vw; max-height: 82vh; object-fit: contain; border-radius: 6px; background: #111; }
@@ -8675,6 +8676,24 @@ const usdKrw = (usd, rate) => usd == null ? '-' : won(usd * (rate || 1340));
 // ←/→로 같은 묶음 넘기기, 고를 수 있는 사진이면 크게 본 채로 "이 사진 고르기"
 // ------------------------------------------------------------------
 const ZOOM_SCOPE = '.pdimg, .thumbs, .bimgs, .tmpimg, .kf';
+// 제작된 영상을 크게: 화면 가운데 팝업(세로 9:16이면 화면 높이에 맞춤), Esc·바깥 누르면 닫힘
+function openVideo(src, poster, title) {
+  document.getElementById('zoomBox')?.remove();
+  const box = document.createElement('div'); box.id = 'zoomBox'; box.className = 'zoombox';
+  box.innerHTML = `<div class="zoomin vidpop">${src ? `<video src="${esc(src)}" ${poster ? `poster="${esc(poster)}"` : ''} controls autoplay playsinline></video>` : `<img src="${esc(poster)}" alt="">`}
+    <div class="zoombar"><span>${esc(title || '')}</span>${src ? `<a class="btn small" href="${esc(src)}" target="_blank" rel="noopener">원본 새 창</a>` : ''}
+      <button class="btn small" id="zClose">닫기 (Esc)</button></div></div>`;
+  const key = ev => { if (ev.key === 'Escape') close(); };
+  function close() { box.querySelector('video')?.pause(); box.remove(); document.removeEventListener('keydown', key); }
+  box.onclick = ev => { if (ev.target === box) close(); };
+  box.querySelector('#zClose').onclick = close;
+  document.addEventListener('keydown', key);
+  document.body.appendChild(box);
+}
+document.addEventListener('click', ev => {
+  const b = ev.target.closest('[data-vplay]'); if (!b) return;
+  ev.preventDefault(); openVideo(b.dataset.vplay, b.dataset.vposter, b.dataset.vtitle);
+});
 function openZoom(imgs, i) {
   document.getElementById('zoomBox')?.remove();
   const box = document.createElement('div'); box.id = 'zoomBox'; box.className = 'zoombox';
@@ -9291,9 +9310,9 @@ function cutCard(c, ts, urls, rate) {
   const beats = Array.isArray(c.expression_beats) ? c.expression_beats : [];
   const rv = shown?.review;
   const canApprove = ['designed', 'failed', 'hold'].includes(c.status);
-  const hasMedia = !!(u || poster);   // 영상이 생기기 전에는 빈 검은 칸을 두지 않는다(글 칸이 좁아져 글자가 깨지던 문제)
-  return `<div class="cut${hasMedia ? '' : ' nomedia'}">
-    ${hasMedia ? `<div class="media">${u ? `<video src="${esc(u)}" ${poster ? `poster="${esc(poster)}"` : ''} controls preload="none" playsinline></video>` : `<img src="${esc(poster)}">`}</div>` : ''}
+  // 카드 안에는 작은 영상 칸을 두지 않는다 → '제작된 영상 보기'를 누르면 크게 띄운다
+  const vidTitle = `${c.cut_no}번째 컷 · ${c.seconds}초${shown?.take_no ? ` · 테이크 ${shown.take_no}` : ''}`;
+  return `<div class="cut nomedia">
     <div class="body">
       <div class="row chead"><b class="cno" title="${esc(codeMeaning(c))}">${c.cut_no}번째 컷</b><span class="quiet" title="이 컷의 길이">⏱ ${c.seconds}초</span>${pill(label, kind)}
         ${c.status === 'generating' ? `<span class="quiet"><span class="spin"></span> ${esc(etaText('generate'))}</span>` : ''}
@@ -9305,6 +9324,7 @@ function cutCard(c, ts, urls, rate) {
       <div class="sum">${esc(c.summary || '')}</div>
       ${c.dialogue && !(c.voice_lines || []).length && !parseDlg(c.dialogue).length ? `<div class="dlg">${esc(c.dialogue)}</div>` : ''}
       ${beats.length ? `<div class="beats">${beats.map(b => `<span title="${esc(b.who || '')}"><i>${esc(b.t)}초</i>${esc(b.face || '')}</span>`).join('')}</div>` : ''}
+      ${u || poster ? `<div class="row" style="margin-top:6px;gap:8px"><button class="btn small primary" data-vplay="${esc(u || '')}" data-vposter="${esc(poster || '')}" data-vtitle="${esc(vidTitle)}">▶ 제작된 영상 보기</button></div>` : ''}
       ${prepBlock(c, urls)}
       ${voice ? `<label style="margin:6px 0 0">영상의 대사·현장음만</label><audio src="${esc(voice)}" controls preload="none"></audio>` : ''}
       ${rv ? `<div class="rv ${shown.verdict === 'pass' ? 'ok' : 'bad'}"><b>영상·소리 감수</b> ${esc(rv.summary || '')}
@@ -9318,7 +9338,7 @@ function cutCard(c, ts, urls, rate) {
         ${c.director_note ? `<div class="quiet">감독 메모: ${esc(c.director_note)}</div>` : ''}
         ${ts.length ? `<table style="margin-top:6px">${ts.map(t => `<tr><td>테이크 ${t.take_no}</td><td>${pill(t.verdict === 'pass' ? '통과' : t.verdict === 'fail' ? '불합격' : t.status, t.verdict === 'pass' ? 'good' : t.verdict === 'fail' || t.status === 'failed' ? 'bad' : '')}</td>
           <td class="quiet">${t.score != null ? t.score + '점 · ' : ''}${usdKrw(t.usd, rate)}${t.files?.windows ? ' · 집 PC 보관' : ''}</td>
-          <td>${urls[t.files?.preview] && t.id !== shown?.id ? `<a href="${esc(urls[t.files.preview])}" target="_blank">보기</a>` : ''}
+          <td>${urls[t.files?.preview] && t.id !== shown?.id ? `<button class="btn small" data-vplay="${esc(urls[t.files.preview])}" data-vposter="${esc(urls[t.files?.poster] || '')}" data-vtitle="${esc(c.cut_no + '번째 컷 · 테이크 ' + t.take_no)}">▶ 보기</button>` : ''}
             ${t.status === 'completed' && t.id !== c.best_take_id ? `<button class="btn small" data-best="${c.id}" data-take="${t.id}">이걸로 채택</button>` : ''}</td></tr>`).join('')}</table>` : ''}
       </details>
       <div class="row" style="margin-top:8px">
