@@ -386,7 +386,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.29.1"
+VERSION = "1.29.2"
 
 import base64
 import glob
@@ -4772,11 +4772,21 @@ def t_voice_cast(t):
 답 형식: <json>{"voices": [{"entry_id": "", "name": "", "voice_description": "", "sample_text": "", "singing_hint": ""}]}</json>"""
     user = f"시리즈: {title}\n\n[인물]\n" + json.dumps([{k: c.get(k) for k in ("entry_id", "name", "summary", "description", "details")} for c in chars], ensure_ascii=False) \
         + "\n\n[대본 앞부분]\n" + "\n\n".join(f"{s['number']}화 {s.get('title') or ''}\n{s.get('text') or ''}" for s in cast.get("scripts") or [])[:40000]
-    text, _ = claude("claude-opus-5-5", system, user, max_tokens=6000, stage="other", note=f"시리즈 목소리 설계: {title}")
-    voices = pick_json(text).get("voices") or []
+    text, _ = claude("claude-opus-5-5", system, user, max_tokens=8000, stage="other", note=f"시리즈 목소리 설계: {title}")
+    voices = (safe_json(text) or {}).get("voices") or []
+    if not voices:   # 답이 잘리거나 형식이 깨졌으면 한 번 더(짧게)
+        text, _ = claude("claude-opus-5-5", system + "\n답은 <json>…</json> 하나로만, 인물마다 voice_description 300자 이내로 짧게.", user,
+                         max_tokens=8000, stage="other", note=f"시리즈 목소리 설계(형식 재요청): {title}")
+        voices = (safe_json(text) or {}).get("voices") or []
+    if not voices:
+        raise RuntimeError(f"작가실(Claude)이 목소리 설계 답을 형식대로 주지 않았습니다(두 번 시도). 다시 시도하면 대부분 해결됩니다. 답 앞부분: {text[:150]}")
     ids = {c["entry_id"] for c in chars}
     made = []
     for v in voices:
+        if v.get("entry_id") not in ids:   # 번호를 잘못 적었으면 이름으로 찾는다
+            hit = [c for c in chars if c.get("name") == v.get("name")]
+            if len(hit) == 1:
+                v["entry_id"] = hit[0]["entry_id"]
         if v.get("entry_id") not in ids or len(v.get("voice_description") or "") < 20:
             continue
         sample = (v.get("sample_text") or "").strip()
@@ -4787,6 +4797,8 @@ def t_voice_cast(t):
                   p_auto=bool(p.get("auto")), p_force=bool(p.get("force")))
         rpc("agent_add_task", p_token=TOKEN, p={"kind": "voice_design", "payload": {"design_id": did}})
         made.append(v.get("name") or "")
+    if not made:
+        raise RuntimeError("작가실 답에서 이 인물들의 목소리 설계를 찾지 못했습니다(인물 이름·번호 불일치). 다시 시도해 주세요")
     notify(f"「{title}」 목소리 후보 준비 시작", f"{', '.join(made)} — " + ("추천 목소리(후보 1번)를 바로 바이블에 넣습니다. 바이블 → 목소리에서 다른 후보로 바꿀 수 있습니다" if p.get("auto") else "몇 분 뒤 바이블 탭에서 인물별 후보 3개를 듣고 골라 주세요"))
     return f"인물 {len(made)}명 목소리 설계 → 후보 만들기 시작: {', '.join(made)}"
 
@@ -7329,7 +7341,7 @@ async function viewBible(main) {
           ${e.category === 'character' && (c?.image_paths || []).length ? `<button class="btn small only-up" data-pd="${esc(e.id)}" title="올린 사진으로 Soul ID를 학습해 같은 얼굴의 기준 사진을 만듭니다">${c?.soul_id ? '얼굴 다시 고정' : '이 사진으로 얼굴 고정'}</button>` : ''}</div></div>` : ''}
         ${['character', 'voice'].includes(e.category) ? `<div class="brow"><span class="blbl">목소리</span><div class="bbtns">
           <span class="vlive" id="vlive-${esc(e.id)}"></span>
-          ${c?.voice_id ? `<button class="btn small" data-vlisten="${esc(e.id)}">후보 보기·바꾸기</button>`
+          ${c?.voice_id ? `<button class="btn small" data-vlisten="${esc(e.id)}">후보 보기·바꾸기</button><button class="btn small" data-vnew="${esc(e.id)}" title="기본(젊고 나긋한 사람 목소리) + 이 인물 감정선으로 새로 추천해 바로 넣습니다">🔄 새로 만들기</button>`
             : e.same_as || entries.some(x => x.same_as === e.id) ? `<span class="quiet">동일인 카드 중 한쪽에서 목소리를 정하면 다른 쪽에도 같이 들어갑니다</span>` : `<span class="quiet">추천 목소리를 자동으로 만들어 넣습니다(후보 1번 먼저 적용)</span>`}
           <button class="btn small" data-vd="${esc(e.id)}">${c?.voice_id ? '목소리 다시 디자인' : '목소리 디자인'}</button>
           <label class="btn small" style="margin:0" title="녹음 파일(30초~2분, 잡음 적게)을 올리면 ElevenLabs가 그 목소리로 만들어 바로 바이블에 넣습니다. 사용 권리가 있는 목소리만 올려 주세요">목소리 파일 올리기<input type="file" accept="audio/*,.m4a,.mp3,.wav" data-vup="${esc(e.id)}" hidden></label></div></div>` : ''}
@@ -7597,6 +7609,7 @@ async function viewBible(main) {
     if (locked(e) && new Date(latest.created_at) < lockAt(e)) return;
     openPhotoDesign(e, cur(e.id), false);
   });
+  main.querySelectorAll('[data-vnew]').forEach(b => b.onclick = guard(() => { const e = entries.find(x => x.id === b.dataset.vnew); return recommendVoice(e, cur(e.id)); }));
   main.querySelectorAll('[data-vlisten]').forEach(b => b.onclick = () => {
     const e = entries.find(x => x.id === b.dataset.vlisten); openVoiceDesign(e, cur(e.id), false, true);
   });
@@ -7810,7 +7823,7 @@ async function fillVoiceRows(entries, cur, vds) {
     const fail = d && d.status === 'failed';
     if (from[e.id]) {   // 동일인의 다른 카드에서 정한 목소리 → 여기서는 듣기만, 디자인 칸은 없앤다
       const src = entries.find(x => x.id === from[e.id]);
-      el.parentElement.querySelectorAll('[data-vd],[data-vlisten],label').forEach(x => x.remove());
+      el.parentElement.querySelectorAll('[data-vd],[data-vlisten],[data-vnew],label').forEach(x => x.remove());
       [...el.parentElement.querySelectorAll('span.quiet')].filter(x => !el.contains(x)).forEach(x => x.remove());
       document.getElementById('vd-' + e.id)?.replaceChildren();
       el.innerHTML = `${u ? `<audio controls preload="none" src="${esc(u)}"></audio>` : ''}<span class="quiet">동일인 <b>${esc(src?.name || '')}</b>와 같은 목소리 · 바꾸려면 ${esc(src?.name || '')} 카드에서</span>`;
@@ -7821,6 +7834,33 @@ async function fillVoiceRows(entries, cur, vds) {
       ${busy ? `<span class="quiet"><span class="spin"></span> ${d.sample_path ? '올린 파일로 ElevenLabs가 목소리를 만드는 중' : d.status === 'saving' ? '목소리 저장 중' : '목소리 후보 만드는 중'}</span>` : ''}
       ${fail ? `<span class="vfail">❌ ${d.sample_path ? '올린 목소리' : '목소리'} 실패: ${esc(explainFail('voice_design', d.error).what)} <span class="quiet">${esc((d.error || '').slice(0, 220))}</span></span>` : ''}`;
   });
+}
+// 추천하기 / 새로 만들기: 작가실·코디네이터가 목소리를 설계 → 후보 3개 → 1번을 바로 바이블에. 설계 일이 실패하면 그 이유를 상자에 바로 보여 준다
+async function recommendVoice(entry, cur) {
+  const box = document.getElementById('vd-' + entry.id); if (!box) return;
+  if (cur?.voice_id && !confirm(`${entry.name} 목소리를 새로 만듭니다(기본: 젊고 나긋한 사람 목소리 + 이 인물 감정선).\n후보 3개를 만들고 1번을 바로 넣습니다. 지금 목소리는 바뀌고, 나중에 다른 후보로 바꿀 수 있습니다.\n(Claude 수십 원 + ElevenLabs 크레딧 후보 3개분)`)) return;
+  const t = await q(S.sb.from('pipeline_tasks').insert({ kind: 'voice_cast', series_id: S.seriesId, payload: { series_id: S.seriesId, entry_ids: [entry.id], redo: true, auto: true, force: true } }).select('id,created_at').single());
+  box.innerHTML = '<div class="vdbox"><span class="spin"></span> 작가실·코디네이터가 대본을 읽고 목소리를 설계하는 중입니다. 후보 1번이 바로 바이블에 들어갑니다(1~2분).</div>';
+  toast(`${entry.name} 새 목소리를 만들고 있습니다`);
+  const poll = n => setTimeout(async () => { if (S.tab !== 'bible' || !document.contains(box)) return;
+    const [tk] = await q(S.sb.from('pipeline_tasks').select('status,error,result').eq('id', t.id));
+    const [x] = await q(S.sb.from('voice_designs').select('id,created_at').eq('entry_id', entry.id).gte('created_at', t.created_at).order('created_at', { ascending: false }).limit(1));
+    if (x) { S.vdBusy = S.vdBusy || {}; S.vdBusy[entry.id] = 1; return openVoiceDesign(entry, cur, false, true).catch(() => {}); }
+    if (tk?.status === 'failed') {
+      const ex = explainFail('voice_cast', tk.error);
+      box.innerHTML = `<div class="vdbox"><div class="msg err" style="margin:0"><b>목소리 설계 실패</b> — ${esc(ex.what)}<div style="margin-top:4px">${esc(ex.how || '')}</div>
+        <div class="quiet" style="margin-top:4px">원인 원문: ${esc((tk.error || '').slice(0, 400))}</div></div>
+        <div class="row" style="margin-top:8px"><button class="btn small primary" id="vrAgain-${entry.id}">다시 시도</button></div></div>`;
+      document.getElementById('vrAgain-' + entry.id).onclick = guard(() => recommendVoice(entry, cur));
+      return;
+    }
+    if (tk?.status === 'done' && !x) {
+      box.innerHTML = `<div class="vdbox quiet">${esc(tk.result || '새로 만들 인물이 없습니다')} — 이미 후보를 만드는 중이면 끝난 뒤 다시 눌러 주세요.</div>`;
+      return;
+    }
+    if (n < 40) poll(n + 1);
+  }, 6000);
+  poll(0);
 }
 async function openVoiceDesign(entry, cur, fresh, listen) {
   const box = document.getElementById('vd-' + entry.id); if (!box) return;
@@ -7854,16 +7894,7 @@ async function openVoiceDesign(entry, cur, fresh, listen) {
       await q(S.sb.from('pipeline_tasks').insert({ kind: 'voice_design', payload: { design_id: r.id } }));
       toast('후보를 만들고 있습니다'); openVoiceDesign(entry, cur, false);
     });
-    document.getElementById('vdRec-' + entry.id).onclick = guard(async () => {
-      if (cur?.voice_id && !confirm(`${entry.name}에게 이미 목소리가 있습니다. 추천 목소리(후보 1번)로 바꿔 넣을까요? 나중에 다른 후보로 바꿀 수 있습니다.`)) return;
-      await q(S.sb.from('pipeline_tasks').insert({ kind: 'voice_cast', series_id: S.seriesId, payload: { series_id: S.seriesId, entry_ids: [entry.id], redo: true, auto: true, force: true } }));
-      box.innerHTML = '<div class="vdbox"><span class="spin"></span> 작가실·코디네이터가 대본을 읽고 목소리를 설계하는 중입니다. 후보 1번이 바로 바이블에 들어갑니다(1~2분).</div>';
-      toast('추천 목소리를 만들고 있습니다');
-      const poll = (n) => setTimeout(async () => { if (S.tab !== 'bible' || !document.contains(box)) return;
-        const [x] = await q(S.sb.from('voice_designs').select('id,created_at').eq('entry_id', entry.id).order('created_at', { ascending: false }).limit(1));
-        if (x && Date.now() - new Date(x.created_at) < 5 * 60e3) { S.vdBusy = S.vdBusy || {}; S.vdBusy[entry.id] = 1; openVoiceDesign(entry, cur, false, true).catch(() => {}); } else if (n < 20) poll(n + 1); }, 8000);
-      poll(0);
-    });
+    document.getElementById('vdRec-' + entry.id).onclick = guard(() => recommendVoice(entry, cur));
     return;
   }
   let urls = {};

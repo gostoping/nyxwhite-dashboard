@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.29.1"
+VERSION = "1.29.2"
 
 import base64
 import glob
@@ -4396,11 +4396,21 @@ def t_voice_cast(t):
 답 형식: <json>{"voices": [{"entry_id": "", "name": "", "voice_description": "", "sample_text": "", "singing_hint": ""}]}</json>"""
     user = f"시리즈: {title}\n\n[인물]\n" + json.dumps([{k: c.get(k) for k in ("entry_id", "name", "summary", "description", "details")} for c in chars], ensure_ascii=False) \
         + "\n\n[대본 앞부분]\n" + "\n\n".join(f"{s['number']}화 {s.get('title') or ''}\n{s.get('text') or ''}" for s in cast.get("scripts") or [])[:40000]
-    text, _ = claude("claude-opus-5-5", system, user, max_tokens=6000, stage="other", note=f"시리즈 목소리 설계: {title}")
-    voices = pick_json(text).get("voices") or []
+    text, _ = claude("claude-opus-5-5", system, user, max_tokens=8000, stage="other", note=f"시리즈 목소리 설계: {title}")
+    voices = (safe_json(text) or {}).get("voices") or []
+    if not voices:   # 답이 잘리거나 형식이 깨졌으면 한 번 더(짧게)
+        text, _ = claude("claude-opus-5-5", system + "\n답은 <json>…</json> 하나로만, 인물마다 voice_description 300자 이내로 짧게.", user,
+                         max_tokens=8000, stage="other", note=f"시리즈 목소리 설계(형식 재요청): {title}")
+        voices = (safe_json(text) or {}).get("voices") or []
+    if not voices:
+        raise RuntimeError(f"작가실(Claude)이 목소리 설계 답을 형식대로 주지 않았습니다(두 번 시도). 다시 시도하면 대부분 해결됩니다. 답 앞부분: {text[:150]}")
     ids = {c["entry_id"] for c in chars}
     made = []
     for v in voices:
+        if v.get("entry_id") not in ids:   # 번호를 잘못 적었으면 이름으로 찾는다
+            hit = [c for c in chars if c.get("name") == v.get("name")]
+            if len(hit) == 1:
+                v["entry_id"] = hit[0]["entry_id"]
         if v.get("entry_id") not in ids or len(v.get("voice_description") or "") < 20:
             continue
         sample = (v.get("sample_text") or "").strip()
@@ -4411,6 +4421,8 @@ def t_voice_cast(t):
                   p_auto=bool(p.get("auto")), p_force=bool(p.get("force")))
         rpc("agent_add_task", p_token=TOKEN, p={"kind": "voice_design", "payload": {"design_id": did}})
         made.append(v.get("name") or "")
+    if not made:
+        raise RuntimeError("작가실 답에서 이 인물들의 목소리 설계를 찾지 못했습니다(인물 이름·번호 불일치). 다시 시도해 주세요")
     notify(f"「{title}」 목소리 후보 준비 시작", f"{', '.join(made)} — " + ("추천 목소리(후보 1번)를 바로 바이블에 넣습니다. 바이블 → 목소리에서 다른 후보로 바꿀 수 있습니다" if p.get("auto") else "몇 분 뒤 바이블 탭에서 인물별 후보 3개를 듣고 골라 주세요"))
     return f"인물 {len(made)}명 목소리 설계 → 후보 만들기 시작: {', '.join(made)}"
 
