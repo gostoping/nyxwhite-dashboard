@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.28.0"
+VERSION = "1.28.1"
 
 import base64
 import glob
@@ -4359,6 +4359,8 @@ def t_voice_cast(t):
     chars = [c for c in cast.get("characters") or [] if (p.get("redo") or not c.get("voice_id")) and not c.get("open_design")]
     if p.get("entry_ids"):
         chars = [c for c in chars if c["entry_id"] in p["entry_ids"]]
+    else:   # 자동 추천은 원래 인물만(동일인의 다른 모습은 그 목소리를 같이 씀)
+        chars = [c for c in chars if not c.get("same_as")]
     if not chars:
         return "목소리를 새로 만들 인물이 없습니다(이미 정했거나 후보가 기다리는 중)"
     title = (cast.get("series") or {}).get("title", "")
