@@ -271,6 +271,30 @@
   .ed-lane-h:first-child { height: 24px; }
   .ed-scroll { overflow-x: auto; overflow-y: hidden; position: relative; }
   .ed-scroll::-webkit-scrollbar { height: 12px; } .ed-scroll::-webkit-scrollbar-thumb { background: #b9c0cc; border-radius: 6px; } .ed-scroll::-webkit-scrollbar-track { background: var(--bg); }
+  .pflow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 14px; align-items: start; }
+  @media (max-width: 900px) { .pflow { grid-template-columns: 1fr; } }
+  .pscript { position: sticky; top: 8px; max-height: calc(100vh - 40px); overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--panel); font-size: 13.5px; line-height: 1.6; }
+  .pscript .sl { padding: 1px 6px; border-left: 3px solid transparent; border-radius: 3px; cursor: pointer; white-space: pre-wrap; }
+  .pscript .sl.hd { font-weight: 700; margin-top: 10px; background: var(--bg); cursor: default; }
+  .pscript .sl.dlg { color: var(--ink); } .pscript .sl.act { color: var(--quiet); }
+  .pscript .sl.on { background: #fde4e4; border-left-color: #d63b3b; color: #8a1010; }
+  .pscript .sl.miss { text-decoration: underline wavy #e08a00; text-underline-offset: 3px; }
+  .pscript .sl.miss::after { content: ' 컷 없음'; font-size: 11px; color: #c06a00; }
+  .pscript .sl.nocut { opacity: .6; }
+  .pscene { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; background: var(--panel); }
+  .pscene .psh { padding: 8px 10px; background: var(--bg); border-bottom: 1px solid var(--line); border-radius: 8px 8px 0 0; }
+  .pscene .psh .t { font-weight: 700; } .pscene .psh .j { font-size: 12.5px; margin-top: 3px; }
+  .cut.fcut { display: block; padding: 8px 10px; border: 0; border-top: 1px solid var(--line); border-left: 3px solid transparent; border-radius: 0; background: transparent; cursor: pointer; }
+  .pscene .psh + .fcut { border-top: 0; }
+  .fcut.sel { border-left-color: #d63b3b; background: #fff6f6; }
+  .fcut dd { white-space: pre-line; }
+  .fcut .fh { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+  .fcut .fh b { font-size: 13.5px; } .fcut .tm { font-variant-numeric: tabular-nums; color: var(--quiet); }
+  .fcut dl { display: grid; grid-template-columns: 44px 1fr; gap: 2px 8px; margin: 6px 0 0; font-size: 13px; }
+  .fcut dt { color: var(--quiet); font-size: 12px; padding-top: 1px; } .fcut dd { margin: 0; }
+  .fcut dd.none { color: var(--quiet); font-style: italic; }
+  .fcut .fw { font-size: 12px; color: #b4231f; margin-top: 4px; }
+  .fcut .cacts { margin-top: 6px; }
   .flowbox { margin-top: 10px; padding: 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--panel); }
   .flowbox .fi { border-top: 1px solid var(--line); padding: 8px 0; display: grid; grid-template-columns: 22px 1fr; gap: 6px; }
   .flowbox .fi.sent { opacity: .55; }
@@ -413,7 +437,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.34.1"
+VERSION = "1.35.0"
 
 import base64
 import glob
@@ -1401,6 +1425,9 @@ CUT_SCHEMA = """{"scene_no": 1, "cut_no": 1, "code": "E01-S01-C01", "scene_headi
  "seconds": 10, "summary": "이 컷에서 일어나는 일", "dialogue": "린: (떨리며, 점점 높아지며) 대사 그대로",
  "emotion": "감정선", "expression_beats": [{"t": "0-3", "who": "린", "face": "놀람 → 입술을 깨묾"}, {"t": "3-5", "who": "린", "face": "…"}],
  "camera": "샷·앵글·움직임", "reference_names": ["린", "연습실"],
+ "staging": {"composition": "구도: 샷 크기·카메라 높이·인물 배치(예: 바스트샷, 눈높이, 린 화면 왼쪽 1/3·탄 오른쪽)",
+             "lighting": "조명: 빛이 어디서 어떻게(예: 오른쪽 창에서 늦은 오후 햇빛이 비스듬히, 얼굴 왼쪽은 그늘)",
+             "blocking": "연출: 인물 동선·움직임 방향(예: 린이 화면 왼쪽에서 오른쪽으로 걸어 들어와 탄 앞에 멈춤)"},
  "prompt": "Seedance에 보낼 영어 프롬프트(대사는 한국어 원문 그대로 따옴표)", "director_note": "반영한 메모·교훈",
  "voice_lines": [{"speaker": "린", "text": "대사 그대로(괄호 지문 빼고)", "tags": "[nervous] [whispers]", "direction": "작게 떨리며 시작 → 끝에서 목소리가 갈라지며 높아짐"}],
  "frame_first": {"prompt": "첫 장면 사진용 영어 프롬프트: 인물 고정 묘사·의상·자세·첫 표정·장소·조명·구도"},
@@ -1430,6 +1457,9 @@ def director_system(ctx):
   direction에는 끝음 처리도 적는다(예: "끝음이 살짝 내려가며 흐려짐", "끝에 짧은 숨"). 모든 목소리는 젊고 나긋한 사람 목소리가 기본이고, 끝음이 뚝 끊기거나 기계적이면 안 된다.
 - frame_first: 모든 컷. 첫 0.5초의 정지 장면(얼굴·의상·배경 고정의 기준). use_end_frame은 컷 안에서 자세·위치·감정이 크게 바뀌어 끝 상태가 중요할 때만 true(일어서기·문 나가기·웃다가 울기 등). 대부분 false.
 - continue_prev: 같은 씬에서 앞 컷과 동작이 바로 이어지면 true(앞 컷 마지막 장면에서 시작).
+- staging(한국어, 대표가 제작 탭에서 흐름을 확인하는 칸): 모든 컷에 구도·조명·연출을 한 줄씩 구체적으로.
+  같은 씬 안에서는 두 인물의 좌우(180도 규칙)·빛이 들어오는 방향·장소의 문·창 위치가 컷마다 같아야 한다. 움직임 방향(왼쪽→오른쪽)도 이어지게.
+  샷 크기는 이야기에 맞게 바꾼다(넓게 공간 소개 → 가까이 감정). 프롬프트에도 같은 구도·조명·동선을 영어로 그대로 넣는다.
 
 [답 형식]
 <json>{{"cuts": [{CUT_SCHEMA}]}}</json>"""
@@ -1894,7 +1924,7 @@ def director_revise(t, cut_id):
     progress(f"감독이 {cut.get('code')} 프롬프트를 고치는 중")
     user = f"""아래 컷 하나를 고쳐서 같은 형식(cuts 배열에 1개)으로 주세요. 대사는 바꾸지 않습니다.
 [지금 컷]
-{json.dumps({k: cut.get(k) for k in ('scene_no', 'cut_no', 'code', 'scene_heading', 'seconds', 'summary', 'dialogue', 'emotion', 'expression_beats', 'camera', 'reference_names', 'prompt')}, ensure_ascii=False)}
+{json.dumps({k: cut.get(k) for k in ('scene_no', 'cut_no', 'code', 'scene_heading', 'seconds', 'summary', 'dialogue', 'emotion', 'expression_beats', 'camera', 'staging', 'reference_names', 'prompt')}, ensure_ascii=False)}
 [대표 지시 — 최우선. 아래를 빠짐없이 프롬프트에 반영한다. 바이블·감수 의견과 부딪히면 대표 지시를 따른다]
 {cut.get('fix_request') or '(없음)'}
 [지난 영상 감수 결과(참고, 대표 지시보다 뒤)]
@@ -1910,7 +1940,7 @@ def director_revise(t, cut_id):
     secs = max(4, min(15, int(new.get("seconds") or cut.get("seconds") or 10)))
     then_gen = bool((t.get("payload") or {}).get("then_generate"))   # 대표가 '보완해서 다시 만들기'로 생성까지 맡긴 것
     rpc("agent_update_cut", p_token=TOKEN, p_id=cut_id, p={
-        "status": "approved" if then_gen else "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"),
+        "status": "approved" if then_gen else "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"), "staging": new.get("staging") if isinstance(new.get("staging"), dict) else None, "camera": new.get("camera") or None,
         "reference_names": refs, "director_note": new.get("director_note"), "est_usd": est_cut_usd(ctx, secs, refs), "clear_fix": True,
         "voice_lines": new.get("voice_lines") or cut.get("voice_lines") or [], "frame_first": new.get("frame_first") or {"prompt": (cut.get("frame_first") or {}).get("prompt")},
         "frame_last": new.get("frame_last") or {}, "use_end_frame": bool(new.get("use_end_frame")), "continue_prev": bool(new.get("continue_prev")), "prep_status": "none",
@@ -4752,7 +4782,7 @@ def flow_review(t):
             row = {"i": i, "clip": c["id"], "cut_id": cut.get("id"), "code": cut.get("code") or "", "episode_id": cut.get("episode_id"),
                    "timeline": f"{c['start']:.1f}~{c['start'] + c['dur']:.1f}초", "used": f"원본 {a:.1f}~{b:.1f}초", "gap_before": c.get("gap") or 0,
                    "summary": cut.get("summary"), "dialogue": cut.get("dialogue"), "emotion": cut.get("emotion"), "camera": cut.get("camera"),
-                   "prompt": cut.get("prompt"), "scene_no": cut.get("scene_no"), "frames": []}
+                   "prompt": cut.get("prompt"), "staging": cut.get("staging"), "scene_no": cut.get("scene_no"), "frames": []}
             if src:
                 for tag, at in (("시작", a + 0.05), ("0.6초", min(b - 0.1, a + 0.6)), ("가운데", (a + b) / 2), ("끝", max(a, b - 0.12))):
                     fp = os.path.join(work, f"f{i}_{len(row['frames'])}.jpg")
@@ -4824,7 +4854,7 @@ def flow_review(t):
                 break
             content = []
             for r in part:
-                content.append({"type": "text", "text": "[컷] " + json.dumps({k: r.get(k) for k in ("code", "timeline", "used", "gap_before", "summary", "dialogue", "emotion", "camera", "sound", "prompt")}, ensure_ascii=False)})
+                content.append({"type": "text", "text": "[컷] " + json.dumps({k: r.get(k) for k in ("code", "timeline", "used", "gap_before", "summary", "dialogue", "emotion", "camera", "staging", "sound", "prompt")}, ensure_ascii=False)})
                 for tag, fp in r["frames"]:
                     with open(fp, "rb") as f:
                         content += [{"type": "text", "text": f"{r['code']} {tag}"}, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.b64encode(f.read()).decode()}}]
@@ -10008,9 +10038,9 @@ async function renderProduction(ep, quietRefresh = false) {
     : passed ? { t: '편집실에서 이어 붙이기', d: `통과 ${passed}/${cuts.length}컷`, k: 'ed' }
     : { t: '컷 상태 확인', d: '아래 씬에서 불합격·보류 컷을 확인하세요' };
   // 자주 쓰는 것만 보이게: 작가실 정리 · 대본 감수 · 전체 생성 · 편집실 / 생성 후 감수. 컷 다시 설계·장면 사진 준비는 컷 설계·대본 감수 반영 때 자동이라 ⋯ 안으로
-  const more = ['dir', 'prep'].filter(k => k !== next.k).map(k => B[k](false)).filter(Boolean);
+  // 제작 탭 = 대본 흐름 확인. 영상·음성·감정 감수와 영상 보기는 편집실(흐름 감수)에서
+  const more = ['dir'].filter(k => k !== next.k).map(k => B[k](false)).filter(Boolean);
   const others = ['wr', 'scr', 'ap', 'ed'].filter(k => k !== next.k).map(k => B[k](false)).join('')
-    + `<span class="quiet" style="font-size:12px;margin-left:4px" title="영상이 생성된 컷이 생기면 켜집니다">생성 후 →</span>` + ['avid', 'avoi', 'aemo'].map(k => B[k]()).join('')
     + (more.length ? `<details class="cmore pmore"><summary title="자주 쓰지 않는 것">⋯</summary><div>${more.join('')}</div></details>` : '');
 
   pane.innerHTML = `
@@ -10041,9 +10071,6 @@ async function renderProduction(ep, quietRefresh = false) {
         ${srAp ? `<td style="white-space:nowrap">${srAp.st === 'done' ? pill('✓ 반영됨', 'good') : srAp.st === 'run' ? pill('반영 중', 'warn') : srAp.st === 'wait' ? pill('확정 대기', 'warn') : pill('실패', 'bad')}</td>` : ''}</tr>`).join('')}</table>
         <div class="row" style="margin-top:8px;gap:8px;${srAp && srAp.st !== 'fail' ? 'display:none' : ''}"><button class="btn small primary" id="srApply" ${busyKinds.has('writers_room') || busyKinds.has('director') ? 'disabled' : ''}>그대로 적용하기</button>
           <span class="quiet">작가실이 위 내용을 모두 고친 정리본을 만들어 바로 확정 → 감독이 컷을 다시 설계합니다(이미 생성한 컷은 그대로). 감독만 고칠 것(컷 누락)이면 그 씬만 다시 설계합니다.</span></div>` : ''}</details>` : ''}
-    ${S.noVoice?.length || S.noPhoto?.length ? `<div class="msg" style="background:var(--accent-soft)"><b>바이블에 아직 없는 것</b> — 이대로 만들면 영상의 얼굴이 장면마다 달라질 수 있어요
-      ${S.noPhoto?.length ? `<div style="margin-top:4px">📷 사진이 정해지지 않은 인물·협찬: <b>${esc(S.noPhoto.join(', '))}</b> — <a href="#bible" data-bgo="photo">바이블에서 한꺼번에 만들기</a></div>` : ''}
-      ${S.noVoice?.length ? `<div style="margin-top:4px">🔊 목소리가 정해지지 않은 인물: <b>${esc(S.noVoice.join(', '))}</b> — <a href="#bible" data-bgo="voice">바이블에서 한꺼번에 만들기</a></div>` : ''}</div>` : ''}
     ${online.length ? '' : '<div class="msg err">켜져 있는 에이전트가 없습니다. 버튼을 눌러도 에이전트가 켜질 때까지 기다립니다.</div>'}
   </div>
 
@@ -10056,15 +10083,9 @@ async function renderProduction(ep, quietRefresh = false) {
     ${tasks.slice(0, 5).map(t => `<div class="tli">${pill(TASK_LABEL[t.kind] || t.kind, t.status === 'failed' ? 'bad' : t.status === 'done' ? 'good' : '')}
       <span class="quiet">${esc(t.status === 'failed' ? (t.error || '실패') : t.status === 'done' ? (t.kind === 'balance_check' ? '잔액 조회 완료' : t.result || '완료') : t.status === 'cancelled' ? '취소됨' : '')}</span><span class="quiet eta">${fmt(t.finished_at || t.created_at)}</span></div>`).join('')}</details>` : ''}
 
-  ${sceneNos.length ? `<div class="card">
-    <div class="row"><h3 style="margin:0">${ep.number}화 씬 순서</h3><span class="quiet">${sceneNos.length}씬${cuts.length ? ` · ${cuts.length}컷 · 총 ${Math.floor(totalSec / 60)}분 ${totalSec % 60}초` : ' · 컷 설계 전'}</span>
-      ${cuts.length ? `<span class="row" style="margin-left:auto;gap:6px"><button class="btn small" id="pOpenAll">모두 펼치기</button><button class="btn small" id="pCloseAll">모두 접기</button></span>` : ''}</div>
-    <div class="snav">${sceneNos.map(no => `<a href="#" class="${sceneState(scenes[no])[1]}" data-sgo="${no}">S${no}</a>`).join('')}
-      <span class="quiet" style="font-size:12px;align-self:center">초록 완성 · 노랑 진행 · 파랑 승인 대기 · 빨강 불합격 · 회색 설계 전</span></div>
-    <div class="tl">${sceneNos.map((no, i) => sceneCard(no, scenes[no] || [], takes, urls, pkgs.find(p => p.scene_no === +no), rate, hasWin,
-      open.has(String(no)) || (!quietRefresh && no === sceneNos.find(n => scenes[n])), scInfo[no], i === sceneNos.length - 1)).join('')}</div>
-  </div>`
-    : `<div class="card quiet">${confirmed ? '확정 대본에서 씬(S#)을 찾지 못했습니다. 대본 탭에서 씬 머리(S#1 | …)를 확인하세요.' : '대본을 확정하면 여기 씬 순서가 나오고, 감독이 씬마다 컷을 설계합니다. 원고만 있으면 "작가실 정리 실행"부터 누르세요.'}</div>`}`;
+  ${sceneNos.length ? flowView(ep, sceneNos, scenes, scText, scInfo, rate)
+    : `<div class="card quiet">${confirmed ? '확정 대본에서 씬(S#)을 찾지 못했습니다. 대본 탭에서 씬 머리(S#1 | …)를 확인하세요.' : '대본을 확정하면 여기 왼쪽에 대본, 오른쪽에 씬별 컷(대사·장면·느낌·구도·조명·연출)이 나옵니다.'}</div>`}
+  `;
 
   const ng = $('#pNextGo'); if (ng) ng.onclick = () => go(next.go);
   const oa = $('#pOpenAll'); if (oa) oa.onclick = () => pane.querySelectorAll('details.scene').forEach(d => { d.open = true; });
@@ -10072,6 +10093,7 @@ async function renderProduction(ep, quietRefresh = false) {
   pane.querySelectorAll('[data-sgo]').forEach(a => a.onclick = ev => { ev.preventDefault();
     const d = pane.querySelector(`[data-scene="${a.dataset.sgo}"]`); if (!d) return; if (d.tagName === 'DETAILS') d.open = true; d.scrollIntoView({ behavior: 'smooth', block: 'start' }); });
   bindProduction(ep, { confirmed, cuts, tasks: openTasks, rate, takes });
+  bindFlowView(pane);
   bindFailCards(pane, failedNow, () => renderProduction(ep));
 }
 
@@ -10117,6 +10139,138 @@ function sceneState(cs) {
   if (n(['designed', 'hold'])) return [`승인 대기 ${n(['designed', 'hold'])}`, 'accent'];
   if (n('passed') === cs.length) return [`완성 ${cs.length}/${cs.length}`, 'good'];
   return [`컷 ${cs.length}`, ''];
+}
+// ---------------- 제작 탭 = 대본 흐름 확인: 왼쪽 대본, 오른쪽 씬별 컷(대사·장면·느낌·구도·조명·연출), 컷을 누르면 대본의 해당 부분이 빨갛게
+// 대본을 줄 단위로(씬 머리 규칙은 parseSceneList와 같다)
+function scriptRows(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  const timeOnly = !lines.some(l => /^[*#>\[\s]*S#\s*\d+/.test(l.trim()));
+  const sh = lines.map(l => l.trim().match(/^[*#>\[\s]*S#\s*(\d+)((?:\s*-\s*\d+)*)/)).filter(Boolean);
+  const renum = sh.some(m => m[2]) || new Set(sh.map(m => m[1])).size !== sh.length;
+  const out = []; let sc = 0, tn = 0;
+  for (const raw of lines) {
+    const line = raw.trim(); if (!line) continue;
+    const tm = timeOnly && line.match(/^[*#>\[\s]*(\d{1,2}:\d{2}(?::\d{2})?\s*[–—\-~]\s*\d{1,2}:\d{2}(?::\d{2})?\s*\|.*)$/);
+    const sm = !tm && renum && line.match(/^[*#>\[\s]*S#\s*\d+(?:\s*-\s*\d+)*\s*(.*)$/);
+    const m = tm ? [null, String(++tn)] : sm ? [null, String(++tn)] : line.match(/^[*#>\[\s]*S#\s*(\d+)\s*(.*)$/);
+    if (m) { sc = +m[1]; out.push({ i: out.length, sc, head: true, text: line.replace(/\*\*/g, '') }); continue; }
+    const dlg = /^[^:：\s(\[][^:：]{0,14}[:：]\s*\S/.test(line) && !/^(등장|장소|시간|배경)\s*[:：]/.test(line);
+    out.push({ i: out.length, sc, head: false, dlg, text: line, n: flowNorm(line) });
+  }
+  return out;
+}
+function flowNorm(s) { return String(s || '').replace(/^\s*[^:：]{1,15}[:：]/, '').replace(/\([^)]*\)|\[[^\]]*\]/g, '').replace(/[\s.,!?…~"'“”‘’·\-—–]/g, '').toLowerCase(); }
+// 컷 ↔ 대본 줄 맞추기: 컷 대사를 대본 순서대로 찾아 컷마다 대본 구간(지문 포함)을 정하고, 순서가 뒤바뀐 곳·대본에 없는 대사·컷에 없는 대사를 찾는다
+function flowMap(rows, scenes) {
+  const lineCut = {}, cutLines = {}, warn = {}, missing = new Set(), nocut = new Set();
+  const same = (a, b) => a && b && (a.includes(b) || (b.includes(a) && a.length >= 4));
+  const scs = [...new Set(rows.map(r => r.sc))];
+  for (const sc of scs) {
+    const L = rows.filter(r => r.sc === sc && !r.head);
+    const cs = (scenes[sc] || []).slice().sort((x, y) => x.cut_no - y.cut_no);
+    if (!cs.length) { L.forEach(r => nocut.add(r.i)); continue; }
+    let ptr = 0; const M = [];
+    for (const c of cs) {
+      const ds = parseDlg(c.dialogue).map(d => ({ t: d.speaker + ': ' + d.text, n: flowNorm(d.text) })).filter(d => d.n.length >= 2);
+      const idx = [], w = [];
+      let p = ptr;
+      for (const d of ds) {
+        let k = L.findIndex((r, j) => j >= p && r.dlg && same(r.n, d.n));
+        if (k < 0) { k = L.findIndex(r => r.dlg && same(r.n, d.n)); if (k >= 0) w.push('대본 순서와 다름: ' + d.t); else { w.push('대본에 없는 대사: ' + d.t); continue; } }
+        idx.push(k); p = k + 1;
+      }
+      M.push({ c, idx, w });
+      if (idx.length) ptr = Math.max(ptr, Math.max(...idx) + 1);
+    }
+    // 구간: 대사가 있는 컷은 앞 컷 끝 다음 줄 ~ 자기 마지막 대사. 대사 없는 컷은 다음 대사 컷 앞까지를 나눠 가짐. 마지막 컷은 씬 끝까지
+    let prevEnd = -1;
+    for (let mi = 0; mi < M.length; mi++) {
+      if (M[mi].idx.length) { const end = mi === M.length - 1 ? L.length - 1 : Math.max(prevEnd + 1, Math.max(...M[mi].idx));
+        M[mi].range = [prevEnd + 1, end]; prevEnd = Math.max(prevEnd, end); continue; }
+      let mj = mi; while (mj < M.length && !M[mj].idx.length) mj++;
+      const stop = mj < M.length ? Math.min(...M[mj].idx) - 1 : L.length - 1;
+      const n = mj - mi, span = Math.max(0, stop - prevEnd);
+      for (let q2 = 0; q2 < n; q2++) {
+        const s0 = prevEnd + 1 + Math.floor(span * q2 / n), e0 = prevEnd + Math.floor(span * (q2 + 1) / n);
+        M[mi + q2].range = e0 >= s0 ? [s0, e0] : null;
+        if (!M[mi + q2].range && span <= 0) M[mi + q2].w.push('대사 없는 컷 — 대본에서 해당 지문을 찾지 못함');
+      }
+      prevEnd = Math.max(prevEnd, stop); mi = mj - 1;
+    }
+    for (const m of M) {
+      cutLines[m.c.id] = []; warn[m.c.id] = m.w;
+      if (m.range) for (let j = m.range[0]; j <= m.range[1] && j < L.length; j++) { cutLines[m.c.id].push(L[j].i); (lineCut[L[j].i] ||= []).push(m.c.id); }
+    }
+    const used = new Set(M.flatMap(m => m.idx));
+    L.forEach((r, j) => { if (r.dlg && !used.has(j)) missing.add(r.i); });
+  }
+  return { lineCut, cutLines, warn, missing, nocut };
+}
+// 대본 분량으로 본 씬 길이·권장 컷 수(한국어 대사 초당 약 6자 + 줄마다 숨 0.6초, 지문 한 줄 약 2초)
+function sceneJudge(rows, sc, cs) {
+  const L = rows.filter(r => r.sc === sc && !r.head);
+  const est = Math.round(L.reduce((s, r) => s + (r.dlg ? flowNorm(r.text).length / 6 + 0.6 : 2), 0));
+  const rec = Math.max(1, Math.round(est / 9));
+  const tot = cs.reduce((s, c) => s + (c.seconds || 0), 0);
+  const bad = cs.length && (cs.length < Math.max(1, rec - 1) || cs.length > rec + 2 || tot < est * 0.6);
+  return { est, rec, tot, bad };
+}
+const fmtMS = s => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+function flowView(ep, sceneNos, scenes, scText, scInfo, rate) {
+  const rows = scriptRows(scText);
+  const F = flowMap(rows, scenes); S.flowMap = F;
+  const ordered = sceneNos.flatMap(no => (scenes[no] || []).slice().sort((a, b) => a.cut_no - b.cut_no));
+  let t = 0; const at = {}; ordered.forEach(c => { at[c.id] = [t, t + (c.seconds || 0)]; t += c.seconds || 0; });
+  const scriptScenes = new Set(rows.filter(r => r.head).map(r => r.sc));
+  const nWarn = ordered.filter(c => (F.warn[c.id] || []).length).length;
+  const left = rows.length ? rows.map(r => `<div class="sl ${r.head ? 'hd' : r.dlg ? 'dlg' : 'act'}${F.missing.has(r.i) ? ' miss' : ''}${F.nocut.has(r.i) ? ' nocut' : ''}" data-li="${r.i}">${esc(r.text)}</div>`).join('')
+    : '<div class="quiet">확정 대본이 없습니다</div>';
+  const fld = (k, v) => `<dt>${k}</dt><dd class="${v ? '' : 'none'}">${v ? esc(v) : '다음 설계부터 채워집니다'}</dd>`;
+  const right = sceneNos.map(no => {
+    const cs = (scenes[no] || []).slice().sort((a, b) => a.cut_no - b.cut_no), info = scInfo[no] || {};
+    const J = sceneJudge(rows, +no, cs);
+    const pend = cs.filter(c => ['designed', 'failed', 'hold'].includes(c.status)), cost = pend.reduce((s, c) => s + Number(c.est_usd || 0), 0);
+    return `<div class="pscene" data-scene="${no}">
+      <div class="psh"><div class="row" style="gap:6px"><span class="t">S#${no} ${esc(info.place || '')}</span><span class="quiet">${esc([info.time, info.cast ? '등장: ' + info.cast : ''].filter(Boolean).join(' · '))}</span>
+        ${!scriptScenes.has(+no) && rows.length ? pill('대본에 없는 씬', 'bad') : ''}</div>
+        <div class="j ${J.bad ? '' : 'quiet'}">${cs.length ? `${J.bad ? '⚠ ' : ''}대본 분량 약 ${J.est}초 → 컷 ${J.rec}개 정도가 알맞음 · 지금 컷 ${cs.length}개 · ${J.tot}초` : `대본 분량 약 ${J.est}초 · 아직 컷이 없습니다`}</div>
+        ${cs.length ? `<div class="row" style="gap:6px;margin-top:6px">${pend.length ? `<button class="btn small" data-approve-scene="${no}">이 씬 ${pend.length}컷 생성 승인 · ${usdKrw(cost, rate)}</button>` : ''}
+          <button class="btn small" data-redesign="${no}">이 씬 컷 다시 설계</button></div>` : ''}</div>
+      ${cs.map(c => { const [l, k] = CUT_STATUS[c.status] || [c.status, '']; const st = c.staging || {}; const w = F.warn[c.id] || [];
+        const dl = parseDlg(c.dialogue).map(d => `${d.speaker}: ${d.text}`).join('\n') || (c.dialogue || '');
+        return `<div class="cut fcut" data-fcut="${c.id}">
+          <div class="fh"><b>C${c.cut_no}</b><span class="tm">${fmtMS(at[c.id][0])}–${fmtMS(at[c.id][1])} · ${c.seconds}초</span>${pill(l, k)}
+            ${c.continue_prev ? '<span class="quiet" title="앞 컷 마지막 장면에서 이어 시작">↪ 앞 컷에서 이어짐</span>' : ''}${w.length ? pill('확인 ' + w.length, 'warn') : ''}</div>
+          <dl>${dl ? fld('대사', dl) : '<dt>대사</dt><dd class="none">대사 없음</dd>'}${fld('장면', c.summary)}${fld('느낌', c.emotion)}${fld('구도', st.composition || c.camera)}${fld('조명', st.lighting)}${fld('연출', st.blocking)}</dl>
+          ${w.length ? `<div class="fw">${w.map(esc).join('<br>')}</div>` : ''}
+          ${c.fix_request ? `<div class="quiet" style="font-size:12px;margin-top:4px">대표 요청: ${esc(c.fix_request.slice(0, 160))}</div>` : ''}
+          <div class="cacts">${['designed', 'failed', 'hold'].includes(c.status) ? `<button class="btn small" data-approve="${c.id}">🎬 생성 승인 · ${usdKrw(c.est_usd, rate)}</button>` : ''}
+            ${['designed', 'failed', 'passed', 'hold'].includes(c.status) ? `<button class="btn small" data-fix="${c.id}" title="프롬프트를 보고, 고칠 내용을 적어 이 컷만 다시 설계·생성">✏️ 고치기</button>` : ''}</div>
+        </div>`; }).join('')}
+    </div>`; }).join('');
+  return `<div class="card">
+    <div class="row"><h3 style="margin:0">${ep.number}화 대본 흐름</h3><span class="quiet">${sceneNos.length}씬 · ${ordered.length}컷 · ${fmtMS(t)}</span>
+      ${F.missing.size ? pill(`컷에 없는 대사 ${F.missing.size}줄`, 'warn') : ''}${nWarn ? pill(`확인할 컷 ${nWarn}개`, 'warn') : ''}
+      <span class="quiet" style="margin-left:auto;font-size:12.5px">컷을 누르면 왼쪽 대본에서 그 부분이 빨갛게 표시됩니다 · 대본 줄을 누르면 해당 컷으로</span></div>
+    <div class="pflow" style="margin-top:10px"><div class="pscript" id="pScript">${left}</div><div class="pcuts">${right}</div></div>
+  </div>`;
+}
+function bindFlowView(pane) {
+  const sp = pane.querySelector('#pScript'); if (!sp) return;
+  const pick = id => {
+    pane.querySelectorAll('.fcut.sel').forEach(x => x.classList.remove('sel'));
+    sp.querySelectorAll('.sl.on').forEach(x => x.classList.remove('on'));
+    const card = pane.querySelector(`[data-fcut="${id}"]`); if (card) card.classList.add('sel');
+    const ls = (S.flowMap?.cutLines?.[id] || []).map(i => sp.querySelector(`[data-li="${i}"]`)).filter(Boolean);
+    ls.forEach(x => x.classList.add('on'));
+    if (ls[0]) sp.scrollTo({ top: Math.max(0, ls[0].offsetTop - sp.offsetTop - 60), behavior: 'smooth' });
+    S.flowSel = id;
+    return card;
+  };
+  pane.querySelectorAll('[data-fcut]').forEach(c => c.addEventListener('click', ev => { if (ev.target.closest('button,textarea,input,select,a,.fixbox')) return; pick(c.dataset.fcut); }));
+  sp.querySelectorAll('[data-li]').forEach(l => l.onclick = () => { const ids = S.flowMap?.lineCut?.[l.dataset.li] || []; if (!ids.length) return;
+    const card = pick(ids[0]); card?.scrollIntoView({ behavior: 'smooth', block: 'center' }); });
+  if (S.flowSel && pane.querySelector(`[data-fcut="${S.flowSel}"]`)) pick(S.flowSel);
 }
 function sceneCard(no, cs, takes, urls, pkg, rate, hasWin, isOpen, info, last) {
   info = info || {};
@@ -10398,7 +10552,7 @@ function bindProduction(ep, ctx) {
         <button class="btn small" data-fx="prompt">고친 프롬프트로 바로 다시 만들기</button>
         <button class="btn small" data-fx="only">보완만 하고 생성은 나중에</button>
         <button class="btn small" data-fx="x">닫기</button></div>`;
-    card.querySelector('.body').appendChild(box);
+    (card.querySelector('.body') || card).appendChild(box);
     box.querySelector('.fxt').focus();
     box.querySelectorAll('[data-fx]').forEach(x => x.onclick = guard(async () => {
       const mode = x.dataset.fx; if (mode === 'x') return box.remove();

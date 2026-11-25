@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.34.1"
+VERSION = "1.35.0"
 
 import base64
 import glob
@@ -998,6 +998,9 @@ CUT_SCHEMA = """{"scene_no": 1, "cut_no": 1, "code": "E01-S01-C01", "scene_headi
  "seconds": 10, "summary": "이 컷에서 일어나는 일", "dialogue": "린: (떨리며, 점점 높아지며) 대사 그대로",
  "emotion": "감정선", "expression_beats": [{"t": "0-3", "who": "린", "face": "놀람 → 입술을 깨묾"}, {"t": "3-5", "who": "린", "face": "…"}],
  "camera": "샷·앵글·움직임", "reference_names": ["린", "연습실"],
+ "staging": {"composition": "구도: 샷 크기·카메라 높이·인물 배치(예: 바스트샷, 눈높이, 린 화면 왼쪽 1/3·탄 오른쪽)",
+             "lighting": "조명: 빛이 어디서 어떻게(예: 오른쪽 창에서 늦은 오후 햇빛이 비스듬히, 얼굴 왼쪽은 그늘)",
+             "blocking": "연출: 인물 동선·움직임 방향(예: 린이 화면 왼쪽에서 오른쪽으로 걸어 들어와 탄 앞에 멈춤)"},
  "prompt": "Seedance에 보낼 영어 프롬프트(대사는 한국어 원문 그대로 따옴표)", "director_note": "반영한 메모·교훈",
  "voice_lines": [{"speaker": "린", "text": "대사 그대로(괄호 지문 빼고)", "tags": "[nervous] [whispers]", "direction": "작게 떨리며 시작 → 끝에서 목소리가 갈라지며 높아짐"}],
  "frame_first": {"prompt": "첫 장면 사진용 영어 프롬프트: 인물 고정 묘사·의상·자세·첫 표정·장소·조명·구도"},
@@ -1027,6 +1030,9 @@ def director_system(ctx):
   direction에는 끝음 처리도 적는다(예: "끝음이 살짝 내려가며 흐려짐", "끝에 짧은 숨"). 모든 목소리는 젊고 나긋한 사람 목소리가 기본이고, 끝음이 뚝 끊기거나 기계적이면 안 된다.
 - frame_first: 모든 컷. 첫 0.5초의 정지 장면(얼굴·의상·배경 고정의 기준). use_end_frame은 컷 안에서 자세·위치·감정이 크게 바뀌어 끝 상태가 중요할 때만 true(일어서기·문 나가기·웃다가 울기 등). 대부분 false.
 - continue_prev: 같은 씬에서 앞 컷과 동작이 바로 이어지면 true(앞 컷 마지막 장면에서 시작).
+- staging(한국어, 대표가 제작 탭에서 흐름을 확인하는 칸): 모든 컷에 구도·조명·연출을 한 줄씩 구체적으로.
+  같은 씬 안에서는 두 인물의 좌우(180도 규칙)·빛이 들어오는 방향·장소의 문·창 위치가 컷마다 같아야 한다. 움직임 방향(왼쪽→오른쪽)도 이어지게.
+  샷 크기는 이야기에 맞게 바꾼다(넓게 공간 소개 → 가까이 감정). 프롬프트에도 같은 구도·조명·동선을 영어로 그대로 넣는다.
 
 [답 형식]
 <json>{{"cuts": [{CUT_SCHEMA}]}}</json>"""
@@ -1491,7 +1497,7 @@ def director_revise(t, cut_id):
     progress(f"감독이 {cut.get('code')} 프롬프트를 고치는 중")
     user = f"""아래 컷 하나를 고쳐서 같은 형식(cuts 배열에 1개)으로 주세요. 대사는 바꾸지 않습니다.
 [지금 컷]
-{json.dumps({k: cut.get(k) for k in ('scene_no', 'cut_no', 'code', 'scene_heading', 'seconds', 'summary', 'dialogue', 'emotion', 'expression_beats', 'camera', 'reference_names', 'prompt')}, ensure_ascii=False)}
+{json.dumps({k: cut.get(k) for k in ('scene_no', 'cut_no', 'code', 'scene_heading', 'seconds', 'summary', 'dialogue', 'emotion', 'expression_beats', 'camera', 'staging', 'reference_names', 'prompt')}, ensure_ascii=False)}
 [대표 지시 — 최우선. 아래를 빠짐없이 프롬프트에 반영한다. 바이블·감수 의견과 부딪히면 대표 지시를 따른다]
 {cut.get('fix_request') or '(없음)'}
 [지난 영상 감수 결과(참고, 대표 지시보다 뒤)]
@@ -1507,7 +1513,7 @@ def director_revise(t, cut_id):
     secs = max(4, min(15, int(new.get("seconds") or cut.get("seconds") or 10)))
     then_gen = bool((t.get("payload") or {}).get("then_generate"))   # 대표가 '보완해서 다시 만들기'로 생성까지 맡긴 것
     rpc("agent_update_cut", p_token=TOKEN, p_id=cut_id, p={
-        "status": "approved" if then_gen else "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"),
+        "status": "approved" if then_gen else "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"), "staging": new.get("staging") if isinstance(new.get("staging"), dict) else None, "camera": new.get("camera") or None,
         "reference_names": refs, "director_note": new.get("director_note"), "est_usd": est_cut_usd(ctx, secs, refs), "clear_fix": True,
         "voice_lines": new.get("voice_lines") or cut.get("voice_lines") or [], "frame_first": new.get("frame_first") or {"prompt": (cut.get("frame_first") or {}).get("prompt")},
         "frame_last": new.get("frame_last") or {}, "use_end_frame": bool(new.get("use_end_frame")), "continue_prev": bool(new.get("continue_prev")), "prep_status": "none",
@@ -4349,7 +4355,7 @@ def flow_review(t):
             row = {"i": i, "clip": c["id"], "cut_id": cut.get("id"), "code": cut.get("code") or "", "episode_id": cut.get("episode_id"),
                    "timeline": f"{c['start']:.1f}~{c['start'] + c['dur']:.1f}초", "used": f"원본 {a:.1f}~{b:.1f}초", "gap_before": c.get("gap") or 0,
                    "summary": cut.get("summary"), "dialogue": cut.get("dialogue"), "emotion": cut.get("emotion"), "camera": cut.get("camera"),
-                   "prompt": cut.get("prompt"), "scene_no": cut.get("scene_no"), "frames": []}
+                   "prompt": cut.get("prompt"), "staging": cut.get("staging"), "scene_no": cut.get("scene_no"), "frames": []}
             if src:
                 for tag, at in (("시작", a + 0.05), ("0.6초", min(b - 0.1, a + 0.6)), ("가운데", (a + b) / 2), ("끝", max(a, b - 0.12))):
                     fp = os.path.join(work, f"f{i}_{len(row['frames'])}.jpg")
@@ -4421,7 +4427,7 @@ def flow_review(t):
                 break
             content = []
             for r in part:
-                content.append({"type": "text", "text": "[컷] " + json.dumps({k: r.get(k) for k in ("code", "timeline", "used", "gap_before", "summary", "dialogue", "emotion", "camera", "sound", "prompt")}, ensure_ascii=False)})
+                content.append({"type": "text", "text": "[컷] " + json.dumps({k: r.get(k) for k in ("code", "timeline", "used", "gap_before", "summary", "dialogue", "emotion", "camera", "staging", "sound", "prompt")}, ensure_ascii=False)})
                 for tag, fp in r["frames"]:
                     with open(fp, "rb") as f:
                         content += [{"type": "text", "text": f"{r['code']} {tag}"}, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.b64encode(f.read()).decode()}}]
