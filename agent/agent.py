@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.30.2"
+VERSION = "1.31.0"
 
 import base64
 import glob
@@ -1360,9 +1360,11 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
         cur_c += sc_cuts; cur_s.add(sn)
     if cur_c:
         chunks.append(cur_c)
-    progress(f"감정감수자가 컷 {len(cuts)}개를 {len(chunks)}묶음으로 나눠 동시에 감수하고, 고칠 컷은 감독이 바로 고치는 중")
     verdicts, fixed, lessons = {}, {}, []
-    for r in parallel([(lambda ch=ch: review_fix(ch)) for ch in chunks], workers=min(8, max(1, len(chunks)))):
+    auto_rv = bool(setting(ctx, "generation", "auto_review", False))   # 대표 결정: 감수는 수동(대본 감수·생성 후 감수 버튼). 켜면 예전처럼 설계 중 자동 감수
+    if auto_rv:
+        progress(f"감정감수자가 컷 {len(cuts)}개를 {len(chunks)}묶음으로 나눠 동시에 감수하고, 고칠 컷은 감독이 바로 고치는 중")
+    for r in parallel([(lambda ch=ch: review_fix(ch)) for ch in chunks] if auto_rv else [], workers=min(8, max(1, len(chunks)))):
         if isinstance(r, Exception):
             log(f"감수 묶음 실패(설계는 저장): {r}")
             continue
@@ -2535,7 +2537,8 @@ def t_prep_cut(t):
             c[key] = fr
         # 사전 감수: 영상감수자(사진 ↔ 바이블) + 감정감수자(목소리 ↔ 감정선)
         review = {}
-        if frames or any(ln.get("analysis") for ln in lines):
+        auto_rv = bool(gen.get("auto_review"))   # 대표 결정(11/25): 감수는 대표가 버튼으로 할 때만. 설정에서 켜면 예전처럼 자동
+        if auto_rv and (frames or any(ln.get("analysis") for ln in lines)):
             progress(f"{code} 영상감수자·감정감수자 사전 감수")
             content = bible_ref_blocks(ctx, c.get("reference_names"))
             for key, jpg in frames.items():
@@ -2835,13 +2838,21 @@ def _generate(t):
     else:
         log("영상이 커서 미리보기 올리기를 건너뜀(로컬·윈도우에는 저장됨)")
     rpc("agent_save_take", p_token=TOKEN, p={"id": take_id, "files": {**pub, PLATFORM: files}})
-    rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "reviewing"})
-    # 감수(같은 컴퓨터에서 바로) → 윈도우 보관
-    try:
-        review_take(take_id, tmp)
-    except Exception as ex:
-        log(f"영상 감수 실패(대기열로 다시): {ex}")
-        rpc("agent_add_task", p_token=TOKEN, p={"kind": "video_review", "episode_id": ep, "cut_id": cut["id"], "take_id": take_id})
+    if gen.get("auto_review"):   # 설정에서 자동 감수를 켰을 때만(예전 방식)
+        rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "reviewing"})
+        try:
+            review_take(take_id, tmp)
+        except Exception as ex:
+            log(f"영상 감수 실패(대기열로 다시): {ex}")
+            rpc("agent_add_task", p_token=TOKEN, p={"kind": "video_review", "episode_id": ep, "cut_id": cut["id"], "take_id": take_id})
+    else:   # 대표 결정(11/25): 생성되면 바로 '생성됨'(이 테이크를 쓰는 컷). 영상·음성·감정 감수는 대표가 버튼으로 할 때만
+        rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "passed", "best_take_id": take_id})
+        set_cost_outcome([take.get("cost_event_id")], "success", None, None)
+        notify(f"{cut['code']} 영상 생성됨", "제작 탭에서 ▶ 영상 보기로 확인하고, 필요하면 영상·음성·감정 감수나 보완 요청을 눌러 주세요")
+        try:
+            auto_rough_cut(ep)
+        except Exception as ex:
+            log(f"가편집 자동 만들기 실패: {ex}")
     queue_store(take_id, ep, cut)
     if tmp != tmp_raw:
         try:

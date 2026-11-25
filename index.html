@@ -391,7 +391,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.30.2"
+VERSION = "1.31.0"
 
 import base64
 import glob
@@ -1741,9 +1741,11 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
         cur_c += sc_cuts; cur_s.add(sn)
     if cur_c:
         chunks.append(cur_c)
-    progress(f"감정감수자가 컷 {len(cuts)}개를 {len(chunks)}묶음으로 나눠 동시에 감수하고, 고칠 컷은 감독이 바로 고치는 중")
     verdicts, fixed, lessons = {}, {}, []
-    for r in parallel([(lambda ch=ch: review_fix(ch)) for ch in chunks], workers=min(8, max(1, len(chunks)))):
+    auto_rv = bool(setting(ctx, "generation", "auto_review", False))   # 대표 결정: 감수는 수동(대본 감수·생성 후 감수 버튼). 켜면 예전처럼 설계 중 자동 감수
+    if auto_rv:
+        progress(f"감정감수자가 컷 {len(cuts)}개를 {len(chunks)}묶음으로 나눠 동시에 감수하고, 고칠 컷은 감독이 바로 고치는 중")
+    for r in parallel([(lambda ch=ch: review_fix(ch)) for ch in chunks] if auto_rv else [], workers=min(8, max(1, len(chunks)))):
         if isinstance(r, Exception):
             log(f"감수 묶음 실패(설계는 저장): {r}")
             continue
@@ -2916,7 +2918,8 @@ def t_prep_cut(t):
             c[key] = fr
         # 사전 감수: 영상감수자(사진 ↔ 바이블) + 감정감수자(목소리 ↔ 감정선)
         review = {}
-        if frames or any(ln.get("analysis") for ln in lines):
+        auto_rv = bool(gen.get("auto_review"))   # 대표 결정(11/25): 감수는 대표가 버튼으로 할 때만. 설정에서 켜면 예전처럼 자동
+        if auto_rv and (frames or any(ln.get("analysis") for ln in lines)):
             progress(f"{code} 영상감수자·감정감수자 사전 감수")
             content = bible_ref_blocks(ctx, c.get("reference_names"))
             for key, jpg in frames.items():
@@ -3216,13 +3219,21 @@ def _generate(t):
     else:
         log("영상이 커서 미리보기 올리기를 건너뜀(로컬·윈도우에는 저장됨)")
     rpc("agent_save_take", p_token=TOKEN, p={"id": take_id, "files": {**pub, PLATFORM: files}})
-    rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "reviewing"})
-    # 감수(같은 컴퓨터에서 바로) → 윈도우 보관
-    try:
-        review_take(take_id, tmp)
-    except Exception as ex:
-        log(f"영상 감수 실패(대기열로 다시): {ex}")
-        rpc("agent_add_task", p_token=TOKEN, p={"kind": "video_review", "episode_id": ep, "cut_id": cut["id"], "take_id": take_id})
+    if gen.get("auto_review"):   # 설정에서 자동 감수를 켰을 때만(예전 방식)
+        rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "reviewing"})
+        try:
+            review_take(take_id, tmp)
+        except Exception as ex:
+            log(f"영상 감수 실패(대기열로 다시): {ex}")
+            rpc("agent_add_task", p_token=TOKEN, p={"kind": "video_review", "episode_id": ep, "cut_id": cut["id"], "take_id": take_id})
+    else:   # 대표 결정(11/25): 생성되면 바로 '생성됨'(이 테이크를 쓰는 컷). 영상·음성·감정 감수는 대표가 버튼으로 할 때만
+        rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "passed", "best_take_id": take_id})
+        set_cost_outcome([take.get("cost_event_id")], "success", None, None)
+        notify(f"{cut['code']} 영상 생성됨", "제작 탭에서 ▶ 영상 보기로 확인하고, 필요하면 영상·음성·감정 감수나 보완 요청을 눌러 주세요")
+        try:
+            auto_rough_cut(ep)
+        except Exception as ex:
+            log(f"가편집 자동 만들기 실패: {ex}")
     queue_store(take_id, ep, cut)
     if tmp != tmp_raw:
         try:
@@ -9890,7 +9901,8 @@ function codeMeaning(c) {
   return `${e ? e + '화 · ' : ''}${s}씬 · ${n}번째 컷`;
 }
 function cutCard(c, ts, urls, rate) {
-  const [label, kind] = CUT_STATUS[c.status] || [c.status, ''];
+  const bt = ts.find(t => t.id === c.best_take_id);
+  const [label, kind] = c.status === 'passed' && bt && !bt.review ? ['생성됨', 'good'] : CUT_STATUS[c.status] || [c.status, ''];
   const shown = ts.find(t => t.id === c.best_take_id) || ts.filter(t => t.files?.preview || t.files?.poster).at(-1);
   const u = shown ? urls[shown.files?.preview] : null, poster = shown ? urls[shown.files?.poster] : null, voice = shown ? urls[shown.files?.voice_preview] : null;
   const beats = Array.isArray(c.expression_beats) ? c.expression_beats : [];
@@ -10123,7 +10135,10 @@ async function renderProdSettings() {
     </table>
     <div id="gToolWarn"></div>
     <p class="quiet" style="margin:4px 0 0"><b>대사 목소리</b> — Higgsfield: 영상 모델이 입 모양에 맞춰 함께 만든 목소리. ElevenLabs: 생성 뒤 바이블 인물 목소리로 바꿔 입힘(말하는 부분의 시간은 그대로 두고 음색만 바꿔 입 모양과 맞음, 원래 소리는 씬 폴더에 '_원음'으로 남음).</p>
-    <label>감수 불합격 컷 자동 재시도 (대표가 미리 승인하는 횟수)</label><select id="gRetry" style="width:auto">
+    <label>감수 방식</label><select id="gAutoRv" style="width:auto">
+      ${opt('manual', G.auto_review ? 'auto' : 'manual', '수동 (기본): 컷 설계·생성 때 감수하지 않음 → 대본 감수·영상/음성/감정 감수 버튼으로 필요할 때만')}
+      ${opt('auto', G.auto_review ? 'auto' : 'manual', '자동: 컷 설계 중 감정 감수, 장면 사진·목소리 사전 감수, 생성 뒤 영상·소리 감수를 매번 (느리고 비용 더 듦)')}</select>
+    <label>감수 불합격 컷 자동 재시도 (대표가 미리 승인하는 횟수 · 감수 방식이 '자동'일 때만)</label><select id="gRetry" style="width:auto">
       ${[0, 1, 2].map(n => opt(String(n), String(G.max_auto_retries || 0), n ? `${n}번까지 자동 (감독 수정 → 사진·목소리 준비 → 다시 생성)` : '자동 재시도 안 함 (대표가 하나씩 다시 생성)')).join('')}</select>
     <p class="quiet" style="margin:2px 0 0">자동 재시도도 영상 생성 비용이 듭니다. 횟수를 넘으면 지금처럼 대표 승인을 기다립니다.</p>
     <div class="row" style="margin-top:12px"><button class="btn small" id="gCheck">실제 연결 점검 (약 100~300원)</button><span class="quiet" id="gCheckOut"></span></div>
@@ -10135,7 +10150,7 @@ async function renderProdSettings() {
   $('#gSave').onclick = guard(async () => {
     await q(S.sb.from('app_settings').upsert([
       { key: 'generation', value: { ...G, char_photo_model: $('#gChar')?.value || G.char_photo_model || 'seedream', resolution: $('#gRes').value, aspect_ratio: $('#gAsp').value, auto_prep: $('#gPrep').checked, image_model: $('#gImgSel').value === 'custom' ? $('#gImg').value.trim() : $('#gImgSel').value, music_model: $('#gMm').value,
-        claude_writer: $('#gCw').value, claude_director: $('#gCd').value, claude_reviewer: $('#gCr').value, max_auto_retries: Number($('#gRetry').value), dialogue_tool: $('#gDlg').value, music_tool: $('#gMus').value, video_model: $('#gVid').value,
+        claude_writer: $('#gCw').value, claude_director: $('#gCd').value, claude_reviewer: $('#gCr').value, max_auto_retries: Number($('#gRetry').value), auto_review: $('#gAutoRv').value === 'auto', dialogue_tool: $('#gDlg').value, music_tool: $('#gMus').value, video_model: $('#gVid').value,
         resolution: $('#gVid').value === 'kling-4.0' && $('#gRes').value === '480p' ? '720p' : $('#gRes').value }, updated_at: new Date().toISOString() },
       { key: 'storage', value: { ...ST, windows_folder: $('#gWin').value.trim(), mac_folder: $('#gMac').value.trim(), server: 'windows' }, updated_at: new Date().toISOString() }]));
     toast('제작 설정을 저장했습니다 (새로 설계하는 컷부터 적용)');
