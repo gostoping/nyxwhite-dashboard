@@ -511,7 +511,7 @@ class _Current(threading.local):
 
 CURRENT = _Current()
 # 짧은 바이블 일은 긴 일(컷 설계·영상)과 따로 줄을 서서 바로 처리한다(컷 설계 중에도 고쳐쓰기 반영이 기다리지 않게)
-QUICK_KINDS = ["bible_prompt", "coord_review", "photo_describe"]
+QUICK_KINDS = ["bible_prompt", "coord_review", "photo_describe", "balance_check"]
 # 바이블 사진(Higgsfield 후보·얼굴 학습)도 영상 생성·컷 설계 뒤에 줄 서지 않게 따로
 PHOTO_KINDS = ["photo_design", "photo_set"]
 QUICK = {"busy": None, "photo": None, **{f"busy{i}": None for i in range(8)}, **{f"photo{i}": None for i in range(4)},
@@ -3600,6 +3600,56 @@ def t_bible_suggest(t):
     return f"추천 {len(items)}건 · 새 수정안 {r.get('proposals', 0)}건"
 
 
+def _num_in(d, keys):
+    """응답 JSON 어디에 있든 잔액처럼 보이는 숫자를 찾는다."""
+    if isinstance(d, dict):
+        for k, v in d.items():
+            if k.lower() in keys and isinstance(v, (int, float, str)) and not isinstance(v, bool):
+                try:
+                    return k, float(v)
+                except ValueError:
+                    pass
+        for v in d.values():
+            r = _num_in(v, keys)
+            if r:
+                return r
+    return None
+
+
+@task("balance_check")
+def t_balance_check(t):
+    """비용 탭: 서비스별 남은 잔액을 API로 조회(비용 없음). 결과는 JSON으로 남겨 화면이 읽는다."""
+    out = {"at": datetime.now().isoformat(timespec="seconds")}
+    try:   # ElevenLabs: 구독의 남은 글자 수
+        s = el_json("/v1/user/subscription", method="GET", timeout=20) or {}
+        used, lim = int(s.get("character_count") or 0), int(s.get("character_limit") or 0)
+        out["elevenlabs"] = {"ok": True, "tier": s.get("tier"), "used": used, "limit": lim, "left": max(0, lim - used),
+                             "reset": s.get("next_character_count_reset_unix"), "status": s.get("status")}
+    except Exception as ex:
+        out["elevenlabs"] = {"ok": False, "error": str(ex)[:200]}
+    try:   # Higgsfield: 공개 문서에 잔액 조회가 없어, 있을 법한 주소를 조회만 해 본다(없으면 '사이트에서 확인')
+        h = {**hf_auth_headers(), "Accept": "application/json"}
+        found = None
+        for base in HF_BASES:
+            for path in ("/v1/balance", "/balance", "/v1/account/balance", "/account/balance", "/v1/me", "/me", "/v1/account", "/account"):
+                try:
+                    code, data = http_json(base + path, h, timeout=15)
+                except Exception:
+                    continue
+                if code == 200 and isinstance(data, dict):
+                    r = _num_in(data, {"balance", "usd", "balance_usd", "credits", "credit", "remaining", "amount"})
+                    if r:
+                        found = {"ok": True, "field": r[0], "value": r[1], "unit": "크레딧" if "credit" in r[0].lower() else "USD", "from": base + path}
+                        break
+            if found:
+                break
+        out["higgsfield"] = found or {"ok": False, "error": "Higgsfield API가 잔액 조회를 제공하지 않습니다(사이트에서 확인)"}
+    except Exception as ex:
+        out["higgsfield"] = {"ok": False, "error": str(ex)[:200]}
+    out["anthropic"] = {"ok": False, "error": "Anthropic은 잔액 조회 API를 제공하지 않습니다(console.anthropic.com → Billing)"}
+    return json.dumps(out, ensure_ascii=False)
+
+
 @task("api_check")
 def t_api_check(t):
     """설정 → 실제 연결 점검: 진짜 호출을 아주 작게 한 번씩(합계 약 100~300원) 해서 경로·권한·응답 형식을 확인한다."""
@@ -4674,7 +4724,7 @@ def fail_hint(e):
 
 
 QUIET_FAIL = {"coord_review", "bible_prompt", "photo_describe", "bible_place", "photo_design", "prep_cut"}
-TASK_NAME = {"cut_review": "컷 감수(감정·영상)", "coord_review": "코디네이터 감수", "upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "코디네이터: 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"balance_check": "잔액 조회", "cut_review": "컷 감수(감정·영상)", "coord_review": "코디네이터 감수", "upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "코디네이터: 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 # ------------------------------------------------------------------ 본체

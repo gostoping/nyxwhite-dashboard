@@ -204,6 +204,9 @@
   .pk { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 0; cursor: pointer; color: var(--ink); } .pk.on { border-color: var(--accent); background: var(--accent-soft); }
   .pk input { width: auto; margin-right: 4px; } .pk { position: relative; } .pkhold { position: absolute; right: 8px; top: 6px; font-size: 12px; cursor: pointer; }
   .vidpop video, .vidpop img { max-height: calc(100vh - 110px); max-width: 94vw; width: auto; border-radius: 8px; background: #000; display: block; }
+  .balrow { display: grid; grid-template-columns: 170px auto 1fr auto; gap: 4px 12px; align-items: baseline; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  .balrow .good { color: var(--good); font-weight: 600; } .balrow .warn { color: var(--warn); font-weight: 600; } .balrow .bad { color: var(--bad); font-weight: 600; }
+  @media (max-width: 760px) { .balrow { grid-template-columns: 1fr auto; } .balrow > .quiet:nth-child(3) { grid-column: 1 / -1; } }
   .zoombox { position: fixed; inset: 0; background: rgba(0,0,0,.82); z-index: 9999; display: flex; align-items: center; justify-content: center; }
   .zoomin { position: relative; max-width: 94vw; max-height: 94vh; display: flex; flex-direction: column; align-items: center; gap: 8px; }
   .zoomin img { max-width: 94vw; max-height: 82vh; object-fit: contain; border-radius: 6px; background: #111; }
@@ -880,7 +883,7 @@ class _Current(threading.local):
 
 CURRENT = _Current()
 # 짧은 바이블 일은 긴 일(컷 설계·영상)과 따로 줄을 서서 바로 처리한다(컷 설계 중에도 고쳐쓰기 반영이 기다리지 않게)
-QUICK_KINDS = ["bible_prompt", "coord_review", "photo_describe"]
+QUICK_KINDS = ["bible_prompt", "coord_review", "photo_describe", "balance_check"]
 # 바이블 사진(Higgsfield 후보·얼굴 학습)도 영상 생성·컷 설계 뒤에 줄 서지 않게 따로
 PHOTO_KINDS = ["photo_design", "photo_set"]
 QUICK = {"busy": None, "photo": None, **{f"busy{i}": None for i in range(8)}, **{f"photo{i}": None for i in range(4)},
@@ -3969,6 +3972,56 @@ def t_bible_suggest(t):
     return f"추천 {len(items)}건 · 새 수정안 {r.get('proposals', 0)}건"
 
 
+def _num_in(d, keys):
+    """응답 JSON 어디에 있든 잔액처럼 보이는 숫자를 찾는다."""
+    if isinstance(d, dict):
+        for k, v in d.items():
+            if k.lower() in keys and isinstance(v, (int, float, str)) and not isinstance(v, bool):
+                try:
+                    return k, float(v)
+                except ValueError:
+                    pass
+        for v in d.values():
+            r = _num_in(v, keys)
+            if r:
+                return r
+    return None
+
+
+@task("balance_check")
+def t_balance_check(t):
+    """비용 탭: 서비스별 남은 잔액을 API로 조회(비용 없음). 결과는 JSON으로 남겨 화면이 읽는다."""
+    out = {"at": datetime.now().isoformat(timespec="seconds")}
+    try:   # ElevenLabs: 구독의 남은 글자 수
+        s = el_json("/v1/user/subscription", method="GET", timeout=20) or {}
+        used, lim = int(s.get("character_count") or 0), int(s.get("character_limit") or 0)
+        out["elevenlabs"] = {"ok": True, "tier": s.get("tier"), "used": used, "limit": lim, "left": max(0, lim - used),
+                             "reset": s.get("next_character_count_reset_unix"), "status": s.get("status")}
+    except Exception as ex:
+        out["elevenlabs"] = {"ok": False, "error": str(ex)[:200]}
+    try:   # Higgsfield: 공개 문서에 잔액 조회가 없어, 있을 법한 주소를 조회만 해 본다(없으면 '사이트에서 확인')
+        h = {**hf_auth_headers(), "Accept": "application/json"}
+        found = None
+        for base in HF_BASES:
+            for path in ("/v1/balance", "/balance", "/v1/account/balance", "/account/balance", "/v1/me", "/me", "/v1/account", "/account"):
+                try:
+                    code, data = http_json(base + path, h, timeout=15)
+                except Exception:
+                    continue
+                if code == 200 and isinstance(data, dict):
+                    r = _num_in(data, {"balance", "usd", "balance_usd", "credits", "credit", "remaining", "amount"})
+                    if r:
+                        found = {"ok": True, "field": r[0], "value": r[1], "unit": "크레딧" if "credit" in r[0].lower() else "USD", "from": base + path}
+                        break
+            if found:
+                break
+        out["higgsfield"] = found or {"ok": False, "error": "Higgsfield API가 잔액 조회를 제공하지 않습니다(사이트에서 확인)"}
+    except Exception as ex:
+        out["higgsfield"] = {"ok": False, "error": str(ex)[:200]}
+    out["anthropic"] = {"ok": False, "error": "Anthropic은 잔액 조회 API를 제공하지 않습니다(console.anthropic.com → Billing)"}
+    return json.dumps(out, ensure_ascii=False)
+
+
 @task("api_check")
 def t_api_check(t):
     """설정 → 실제 연결 점검: 진짜 호출을 아주 작게 한 번씩(합계 약 100~300원) 해서 경로·권한·응답 형식을 확인한다."""
@@ -5043,7 +5096,7 @@ def fail_hint(e):
 
 
 QUIET_FAIL = {"coord_review", "bible_prompt", "photo_describe", "bible_place", "photo_design", "prep_cut"}
-TASK_NAME = {"cut_review": "컷 감수(감정·영상)", "coord_review": "코디네이터 감수", "upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "코디네이터: 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
+TASK_NAME = {"balance_check": "잔액 조회", "cut_review": "컷 감수(감정·영상)", "coord_review": "코디네이터 감수", "upscale": "1080p 업그레이드", "bgm": "배경음악 만들기", "bible_suggest": "작가실 추천(스타일·음악)", "api_check": "실제 연결 점검", "bible_prompt": "코디네이터: 영어 프롬프트", "bible_extract": "대본에서 필요 항목 찾기", "photo_describe": "사진 보고 묘사 쓰기", "bible_place": "넣을 화·씬 추천", "photo_design": "사진 디자인", "photo_set": "얼굴 학습·기준 사진", "prep_cut": "컷 준비(사진·목소리)", "assemble": "편집본 조립", "edit_command": "말로 편집", "voice_cast": "시리즈 목소리 설계", "voice_design": "목소리 후보 만들기", "voice_save": "목소리 저장", "writers_room": "작가실 정리", "director": "감독 컷 설계", "generate": "영상 생성", "store": "윈도우 보관", "video_review": "영상 감수"}
 
 
 # ------------------------------------------------------------------ 본체
@@ -8352,13 +8405,41 @@ function invoiceHtml(d) {
     </table>`;
 }
 
+// 비용 탭 맨 위: 에이전트가 API로 받아 온 잔액(ElevenLabs 남은 글자 수 · Higgsfield 잔액(조회 가능하면)) + 이번 달 서비스별 사용액
+async function loadBalances(events, force) {
+  const body = document.getElementById('balBody'); if (!body) return;
+  const [last] = await q(S.sb.from('pipeline_tasks').select('id,status,result,error,finished_at,created_at').eq('kind', 'balance_check')
+    .order('created_at', { ascending: false }).limit(1));
+  const fresh = last && (last.status === 'queued' || last.status === 'running' || (last.finished_at && Date.now() - new Date(last.finished_at) < 10 * 60e3));
+  if (force || !fresh) {
+    if (!last || !['queued', 'running'].includes(last.status)) await q(S.sb.from('pipeline_tasks').insert({ kind: 'balance_check', payload: {} }));
+  }
+  const done = (await q(S.sb.from('pipeline_tasks').select('result,finished_at').eq('kind', 'balance_check').eq('status', 'done')
+    .order('finished_at', { ascending: false }).limit(1)))[0];
+  let r = {}; try { r = JSON.parse(done?.result || '{}'); } catch (e) {}
+  const month = new Date(); month.setDate(1); month.setHours(0, 0, 0, 0);
+  const spent = p => events.filter(e => new Date(e.occurred_at) >= month && (e.provider || '').toLowerCase().includes(p)).reduce((s, e) => s + Number(e.krw || 0), 0);
+  const el = r.elevenlabs || {}, hf = r.higgsfield || {};
+  const pct = el.ok && el.limit ? Math.round(el.left / el.limit * 100) : null;
+  const row = (name, main, sub, kind, link) => `<div class="balrow"><b>${name}</b><span class="${kind || ''}">${main}</span><span class="quiet">${sub}</span>${link ? `<a href="${link}" target="_blank" rel="noopener" class="quiet">충전하기 ↗</a>` : ''}</div>`;
+  body.innerHTML = `
+    ${row('ElevenLabs (목소리)', el.ok ? `남은 글자 ${el.left.toLocaleString()} / ${el.limit.toLocaleString()} (${pct}%)` : done ? '조회 실패' : '조회 중…',
+      el.ok ? `${esc(el.tier || '')}${el.reset ? ` · ${new Date(el.reset * 1000).toLocaleDateString('ko-KR')} 초기화` : ''} · 이번 달 기록 ${won(spent('eleven'))}` : esc(el.error || ''),
+      el.ok ? (pct < 10 ? 'bad' : pct < 30 ? 'warn' : 'good') : 'warn', 'https://elevenlabs.io/app/subscription')}
+    ${row('Higgsfield (사진·영상)', hf.ok ? `${hf.unit === 'USD' ? '$' + hf.value.toFixed(2) + ` (약 ${won(hf.value * (S.fx || 1340))})` : hf.value.toLocaleString() + ' ' + hf.unit}` : '사이트에서 확인',
+      (hf.ok ? '' : 'Higgsfield API가 잔액 조회를 열어 두지 않았습니다 · ') + `이번 달 기록 ${won(spent('higgs'))}`, hf.ok ? 'good' : '', 'https://higgsfield.ai')}
+    ${row('Claude (작가실·감독·감수)', '콘솔에서 확인', `Anthropic은 잔액 조회 API가 없습니다 · 이번 달 기록 ${won(spent('anthropic') + spent('claude'))}`, '', 'https://console.anthropic.com/settings/billing')}`;
+  const at = document.getElementById('balAt');
+  if (at) at.textContent = last && ['queued', 'running'].includes(last.status) ? '· 에이전트가 조회하는 중' : done ? `· ${fmt(done.finished_at)} 기준` : '';
+  if (last && ['queued', 'running'].includes(last.status) && S.tab === 'costs') { clearTimeout(S.balTimer); S.balTimer = setTimeout(() => loadBalances(events, false).catch(() => {}), 5000); }
+}
 async function viewCosts(main) {
   const [eps, settings, prices] = await Promise.all([
     q(S.sb.from('episodes').select('id,number,title,series(title)').order('number')),
     q(S.sb.from('cost_settings').select('krw_per_usd').eq('id', 1).maybeSingle()),
     q(S.sb.from('price_book').select('*').order('provider').order('model')),
   ]).then(([a, b, c]) => [a, b, c.filter(p => p.provider !== 'local')]);
-  const fx = Number(settings?.krw_per_usd || 1340);
+  const fx = Number(settings?.krw_per_usd || 1340); S.fx = fx;
   S.costEp = S.costEp || 'all'; S.costOut = S.costOut || 'all'; S.costPage = S.costPage || 0;
   if (S.costEp !== 'all' && !eps.some(e => e.id === S.costEp)) S.costEp = 'all';
   let qy = S.sb.from('cost_events').select('*').order('occurred_at', { ascending: false }).limit(5000);
@@ -8383,6 +8464,8 @@ async function viewCosts(main) {
   main.innerHTML = `
   <h2>비용 · 견적서</h2>
   <p class="quiet">모든 지출을 한 줄씩 기록합니다. 최종 결과에 쓰인 비용은 <b>순수 제작비</b>, 실패해서 버려진 비용은 <b>누수</b>로 나눠 봅니다.</p>
+  <div class="card noprint" id="balCard"><div class="row"><b>서비스별 남은 잔액</b><span class="quiet" id="balAt"></span>
+    <button class="btn small" id="balGo" style="margin-left:auto">지금 다시 조회</button></div><div id="balBody" class="quiet">불러오는 중…</div></div>
   <div class="card noprint"><div class="row">
     <select id="cep" style="width:auto;min-width:200px"><option value="all">전체 작품</option>${eps.map(e =>
       `<option value="${esc(e.id)}" ${e.id === S.costEp ? 'selected' : ''}>${esc(e.series?.title || '')} ${e.number}화 ${esc(e.title || '')}</option>`).join('')}</select>
@@ -8466,6 +8549,8 @@ async function viewCosts(main) {
     <div class="row" style="margin-top:8px"><button class="btn primary" id="mAdd">기록</button></div>
   </div>`;
 
+  loadBalances(events, false).catch(e => { const b = document.getElementById('balBody'); if (b) b.textContent = '잔액을 불러오지 못했습니다: ' + errText(e); });
+  $('#balGo').onclick = guard(async () => { await loadBalances(events, true); toast('에이전트에게 잔액 조회를 맡겼습니다'); });
   $('#cep').onchange = e => { S.costEp = e.target.value; S.costPage = 0; go('costs'); };
   main.querySelectorAll('[data-co]').forEach(b => b.onclick = () => { S.costOut = b.dataset.co; S.costPage = 0; go('costs'); });
   if ($('#cprev')) $('#cprev').onclick = () => { S.costPage--; go('costs'); };
@@ -8669,7 +8754,7 @@ const CUT_STATUS = {
   designed: ['설계됨 · 승인 대기', 'accent'], approved: ['승인 · 생성 대기', 'warn'], generating: ['생성 중', 'warn'],
   reviewing: ['감수 중', 'warn'], passed: ['통과', 'good'], failed: ['불합격·실패', 'bad'], hold: ['보류', ''], cancelled: ['취소', ''],
 };
-const TASK_LABEL = { cut_review: '컷 감수(감정·영상)', coord_review: '코디네이터 감수', bible_prompt: '코디네이터: 영어 프롬프트', bible_suggest: '작가실 추천(스타일·음악)', api_check: '실제 연결 점검', upscale: '1080p 업그레이드', bible_extract: '대본에서 필요 항목 찾기', photo_describe: '코디네이터: 사진 보고 묘사·프롬프트', bible_place: '넣을 화·씬 추천',photo_design: '사진 디자인', photo_set: '얼굴 학습', prep_cut: '사진·목소리 준비', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
+const TASK_LABEL = { balance_check: '잔액 조회', cut_review: '컷 감수(감정·영상)', coord_review: '코디네이터 감수', bible_prompt: '코디네이터: 영어 프롬프트', bible_suggest: '작가실 추천(스타일·음악)', api_check: '실제 연결 점검', upscale: '1080p 업그레이드', bible_extract: '대본에서 필요 항목 찾기', photo_describe: '코디네이터: 사진 보고 묘사·프롬프트', bible_place: '넣을 화·씬 추천',photo_design: '사진 디자인', photo_set: '얼굴 학습', prep_cut: '사진·목소리 준비', assemble: '편집본 조립', edit_command: '말로 편집', voice_cast: '시리즈 목소리 설계', voice_design: '목소리 후보', voice_save: '목소리 저장', writers_room: '작가실 정리', director: '감독 컷 설계', generate: '영상 생성', store: '집 PC 보관', video_review: '영상 감수', bgm: '배경음악' };
 const PROD_STEPS = [['원고', '대본 탭에서 넣기'], ['작가실', '감정선 정리본'], ['컷 설계', '컷 나누기·대사 미리 듣기·장면 사진'], ['생성 승인', '대표가 컷별로'], ['영상·감수', 'Seedance + 영상감수'], ['씬 보관', '집 PC · OneDrive']];
 const usdKrw = (usd, rate) => usd == null ? '-' : won(usd * (rate || 1340));
 
@@ -9184,7 +9269,7 @@ async function renderProduction(ep, quietRefresh = false) {
       <span class="quiet eta">${esc(t.devices?.name || '')} ⏱ ${esc(etaText(t.kind, t.started_at, t.status))}</span></div>`).join('')}</div>`
     : tasks.length ? `<details class="card more tasklist"><summary>${ep.number}화 최근 끝난 일 ${Math.min(tasks.length, 5)}개</summary>
     ${tasks.slice(0, 5).map(t => `<div class="tli">${pill(TASK_LABEL[t.kind] || t.kind, t.status === 'failed' ? 'bad' : t.status === 'done' ? 'good' : '')}
-      <span class="quiet">${esc(t.status === 'failed' ? (t.error || '실패') : t.status === 'done' ? (t.result || '완료') : t.status === 'cancelled' ? '취소됨' : '')}</span><span class="quiet eta">${fmt(t.finished_at || t.created_at)}</span></div>`).join('')}</details>` : ''}
+      <span class="quiet">${esc(t.status === 'failed' ? (t.error || '실패') : t.status === 'done' ? (t.kind === 'balance_check' ? '잔액 조회 완료' : t.result || '완료') : t.status === 'cancelled' ? '취소됨' : '')}</span><span class="quiet eta">${fmt(t.finished_at || t.created_at)}</span></div>`).join('')}</details>` : ''}
 
   ${sceneNos.length ? `<div class="card">
     <div class="row"><h3 style="margin:0">${ep.number}화 씬 순서</h3><span class="quiet">${sceneNos.length}씬${cuts.length ? ` · ${cuts.length}컷 · 총 ${Math.floor(totalSec / 60)}분 ${totalSec % 60}초` : ' · 컷 설계 전'}</span>
@@ -10434,9 +10519,9 @@ function edPollRenders() {
         const t = await q(S.sb.from('pipeline_tasks').select('status,result,error,progress').eq('id', ED.askId).single());
         if (t.status === 'done' || t.status === 'failed') {
           ED.askId = null;
-          const res = $('#eAskRes'); if (res) res.innerHTML = t.status === 'done' ? `✔ ${esc(t.result || '완료')}` : `<span style="color:var(--bad)">실패: ${esc(t.error || '')}</span>`;
+          const res = $('#eAskRes'); if (res) res.innerHTML = t.status === 'done' ? `✔ ${esc(t.kind === 'balance_check' ? '잔액 조회 완료' : t.result || '완료')}` : `<span style="color:var(--bad)">실패: ${esc(t.error || '')}</span>`;
           if (t.status === 'done') { const p = await q(S.sb.from('edit_projects').select('*').eq('id', ED.proj.id).single());
-            if (p.rev !== ED.askRev) { ED.hist.push(JSON.stringify(ED.tl)); ED.proj = p; ED.tl = p.timeline; edRender(); $('#eAskRes').innerHTML = `✔ ${esc(t.result || '완료')} <span class="quiet">(되돌리려면 ↶)</span>`; } }
+            if (p.rev !== ED.askRev) { ED.hist.push(JSON.stringify(ED.tl)); ED.proj = p; ED.tl = p.timeline; edRender(); $('#eAskRes').innerHTML = `✔ ${esc(t.kind === 'balance_check' ? '잔액 조회 완료' : t.result || '완료')} <span class="quiet">(되돌리려면 ↶)</span>`; } }
         } else still = true;
       }
       const open = ED.proj ? await q(S.sb.from('edit_renders').select('id,status').eq('project_id', ED.proj.id).in('status', ['queued', 'running'])) : [];
