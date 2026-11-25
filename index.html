@@ -7804,7 +7804,13 @@ async function openVoiceDesign(entry, cur, fresh, listen) {
   const box = document.getElementById('vd-' + entry.id); if (!box) return;
   S.vdTimer = S.vdTimer || {}; clearTimeout(S.vdTimer[entry.id]);
   const [d] = await q(S.sb.from('voice_designs').select('*').eq('entry_id', entry.id).order('created_at', { ascending: false }).limit(1));
-  const showForm = fresh || !d || (d.status === 'linked' && !listen);
+  // 적용이 끝난 디자인(linked)은 다시 입력 칸으로 돌아가지 않고 '목소리 듣기'(지금 목소리 + 후보 바꾸기)로 보여 준다
+  const showForm = fresh || !d;
+  S.vdBusy = S.vdBusy || {};
+  if (d && d.status === 'linked' && S.vdBusy[entry.id]) {   // 만드는 중을 지켜보다 방금 적용됨 → 카드(목소리 줄)까지 새로 그린다
+    delete S.vdBusy[entry.id]; toast(`${entry.name} 목소리를 바이블에 넣었습니다`);
+    if (S.tab === 'bible') return go('bible');
+  }
   if (showForm) {
     const desc = d?.description || [entry.summary, cur?.description].filter(Boolean).join(' / ');
     box.innerHTML = `<div class="vdbox"><b>목소리 디자인</b>
@@ -7832,7 +7838,7 @@ async function openVoiceDesign(entry, cur, fresh, listen) {
       toast('추천 목소리를 만들고 있습니다');
       const poll = (n) => setTimeout(async () => { if (S.tab !== 'bible' || !document.contains(box)) return;
         const [x] = await q(S.sb.from('voice_designs').select('id,created_at').eq('entry_id', entry.id).order('created_at', { ascending: false }).limit(1));
-        if (x && Date.now() - new Date(x.created_at) < 5 * 60e3) openVoiceDesign(entry, cur, false, true).catch(() => {}); else if (n < 20) poll(n + 1); }, 8000);
+        if (x && Date.now() - new Date(x.created_at) < 5 * 60e3) { S.vdBusy = S.vdBusy || {}; S.vdBusy[entry.id] = 1; openVoiceDesign(entry, cur, false, true).catch(() => {}); } else if (n < 20) poll(n + 1); }, 8000);
       poll(0);
     });
     return;
@@ -7843,9 +7849,10 @@ async function openVoiceDesign(entry, cur, fresh, listen) {
     const { data } = await S.sb.storage.from('takes').createSignedUrls(aud, 3600);
     (data || []).forEach(x => { if (x.signedUrl) urls[x.path] = x.signedUrl; });
   }
-  const busy = ['queued', 'saving'].includes(d.status);
+  const busy = ['queued', 'saving'].includes(d.status) || (d.auto && ['ready', 'saved'].includes(d.status)) || (d.sample_path && d.status === 'saved');
+  if (busy) S.vdBusy[entry.id] = 1;
   const upl = !!d.sample_path, linked = d.status === 'linked';
-  box.innerHTML = `<div class="vdbox"><div class="row"><b>목소리 ${upl ? '(올린 파일)' : '디자인'}</b>${pill({ queued: upl ? 'ElevenLabs가 만드는 중' : '후보 만드는 중', ready: '골라 주세요', saving: '저장 중', saved: '저장됨 · 적용 대기', failed: '실패',
+  box.innerHTML = `<div class="vdbox"><div class="row"><b>${linked ? '목소리 듣기' : '목소리 ' + (upl ? '(올린 파일)' : '디자인')}</b>${pill({ queued: upl ? 'ElevenLabs가 만드는 중' : '후보 만드는 중', ready: '골라 주세요', saving: '저장 중', saved: '저장됨 · 적용 대기', failed: '실패',
       linked: upl ? '올린 목소리 적용됨' : d.auto ? '추천 목소리 적용됨' : '바이블 적용됨' }[d.status] || d.status,
       d.status === 'failed' ? 'bad' : linked ? 'good' : d.status === 'ready' || d.status === 'saved' ? 'accent' : 'warn')}
       <button class="btn small" id="vdNew-${entry.id}" style="margin-left:auto">새로 만들기</button></div>
@@ -7861,6 +7868,7 @@ async function openVoiceDesign(entry, cur, fresh, listen) {
     ${d.status === 'saved' ? `<p>ElevenLabs에 저장됐습니다 (<code>${esc(d.voice_id)}</code>). 바이블에 적용하면 감독·목소리 고정 작업이 이 목소리를 씁니다.</p>
       <button class="btn small primary" id="vdLink-${entry.id}">바이블에 적용</button>` : ''}</div>`;
   document.getElementById('vdNew-' + entry.id).onclick = () => openVoiceDesign(entry, cur, true);
+  if (linked) document.getElementById('vdNew-' + entry.id).textContent = '다시 디자인';
   box.querySelectorAll('[data-pick]').forEach(b => b.onclick = guard(async () => {
     await q(S.sb.from('voice_designs').update({ chosen_generated_id: b.dataset.pick, status: 'saving' }).eq('id', d.id));
     await q(S.sb.from('pipeline_tasks').insert({ kind: 'voice_save', payload: { design_id: d.id } }));
