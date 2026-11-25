@@ -10,10 +10,11 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.33.2"
+VERSION = "1.34.0"
 
 import base64
 import glob
+import hashlib
 import json
 import os
 import platform
@@ -738,10 +739,27 @@ def bible_entry(ctx, name):
     return None
 
 
-def lessons_text(ctx, limit=30):
+def lessons_text(ctx, limit=30, role=None):
+    """교훈(지난 감수에서 배운 것). role이 있으면 그 사람에게 준 교훈만(받는 사람이 비어 있으면 감독용)."""
+    ls = ctx.get("lessons") or []
+    if role:
+        ls = [l for l in ls if role in (l.get("targets") or []) or (role == "감독" and not l.get("targets"))]
     rows = [f"- ({l.get('category')}) {l.get('rule')}" + (f"  · 실패 예: {l.get('bad_example')}" if l.get("bad_example") else "")
-            for l in (ctx.get("lessons") or [])[:limit]]
+            for l in ls[:limit]]
     return "\n".join(rows) or "(아직 없음)"
+
+
+def role_lessons_block(ctx, role, title=None):
+    """감수자들이 이 사람에게 준 피드백(교훈)을 프롬프트 앞부분에 넣을 블록. 없으면 빈칸."""
+    t = lessons_text(ctx, 20, role)
+    return "" if t == "(아직 없음)" else f"\n\n[{title or role + '에게 온 감수자 피드백'} — 지난 제작에서 배운 것, 먼저 적용]\n{t}\n"
+
+
+def series_lessons(series_id):
+    try:
+        return {"lessons": rpc("agent_get_lessons", p_token=TOKEN, p_series=series_id, p_include_candidates=False) or []}
+    except Exception:
+        return {"lessons": []}
 
 
 def continuity_text(ctx):
@@ -795,7 +813,7 @@ def writers_split(t, p):
     prep = bool(p.get("prep"))   # 컷 설계 전 제작용 나누기(작가실이 먼저 끝내고 감독은 나누기를 요청하지 않음)
     why_line = (f"컷 설계 전에 제작용으로 씬을 나눈다. 한 부분은 {SCENE_MAX_SEC}초 이하(영상 컷 15초 2개 이내)가 되게 한다."
                 if prep else "감독이 아래 씬을 영상 컷으로 설계하지 못했다(씬이 너무 길어 한 번에 설계할 수 없음).")
-    system = (guide(ctx, "작가실") or "너는 드라마 작가실이다.") + f"""
+    system = (guide(ctx, "작가실") or "너는 드라마 작가실이다.") + role_lessons_block(ctx, "작가실") + f"""
 
 [이번 일 — 제작용 씬 나누기]
 {why_line} 이 씬을 자연스러운 전환점(장소·시간이 바뀌는 곳 우선)에서 2~4개 부분으로 나눈다.""" + """
@@ -884,7 +902,7 @@ def t_writers_room(t):
         progress(f"작가실이 대본 감수에서 나온 {len(p['fix_issues'])}건을 그대로 반영하는 중")
     model = setting(ctx, "generation", "claude_writer", "claude-opus-5-5")
     e = ctx.get("episode") or {}
-    system = (guide(ctx, "작가실") or "너는 드라마 작가실이다. 흐름은 그대로 두고 감정선과 감정 연결 장치만 다듬는다.") + f"""
+    system = role_lessons_block(ctx, "작가실").lstrip() + (guide(ctx, "작가실") or "너는 드라마 작가실이다. 흐름은 그대로 두고 감정선과 감정 연결 장치만 다듬는다.") + f"""
 
 [시리즈 바이블 — 인물·장소 이름은 반드시 이대로]
 {bible_text(ctx)}
@@ -995,7 +1013,7 @@ def director_system(ctx):
 {bible_text(ctx)}
 
 [감독 교훈 — 지난 감수에서 배운 것, 먼저 적용]
-{lessons_text(ctx)}
+{lessons_text(ctx, 30, "감독")}
 
 [컷 설계 규칙]
 - 씬 번호는 대본에 나온 순서대로 1부터. 컷은 4~15초. 대사는 한 글자도 바꾸지 않는다.
@@ -4181,7 +4199,7 @@ def script_review(t):
         if no_cut:
             mech.append("컷이 없는 씬: " + ", ".join(f"S#{n}" for n in no_cut))
     model = setting(ctx, "generation", "claude_reviewer", "claude-sonnet-5-5")
-    system = (guide(ctx, "대본감수자") or "너는 대본감수자다. 원고 → 작가실 정리본 → 컷 설계가 씬 순서대로 빠짐없이 옮겨졌는지 감수한다.") + """
+    system = role_lessons_block(ctx, "대본감수자").lstrip() + (guide(ctx, "대본감수자") or "너는 대본감수자다. 원고 → 작가실 정리본 → 컷 설계가 씬 순서대로 빠짐없이 옮겨졌는지 감수한다.") + """
 
 [답 형식] 문제만 적는다. 감정선 보강으로 늘어난 지문·숨은 문제가 아니다. 대사는 글자 그대로여야 한다.
 <json>{"verdict": "pass|fix", "summary": "대표용 한두 줄",
@@ -4282,6 +4300,177 @@ def review_take_focus(take_id, mode):
 
 
 @task("cut_review")
+def flow_review(t):
+    """편집실 흐름 감수: 타임라인에 놓인 컷들을 순서대로 이어 보며 영상감수자(화면 연결)·감정감수자(감정·대사 흐름)가
+    대본과 맞춰 보고, 특히 컷과 컷 사이가 어색한 곳을 찾아 '감독에게 보낼 보완 요청'으로 정리한다. 컷은 바꾸지 않는다(대표가 고르고 지시를 덧붙여 보냄)."""
+    p = t.get("payload") or {}
+    ed = rpc("agent_get_edit", p_token=TOKEN, p_project=p["project_id"]) or {}
+    tl = (ed.get("project") or {}).get("timeline") or {}
+    clips, total, _ = tl_layout(tl)
+    if not clips:
+        raise RuntimeError("타임라인에 컷이 없습니다. 먼저 '영상 가져오기'로 컷을 넣어 주세요")
+    clips = clips[:60]
+    ep0 = (ed.get("episode") or {}).get("id") or t.get("episode_id")
+    ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep0)
+    model = setting(ctx, "generation", "claude_reviewer", "claude-sonnet-5-5")
+    # 화별 확정 대본(씬 본문)
+    scripts = {}
+    def scene_body(ep, no):
+        if ep not in scripts:
+            vers = rpc("agent_script_versions", p_token=TOKEN, p_episode=ep) or []
+            conf = next((v for v in reversed(vers) if v.get("status") == "confirmed"), None) or (vers[-1] if vers else None)
+            scripts[ep] = {n: (h + "\n" + b) for n, h, b in split_scenes((conf or {}).get("content") or "")} if conf else {}
+        return (scripts[ep].get(inum(no)) or "")[:2500]
+    work = os.path.join(HOME, "work", f"flow_{t['id']}")
+    os.makedirs(work, exist_ok=True)
+    rows, files = [], {}
+    try:
+        for i, c in enumerate(clips):
+            progress(f"흐름 감수 준비: 컷 {i + 1}/{len(clips)} 장면·소리 살피는 중")
+            take = rpc("agent_get_take", p_token=TOKEN, p_id=c["take_id"]) or {}
+            cut = take.get("cut") or {}
+            src = files.get(c["take_id"])
+            if not src:
+                src = os.path.join(work, f"{len(files)}.mp4")
+                prev = (take.get("files") or {}).get("preview")
+                try:
+                    if prev:
+                        fetch_to(storage_signed_url("takes", prev, 900), src)
+                    elif take.get("remote_url"):
+                        fetch_to(take["remote_url"], src)
+                    else:
+                        src = None
+                except Exception as ex:
+                    log(f"흐름 감수: 영상 받기 실패 {cut.get('code')}: {ex}")
+                    src = None
+                files[c["take_id"]] = src
+            a, b = float(c["in"]), float(c["out"])
+            row = {"i": i, "clip": c["id"], "cut_id": cut.get("id"), "code": cut.get("code") or "", "episode_id": cut.get("episode_id"),
+                   "timeline": f"{c['start']:.1f}~{c['start'] + c['dur']:.1f}초", "used": f"원본 {a:.1f}~{b:.1f}초", "gap_before": c.get("gap") or 0,
+                   "summary": cut.get("summary"), "dialogue": cut.get("dialogue"), "emotion": cut.get("emotion"), "camera": cut.get("camera"),
+                   "prompt": cut.get("prompt"), "scene_no": cut.get("scene_no"), "frames": []}
+            if src:
+                for tag, at in (("시작", a + 0.05), ("0.6초", min(b - 0.1, a + 0.6)), ("가운데", (a + b) / 2), ("끝", max(a, b - 0.12))):
+                    fp = os.path.join(work, f"f{i}_{len(row['frames'])}.jpg")
+                    try:
+                        ff("-ss", f"{at:.2f}", "-i", src, "-frames:v", "1", "-vf", "scale=384:-2", "-q:v", "5", fp)
+                        row["frames"].append((tag, fp))
+                    except Exception:
+                        pass
+                if has_audio(src):
+                    wav = os.path.join(work, f"a{i}.wav")
+                    try:
+                        ff("-ss", f"{a:.2f}", "-t", f"{b - a:.2f}", "-i", src, "-vn", "-ac", "1", "-ar", "8000", wav)
+                        cv = audio_curve(wav, 0.1)
+                        loud = [x for x in cv if x["db"] > -42]
+                        row["sound"] = {"첫소리까지초": round(loud[0]["t"], 1) if loud else None,
+                                        "끝소리뒤_조용한초": round(cv[-1]["t"] - loud[-1]["t"], 1) if loud and cv else None,
+                                        "시작0.3초_dB": round(sum(x["db"] for x in cv[:3]) / max(1, len(cv[:3])), 1) if cv else None,
+                                        "끝0.3초_dB": round(sum(x["db"] for x in cv[-3:]) / max(1, len(cv[-3:])), 1) if cv else None}
+                    except Exception as ex:
+                        log(f"흐름 감수: 소리 분석 실패 {cut.get('code')}: {ex}")
+                else:
+                    row["sound"] = {"소리": "없음"}
+            rows.append(row)
+        # 씬별 대본
+        scene_txt = {}
+        for r in rows:
+            k = (r["episode_id"], r["scene_no"])
+            if k not in scene_txt and r["episode_id"]:
+                scene_txt[k] = scene_body(r["episode_id"], r["scene_no"])
+        system = (guide(ctx, "영상감수자") or "너는 영상감수자다.") + "\n\n" + (guide(ctx, "감정감수자") or "너는 감정감수자다.") + f"""
+
+[시리즈 바이블]
+{bible_text(ctx, 40)}
+
+[이번 일: 편집실 흐름 감수 — 영상감수자와 감정감수자가 함께]
+타임라인에 놓인 컷을 순서대로 이어 본다. 컷 하나하나의 완성도보다 '이어 볼 때 자연스러운가'를 본다. 특히 컷과 컷 사이.
+- 영상감수자(화면·구도): 앞 컷 '끝' 장면과 다음 컷 '시작' 장면의 인물 위치·시선·자세·의상·빛·배경이 이어지는가,
+  구도가 정리돼 있는가 — 샷 크기(풀·미디엄·바스트·클로즈업)가 이야기에 맞게 바뀌는가(같은 크기 반복·이유 없는 급변),
+  카메라 높이·각도, 인물 배치(화면 왼쪽/오른쪽, 머리 위 여백, 잘린 곳), 180도 규칙(두 인물의 좌우가 컷마다 뒤바뀌지 않는가),
+  시선 방향이 상대와 맞는가, 같은 장소의 공간 배치(문·창·소품 위치)가 컷마다 같은가,
+  컷 시작이 굳어 있거나(시작과 0.6초가 거의 같음) 끝에서 동작이 멈추는가.
+- 감정감수자: 대본 씬과 비교해 감정이 앞 컷에서 다음 컷으로 자연스럽게 이어지는가(갑자기 다른 감정에서 시작 등),
+  대사 순서·누락이 대본과 맞는가, 대사 사이 쉼(첫소리까지초·끝소리뒤_조용한초)이 너무 길거나 짧아 리듬이 깨지는가, 컷 경계에서 소리 크기가 튀는가.
+- 편집으로 고칠 수 있는 것(앞뒤 몇 초 잘라내기, 정적 줄이기)은 edit_fix에 적고 remake=false.
+  다시 만들어야 하는 것만 remake=true와 fix_for_director(감독이 프롬프트에 바로 옮길 수 있게, 앞뒤 컷과 어떻게 이어져야 하는지 구체적으로).
+  다시 만들 컷은 prompt_rewrite에 그 컷의 프롬프트를 처음부터 다시 쓴다(지금 프롬프트와 같은 형식·언어, 대사는 그대로,
+  구도·샷 크기·인물 배치·시선·앞 컷에서 이어지는 시작 자세를 분명히).
+- 대사는 바꾸라고 하지 않는다. 문제 없는 곳은 적지 않는다. 다시 만들 컷은 꼭 필요한 것만.
+- 상호 피드백: 같은 문제가 다음 화에서 처음부터 안 생기게, 원인이 있는 사람에게 교훈(lessons)을 남긴다.
+  감독(컷 설계·구도·카메라·컷 나누는 자리), 작가실(씬 구성·감정선·지문), 대본감수자(대본↔컷 대조에서 놓친 것),
+  코디네이터(바이블 묘사·장소 공간 배치·의상 등 고정 요소의 프롬프트). rule은 그 사람이 다음에 그대로 따를 한 문장. 3개 이하.
+<json>{{"summary": "대표용 두세 줄: 전체 흐름이 어색한 가장 큰 이유",
+ "issues": [{{"where": "S01 C02 → S01 C03 (경계) 또는 S01 C02", "cut": "다시 만들거나 고칠 컷 code(E01-S01-C03 형식)", "who": "영상감수자|감정감수자",
+   "type": "연결|굳은 시작|끝 멈춤|감정 튐|대본 불일치|리듬|소리", "problem": "무엇이 어떻게 어색한지", "edit_fix": "편집으로 고칠 방법(없으면 빈칸)",
+   "remake": true, "fix_for_director": "감독에게 보낼 보완 요청 한 문단", "prompt_rewrite": "다시 쓴 프롬프트(remake일 때만)"}}],
+ "lessons": [{{"fingerprint": "짧은-영문-열쇠", "targets": ["감독|작가실|대본감수자|코디네이터"], "category": "camera|continuity|expression|emotion_tone|dialogue|motion|location|prompt|other",
+   "problem": "무엇이 반복해서 어색했나", "rule": "다음부터 이렇게", "severity": "보통|치명"}}]}}</json>"""
+        issues, summaries, lessons = [], [], []
+        step = 14
+        for s0 in range(0, len(rows), step - 1):
+            part = rows[s0:s0 + step]
+            if s0 and len(part) < 2:
+                break
+            content = []
+            for r in part:
+                content.append({"type": "text", "text": "[컷] " + json.dumps({k: r.get(k) for k in ("code", "timeline", "used", "gap_before", "summary", "dialogue", "emotion", "camera", "sound", "prompt")}, ensure_ascii=False)})
+                for tag, fp in r["frames"]:
+                    with open(fp, "rb") as f:
+                        content += [{"type": "text", "text": f"{r['code']} {tag}"}, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.b64encode(f.read()).decode()}}]
+            keys = []
+            for r in part:
+                k = (r["episode_id"], r["scene_no"])
+                if k not in keys:
+                    keys.append(k)
+            content.append({"type": "text", "text": "[대본(확정본) — 이 컷들이 속한 씬]\n" + "\n\n".join(scene_txt.get(k) or "" for k in keys)[:12000]})
+            progress(f"영상감수자·감정감수자가 컷 {s0 + 1}~{s0 + len(part)} 흐름을 대본과 맞춰 보는 중")
+            text, _ = claude(model, system, content, max_tokens=5000, stage="video_review", episode_id=ep0, note="편집실 흐름 감수")
+            r = safe_json(text) or {}
+            if r.get("summary"):
+                summaries.append(r["summary"])
+            issues += [x for x in (r.get("issues") or []) if isinstance(x, dict)]
+            lessons += [x for x in (r.get("lessons") or []) if isinstance(x, dict) and x.get("rule")]
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    by_code = {r["code"]: r for r in rows if r["code"]}
+    out_issues, seen = [], set()
+    for x in issues[:60]:
+        code = (x.get("cut") or "").strip()
+        r = by_code.get(code) or next((v for k, v in by_code.items() if code and (k.endswith(code) or code.replace(" ", "-") in k)), None)
+        key = (code, x.get("problem"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out_issues.append({**{k: x.get(k) for k in ("where", "who", "type", "problem", "edit_fix", "fix_for_director", "prompt_rewrite")},
+                           "cut": r["code"] if r else code, "cut_id": r["cut_id"] if r else None, "episode_id": r["episode_id"] if r else None,
+                           "scene_no": r["scene_no"] if r else None, "clip": r["clip"] if r else None, "remake": bool(x.get("remake")) and bool(r)})
+    remake = len({i["cut_id"] for i in out_issues if i["remake"]})
+    # 상호 피드백: 원인이 있는 사람(감독·작가실·대본감수자·코디네이터)에게 교훈으로 남긴다(같은 문제가 두 번 나오거나 대표가 켜면 다음 제작부터 적용)
+    sid = ((ctx.get("series") or {}).get("id")) or (ed.get("episode") or {}).get("series_id")
+    out_lessons, seenf = [], set()
+    roles = ("감독", "작가실", "대본감수자", "코디네이터")
+    for l in lessons[:12]:
+        fp = re.sub(r"[^a-z0-9-]", "", str(l.get("fingerprint") or "").lower())[:60] or ("flow-" + hashlib.md5(l["rule"].encode()).hexdigest()[:8])
+        if fp in seenf:
+            continue
+        seenf.add(fp)
+        tg = [x for x in (l.get("targets") or []) if x in roles] or ["감독"]
+        row = {"fingerprint": "flow:" + fp, "targets": tg, "category": l.get("category") or "other", "problem": l.get("problem") or "",
+               "rule": l["rule"], "severity": l.get("severity") or "보통"}
+        try:
+            got = rpc("agent_add_lesson", p_token=TOKEN, p_lesson={**row, "series_id": sid, "sources": ["영상감수자", "감정감수자"],
+                                                                  "cut_refs": sorted({i["cut"] for i in out_issues if i.get("cut")})[:20]}) or {}
+            row.update({"id": got.get("id"), "status": got.get("status"), "hit_count": got.get("hit_count")})
+        except Exception as ex:
+            log(f"흐름 감수 교훈 기록 실패: {ex}")
+        out_lessons.append(row)
+    out = {"summary": " ".join(summaries)[:900] or ("이어 보기에 큰 문제 없음" if not out_issues else ""), "issues": out_issues,
+           "lessons": out_lessons, "clips": len(rows), "remake_cuts": remake, "project_id": p["project_id"], "at": datetime.now().isoformat(timespec="seconds")}
+    notify(f"편집실 흐름 감수: 확인 {len(out_issues)}건 · 다시 만들 컷 {remake}개", out["summary"][:300], "info" if not out_issues else "warning")
+    return json.dumps(out, ensure_ascii=False)
+
+
 def t_cut_review(t):
     """작가실이 가져온 컷 설계를 제작 전에 감수: mode emotion(감정감수자: 대사·소리·감정선) | video(영상감수자: 화면·동작·일관성).
     고칠 수 있는 것은 감수자가 프롬프트를 직접 고치고(대표 승인 없이 설계 단계만), 결과를 컷마다 남긴다."""
@@ -4289,6 +4478,8 @@ def t_cut_review(t):
     p = t.get("payload") or {}
     if p.get("mode") == "script":
         return script_review(t)
+    if p.get("mode") == "flow":
+        return flow_review(t)
     mode = p.get("mode") if p.get("mode") in ("emotion", "video") else "emotion"
     who = "감정감수자" if mode == "emotion" else "영상감수자"
     ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep)
@@ -4380,7 +4571,7 @@ def t_coord_review(t):
     owner_req = re.sub(r"\s*→ (작가실이|코디네이터가) 묘사·프롬프트에 반영:.*$", "", owner_req)
     prompt = (info.get("prompt_en") or "").strip()
     found = script_mentions(info.get("series_id"), name, info.get("summary"), limit=6000) if cat not in ("style", "music") else ""
-    system = f"""너는 드라마 제작팀의 코디네이터다. 시리즈 바이블 항목의 묘사·영어 프롬프트를 감수한다.
+    system = role_lessons_block(series_lessons(info.get("series_id")), "코디네이터").lstrip() + f"""너는 드라마 제작팀의 코디네이터다. 시리즈 바이블 항목의 묘사·영어 프롬프트를 감수한다.
 확인할 것:
 1) 대표 요청(있으면)이 한글 묘사와 영어 프롬프트에 정확히 들어갔는가 — 요청을 항목별로 쪼개 하나씩.
 2) 영어 프롬프트가 한글 묘사·세부 사항의 눈에 보이는 고정 특징({PROMPT_NEEDS.get(cat, '눈에 보이는 특징')})을 빠짐없이, 어긋나지 않게 담았는가. 한글·이름·브랜드가 섞이지 않았는가.
