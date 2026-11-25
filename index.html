@@ -203,6 +203,7 @@
   .pkgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; margin-top: 8px; }
   .pk { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 0; cursor: pointer; color: var(--ink); } .pk.on { border-color: var(--accent); background: var(--accent-soft); }
   .pk input { width: auto; margin-right: 4px; } .pk { position: relative; } .pkhold { position: absolute; right: 8px; top: 6px; font-size: 12px; cursor: pointer; }
+  .btn.flash { box-shadow: 0 0 0 3px var(--accent); animation: flashp 1s ease-in-out 3; } @keyframes flashp { 50% { box-shadow: 0 0 0 6px var(--accent-soft, rgba(60,100,220,.3)); } }
   .askin { background: var(--bg); color: var(--fg, inherit); border-radius: 12px; padding: 18px; width: min(440px, 92vw); box-shadow: 0 10px 40px rgba(0,0,0,.3); }
   .askbtns { display: flex; flex-direction: column; gap: 8px; } .askbtns .btn { display: flex; flex-direction: column; align-items: flex-start; text-align: left; gap: 2px; padding: 10px 12px; }
   .askbtns .btn.primary .quiet { color: rgba(255,255,255,.85); } .askbtns .btn.small { align-self: flex-end; padding: 4px 12px; }
@@ -6839,14 +6840,14 @@ function appearsLine(e, c) {
   return `<div class="row" style="gap:6px;margin-top:6px">${need ? pill(e.photo_source === 'upload' ? '사진 직접 올릴 예정' : '사진 필요', 'warn') : ''}${e.origin === 'script' ? pill('대본에서 찾음') : ''}${txt ? `<span class="quiet">등장: ${esc(txt)}</span>` : ''}</div>`;
 }
 // 사진 없는 인물·장소·배경·소품에 사진 디자인을 한꺼번에 맡긴다
-async function queuePhotos(entries, curOf, only) {
+async function queuePhotos(entries, curOf, only, auto = false) {
   const open = new Set((entries.length ? await q(S.sb.from('photo_designs').select('entry_id').in('entry_id', entries.map(e => e.id))
     .in('status', ['queued', 'ready', 'training', 'set_ready'])) : []).map(d => d.entry_id));
   const todo = entries.filter(e => PHOTO_CATS.includes(e.category) && e.photo_source !== 'upload' && e.essential !== false && (!only || only.has(e.id)) && !open.has(e.id)
     && curOf(e.id) && !(curOf(e.id).image_paths || []).length);
   for (const e of todo) {
     const c = curOf(e.id);
-    const r = await q(S.sb.from('photo_designs').insert({ entry_id: e.id, prompt: [c.description, e.summary].filter(Boolean).join('. ').slice(0, 1800) }).select('id').single());
+    const r = await q(S.sb.from('photo_designs').insert({ entry_id: e.id, prompt: [c.description, e.summary].filter(Boolean).join('. ').slice(0, 1800), ...(auto ? { auto_apply: true } : {}) }).select('id').single());
     await q(S.sb.from('pipeline_tasks').insert({ kind: 'photo_design', payload: { design_id: r.id } }));
   }
   return todo.length;
@@ -7316,6 +7317,7 @@ async function viewBible(main) {
   const tmpUrls = {};
   if (tmpPaths.length) { const { data } = await S.sb.storage.from('takes').createSignedUrls(tmpPaths, 3600); (data || []).forEach(x => { if (x.signedUrl) tmpUrls[x.path] = x.signedUrl; }); }
   S.refUrls = tmpUrls;
+  if (S.bibleFocus) S.bibleCat = 'all';   // 제작 탭 '바이블에서 한꺼번에 만들기'로 왔으면 전체 보기에서 그 버튼을 보여 준다
   S.bibleCat = S.bibleCat || 'all';
   const isSpon = S.bibleCat === 'sponsor';
   const shown = entries.filter(e => S.bibleCat === 'all' || (isSpon ? e.origin === 'sponsor' : e.category === S.bibleCat));
@@ -7609,12 +7611,19 @@ async function viewBible(main) {
     const e = entryOf(b.dataset.plno); const list = [...(e?.placement || [])]; list.splice(+b.dataset.i, 1);
     await savePlacement(e, list); go('bible');
   }));
+  if (S.bibleFocus) {
+    const fb = $(S.bibleFocus === 'photo' ? '#bphotos' : '#bcast'); S.bibleFocus = null;
+    if (fb) { setTimeout(() => fb.scrollIntoView({ behavior: 'smooth', block: 'center' }), 80); fb.classList.add('flash'); setTimeout(() => fb.classList.remove('flash'), 4000); }
+  }
   const bphotos = $('#bphotos');
   if (bphotos) bphotos.onclick = guard(async () => {
     if (!photoTodo.length) return toast(`사진을 만들 ${catLabel || ''} 항목이 없습니다(적용된 묘사가 있고, 사진이 없고, '자동으로 만들기'인 항목만 만듭니다)`);
     const names = photoTodo.map(e => e.name);
-    if (!confirm(`${catLabel || '전체'} ${photoTodo.length}개 항목의 사진 후보를 만듭니다${S.bibleCat === 'character' || S.bibleCat === 'all' ? '(인물은 Soul 2 실사)' : ''}.\n${names.slice(0, 20).join(', ')}${names.length > 20 ? ` 외 ${names.length - 20}개` : ''}\n\n직접 올릴 항목은 먼저 카드에서 '사진: 직접 올리기'로 바꾸면 빠집니다.`)) return;
-    const n = await queuePhotos(photoTodo, cur);
+    const how = await askChoice('사진 한꺼번에 만들기', `${photoTodo.length}개 항목: ${names.slice(0, 20).join(', ')}${names.length > 20 ? ' …' : ''}\n항목마다 후보를 만들고 코디네이터가 한 장씩 확인해 추천 사진을 고릅니다.\n(Higgsfield 비용)`, [
+      { value: 'only', label: '추천만 받기', desc: '카드마다 후보와 추천 표시를 보고 내가 골라 적용합니다' },
+      { value: 'auto', label: '추천하고 자동 반영', desc: '추천 사진으로 (인물은 얼굴 고정·기준 사진까지) 바이블 적용까지 한 번에', primary: true }]);
+    if (!how) return;
+    const n = await queuePhotos(photoTodo, cur, null, how === 'auto');
     toast(n ? `${n}개 항목의 사진 후보를 만들고 있습니다. 카드에서 골라 주세요` : '이미 사진을 만들고 있는 항목뿐입니다');
     if (n) go('bible');
   });
@@ -9616,9 +9625,12 @@ async function renderProduction(ep, quietRefresh = false) {
   // PPL 메모가 들어온 뒤에도 그 전에 만든 컷이 남아 있으면 알려 준다(이미 생성된 컷은 비용 때문에 자동으로 다시 만들지 않음)
   const pplNotes = await q(S.sb.from('episode_notes').select('scene_no,content,created_at').eq('episode_id', ep.id).ilike('content', '%PPL%')).catch(() => []);
   try {
-    const chars = await q(S.sb.from('bible_entries').select('name,bible_versions(voice_id,status)').eq('series_id', S.seriesId).eq('category', 'character'));
-    S.noVoice = chars.filter(c => !(c.bible_versions || []).some(v => v.status === 'active' && v.voice_id)).map(c => c.name);
-  } catch { S.noVoice = []; }
+    const chars = await q(S.sb.from('bible_entries').select('name,category,origin,bible_versions(voice_id,image_paths,status)').eq('series_id', S.seriesId).in('category', ['character', 'prop', 'location', 'background']));
+    const act = c => (c.bible_versions || []).find(v => v.status === 'active');
+    S.noVoice = chars.filter(c => c.category === 'character' && !act(c)?.voice_id).map(c => c.name);
+    // 사진이 필요한 항목(인물·협찬)인데 바이블 기준 사진이 없는 것
+    S.noPhoto = chars.filter(c => (c.category === 'character' || c.origin === 'sponsor') && !(act(c)?.image_paths || []).length).map(c => c.name);
+  } catch { S.noVoice = []; S.noPhoto = []; }
   const G = Object.fromEntries(gen.map(r => [r.key, r.value]));
   const takes = cuts.length ? await q(S.sb.from('production_takes').select('*').in('cut_id', cuts.map(c => c.id)).order('take_no')) : [];
   const urls = await signTakeUrls(takes, cuts);
@@ -9705,7 +9717,9 @@ async function renderProduction(ep, quietRefresh = false) {
       : srTask.status === 'failed' ? pill('실패', 'bad') + ' ' + esc(srTask.error || '') : pill(srRes.verdict === 'pass' ? '통과' : `확인 ${srRes.issues.length}건`, srRes.verdict === 'pass' ? 'good' : 'warn') + ` <span class="quiet">${esc(srRes.summary || '')} · 씬 ${srRes.scenes}개${srRes.cuts ? ` · 컷 ${srRes.cuts}개` : ''} · ${fmt(srTask.finished_at)}</span>`}</summary>
       ${srRes?.issues?.length ? `<table style="margin-top:6px"><tr><th>씬</th><th>종류</th><th>원문</th><th>지금</th><th>고칠 곳</th></tr>${srRes.issues.map(i => `<tr><td style="white-space:nowrap">${esc(i.scene || '')}</td><td style="white-space:nowrap">${esc(i.type || '')}</td>
         <td class="quiet">${esc(i.original || '')}</td><td>${esc(i.now || '')}</td><td>${esc([i.who, i.fix].filter(Boolean).join(': '))}</td></tr>`).join('')}</table>` : ''}</details>` : ''}
-    ${S.noVoice?.length ? `<div class="msg" style="background:var(--accent-soft)">목소리가 정해지지 않은 인물: <b>${esc(S.noVoice.join(', '))}</b> — <a href="#bible" id="pVoice">바이블에서 한꺼번에 만들기</a></div>` : ''}
+    ${S.noVoice?.length || S.noPhoto?.length ? `<div class="msg" style="background:var(--accent-soft)"><b>바이블에 아직 없는 것</b> — 이대로 만들면 영상의 얼굴·목소리가 장면마다 달라질 수 있어요
+      ${S.noPhoto?.length ? `<div style="margin-top:4px">📷 사진이 정해지지 않은 인물·협찬: <b>${esc(S.noPhoto.join(', '))}</b> — <a href="#bible" data-bgo="photo">바이블에서 한꺼번에 만들기</a></div>` : ''}
+      ${S.noVoice?.length ? `<div style="margin-top:4px">🔊 목소리가 정해지지 않은 인물: <b>${esc(S.noVoice.join(', '))}</b> — <a href="#bible" data-bgo="voice">바이블에서 한꺼번에 만들기</a></div>` : ''}</div>` : ''}
     ${online.length ? '' : '<div class="msg err">켜져 있는 에이전트가 없습니다. 버튼을 눌러도 에이전트가 켜질 때까지 기다립니다.</div>'}
   </div>
 
@@ -9925,7 +9939,7 @@ function bindProduction(ep, ctx) {
   const again = () => renderProduction(ep).catch(e => toast('오류: ' + errText(e)));
   $('#pSet').onclick = e => { e.preventDefault(); go('settings'); };
   const pe = $('#pEdit'); if (pe) pe.onclick = () => go('edit');
-  const pv = $('#pVoice'); if (pv) pv.onclick = e => { e.preventDefault(); go('bible'); };
+  pane.querySelectorAll('[data-bgo]').forEach(a => a.onclick = e => { e.preventDefault(); S.bibleFocus = a.dataset.bgo; go('bible'); });
   $('#pWr').onclick = guard(async () => {
     if (hasOpen('writers_room')) return toast('작가실이 이미 일하고 있습니다');
     if (!confirm('작가실이 원고를 장소별 씬으로 나누고(한 씬 30초 이하), 흐름은 그대로 둔 채 감정선을 다듬은 정리본을 만듭니다.\n정리본을 확정하면 컷 설계까지 바로 이어집니다. 옆의 \'대본 감수\'로 원고와 정리본이 씬 순서대로 빠짐없이 맞는지 확인한 뒤 제작(생성)하세요.\n(Claude 비용, 한 화에 수백 원 수준)')) return;
