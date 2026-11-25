@@ -7633,7 +7633,8 @@ async function viewBible(main) {
   const vdsAll = entries.length ? await q(S.sb.from('voice_designs').select('*').in('entry_id', entries.map(e => e.id)).order('created_at', { ascending: false })) : [];
   fillVoiceRows(entries, cur, vdsAll).catch(e => console.warn('목소리 줄', e));
   const vds = vdsAll.filter(d => ['queued', 'ready', 'saving', 'failed'].includes(d.status) && vdsAll.find(x => x.entry_id === d.entry_id) === d);
-  const inherited = id => { const v = cur(id)?.voice_id; return v && !vdsAll.some(x => x.entry_id === id && x.voice_id === v) && vdsAll.some(x => x.voice_id === v); };
+  const inherited = id => { const e = entries.find(x => x.id === id); return !!(e?.same_as && entries.some(x => x.id === e.same_as) && cur(id)?.voice_id); };
+  S.vgroup = {}; entries.forEach(e => { const r = e.same_as && entries.some(x => x.id === e.same_as) ? e.same_as : e.id; S.vgroup[e.id] = entries.filter(x => x.id === r || x.same_as === r).map(x => x.id); });
   [...new Set(vds.map(d => d.entry_id))].filter(id => !inherited(id)).forEach(id => { const e = entries.find(x => x.id === id); if (e) openVoiceDesign(e, cur(e.id), false); });
   main.querySelectorAll('[data-bhist]').forEach(b => b.onclick = () => {
     const box = document.getElementById('bh-' + b.dataset.bhist);
@@ -7805,13 +7806,16 @@ async function openPhotoDesign(entry, cur, fresh) {
 const vdSample = full => { const name = full.replace(/\s*\(.*?\)\s*/g, '').trim(); return `안녕하세요, 저는 ${name}예요. 오늘 처음으로 무대에 서는 날이라 너무 떨려요. 그래도 여기까지 온 이유를 잊지 않을 거예요. 끝까지 해 볼게요. 지켜봐 주세요!`; };
 // 바이블 카드 '목소리' 줄: 지금 쓰는 목소리를 바로 들을 수 있게(재생기) + 만드는 중·실패 이유를 그 자리에서
 async function fillVoiceRows(entries, cur, vds) {
-  const latest = {}; vds.forEach(d => { if (!latest[d.entry_id]) latest[d.entry_id] = d; });
-  const inUse = {}, from = {};   // 지금 바이블 목소리(voice_id)를 만든 디자인 → 그 소리 파일. 동일인은 목소리를 정한 쪽 디자인을 같이 쓴다
-  const root = e => e.same_as || e.id;
-  entries.forEach(e => { const vid = cur(e.id)?.voice_id; if (!vid) return;
-    const grp = entries.filter(x => root(x) === root(e)).map(x => x.id);
-    const d = vds.find(x => x.entry_id === e.id && x.voice_id === vid) || vds.find(x => grp.includes(x.entry_id) && x.voice_id === vid);
-    if (d) { inUse[e.id] = d.preview_path || (d.previews || []).find(p => p.generated_voice_id === d.chosen_generated_id)?.path || null; if (d.entry_id !== e.id) from[e.id] = d.entry_id; } });
+  // 동일인은 목소리 하나: 관리는 언제나 '원래 인물' 카드에서(어느 카드에서 만들었든). 다른 모습 카드는 듣기만.
+  const root = e => (e.same_as && entries.some(x => x.id === e.same_as)) ? e.same_as : e.id;
+  const grpOf = e => entries.filter(x => root(x) === root(e)).map(x => x.id);
+  const latest = {}; entries.forEach(e => { const g = grpOf(e); latest[e.id] = vds.find(d => g.includes(d.entry_id)); });
+  const inUse = {}, from = {};
+  entries.forEach(e => { const vid = cur(e.id)?.voice_id;
+    if (vid && root(e) !== e.id) from[e.id] = root(e);
+    if (!vid) return;
+    const g = grpOf(e), d = vds.find(x => g.includes(x.entry_id) && x.voice_id === vid);
+    if (d) inUse[e.id] = d.preview_path || (d.previews || []).find(p => p.generated_voice_id === d.chosen_generated_id)?.path || null; });
   const paths = Object.values(inUse).filter(Boolean);
   const urls = {};
   if (paths.length) { const { data } = await S.sb.storage.from('takes').createSignedUrls(paths, 3600); (data || []).forEach(x => { if (x.signedUrl) urls[x.path] = x.signedUrl; }); }
@@ -7825,7 +7829,7 @@ async function fillVoiceRows(entries, cur, vds) {
       el.parentElement.querySelectorAll('[data-vd],[data-vlisten],[data-vnew],label').forEach(x => x.remove());
       [...el.parentElement.querySelectorAll('span.quiet')].filter(x => !el.contains(x)).forEach(x => x.remove());
       document.getElementById('vd-' + e.id)?.replaceChildren();
-      el.innerHTML = `${u ? `<audio controls preload="none" src="${esc(u)}"></audio>` : ''}<span class="quiet">동일인 <b>${esc(src?.name || '')}</b>와 같은 목소리 · 바꾸려면 ${esc(src?.name || '')} 카드에서</span>`;
+      el.innerHTML = `${u ? `<audio controls preload="none" src="${esc(u)}"></audio>` : ''}<span class="quiet">원래 인물 <b>${esc(src?.name || '')}</b> 카드와 같은 목소리 · 바꾸거나 새로 만들기는 ${esc(src?.name || '')} 카드에서</span>`;
       return;
     }
     el.innerHTML = `${u ? `<audio controls preload="none" src="${esc(u)}" title="지금 바이블에 적용된 목소리"></audio>`
@@ -7864,7 +7868,8 @@ async function recommendVoice(entry, cur) {
 async function openVoiceDesign(entry, cur, fresh, listen) {
   const box = document.getElementById('vd-' + entry.id); if (!box) return;
   S.vdTimer = S.vdTimer || {}; clearTimeout(S.vdTimer[entry.id]);
-  const [d] = await q(S.sb.from('voice_designs').select('*').eq('entry_id', entry.id).order('created_at', { ascending: false }).limit(1));
+  const grp = (S.vgroup || {})[entry.id] || [entry.id];   // 동일인 카드에서 만든 목소리도 원래 인물 상자에서 보이게
+  const [d] = await q(S.sb.from('voice_designs').select('*').in('entry_id', grp).order('created_at', { ascending: false }).limit(1));
   // 적용이 끝난 디자인(linked)은 다시 입력 칸으로 돌아가지 않고 '목소리 듣기'(지금 목소리 + 후보 바꾸기)로 보여 준다
   const showForm = fresh || !d;
   S.vdBusy = S.vdBusy || {};
