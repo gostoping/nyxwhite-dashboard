@@ -7341,7 +7341,7 @@ async function viewBible(main) {
           ${e.category === 'character' && (c?.image_paths || []).length ? `<button class="btn small only-up" data-pd="${esc(e.id)}" title="올린 사진으로 Soul ID를 학습해 같은 얼굴의 기준 사진을 만듭니다">${c?.soul_id ? '얼굴 다시 고정' : '이 사진으로 얼굴 고정'}</button>` : ''}</div></div>` : ''}
         ${['character', 'voice'].includes(e.category) ? `<div class="brow"><span class="blbl">목소리</span><div class="bbtns">
           <span class="vlive" id="vlive-${esc(e.id)}"></span>
-          ${c?.voice_id ? `<button class="btn small" data-vlisten="${esc(e.id)}">후보 보기·바꾸기</button><button class="btn small" data-vnew="${esc(e.id)}" title="기본(젊고 나긋한 사람 목소리) + 이 인물 감정선으로 새로 추천해 바로 넣습니다">🔄 새로 만들기</button>`
+          ${c?.voice_id ? `<button class="btn small" data-vlisten="${esc(e.id)}">후보 보기·바꾸기</button>`
             : e.same_as || entries.some(x => x.same_as === e.id) ? `<span class="quiet">동일인 카드 중 한쪽에서 목소리를 정하면 다른 쪽에도 같이 들어갑니다</span>` : `<span class="quiet">추천 목소리를 자동으로 만들어 넣습니다(후보 1번 먼저 적용)</span>`}
           <button class="btn small" data-vd="${esc(e.id)}">${c?.voice_id ? '목소리 다시 디자인' : '목소리 디자인'}</button>
           <label class="btn small" style="margin:0" title="녹음 파일(30초~2분, 잡음 적게)을 올리면 ElevenLabs가 그 목소리로 만들어 바로 바이블에 넣습니다. 사용 권리가 있는 목소리만 올려 주세요">목소리 파일 올리기<input type="file" accept="audio/*,.m4a,.mp3,.wav" data-vup="${esc(e.id)}" hidden></label></div></div>` : ''}
@@ -7609,7 +7609,6 @@ async function viewBible(main) {
     if (locked(e) && new Date(latest.created_at) < lockAt(e)) return;
     openPhotoDesign(e, cur(e.id), false);
   });
-  main.querySelectorAll('[data-vnew]').forEach(b => b.onclick = guard(() => { const e = entries.find(x => x.id === b.dataset.vnew); return recommendVoice(e, cur(e.id)); }));
   main.querySelectorAll('[data-vlisten]').forEach(b => b.onclick = () => {
     const e = entries.find(x => x.id === b.dataset.vlisten); openVoiceDesign(e, cur(e.id), false, true);
   });
@@ -7921,8 +7920,15 @@ async function openVoiceDesign(entry, cur, fresh, listen) {
       ${on ? '' : `<button class="btn small ${linked ? '' : 'primary'}" data-pick="${esc(p.generated_voice_id)}">${linked ? '이 후보로 바꾸기' : '이 목소리로 정하기'}</button>`}</div>`; }).join('') : ''}
     ${d.status === 'saved' ? `<p>ElevenLabs에 저장됐습니다 (<code>${esc(d.voice_id)}</code>). 바이블에 적용하면 감독·목소리 고정 작업이 이 목소리를 씁니다.</p>
       <button class="btn small primary" id="vdLink-${entry.id}">바이블에 적용</button>` : ''}</div>`;
-  document.getElementById('vdNew-' + entry.id).onclick = () => openVoiceDesign(entry, cur, true);
-  if (linked) document.getElementById('vdNew-' + entry.id).textContent = '다시 디자인';
+  // 고정된 목소리(바이블 적용됨) 상자: '새로 만들기'는 기본(젊고 나긋한 사람 목소리)+감정선으로 새로 추천해 바로 넣는다. 설명을 직접 쓰려면 '설명 직접 쓰기'
+  const vnew = document.getElementById('vdNew-' + entry.id);
+  if (linked) {
+    vnew.textContent = '🔄 새로 만들기'; vnew.classList.add('primary');
+    vnew.title = '기본(젊고 나긋한 사람 목소리) + 이 인물 감정선으로 새로 추천해 후보 1번을 바로 넣습니다';
+    vnew.onclick = guard(() => recommendVoice(entry, cur));
+    vnew.insertAdjacentHTML('afterend', `<button class="btn small" id="vdOwn-${entry.id}" title="목소리 설명을 직접 써서 후보 3개를 만듭니다">설명 직접 쓰기</button>`);
+    document.getElementById('vdOwn-' + entry.id).onclick = () => openVoiceDesign(entry, cur, true);
+  } else vnew.onclick = () => openVoiceDesign(entry, cur, true);
   box.querySelectorAll('[data-pick]').forEach(b => b.onclick = guard(async () => {
     await q(S.sb.from('voice_designs').update({ chosen_generated_id: b.dataset.pick, status: 'saving' }).eq('id', d.id));
     await q(S.sb.from('pipeline_tasks').insert({ kind: 'voice_save', payload: { design_id: d.id } }));
