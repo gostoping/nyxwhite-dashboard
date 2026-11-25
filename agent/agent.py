@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.31.0"
+VERSION = "1.32.0"
 
 import base64
 import glob
@@ -995,6 +995,7 @@ def director_system(ctx):
 - 씬 번호는 대본에 나온 순서대로 1부터. 컷은 4~15초. 대사는 한 글자도 바꾸지 않는다.
 - 표정은 2~3초마다 바뀌도록 expression_beats를 컷 길이 전체에 빈틈없이 적는다.
 - 프롬프트: 인물 고정 묘사(바이블), 의상, 장소, 조명, 카메라, 시간대별 동작·표정(0-3s, 3-5s …), 대사(화자와 한국어 원문, 톤).
+- 목소리는 Seedance가 영상과 함께 만든다(대표 결정): 프롬프트의 대사마다 화자의 목소리를 영어로 적는다 — 기본은 "young adult in their early-to-mid 20s, soft gentle natural human voice, natural Korean delivery, sentence endings softly trailing off" + 이 대사의 감정 변화(작게 떨리며 시작 → 끝에서 커짐 등). 같은 인물은 모든 컷에서 같은 목소리 문장을 쓴다.
 - 소리: 대사와 현장음만. 배경음악은 넣지 않는다 → 프롬프트 끝에 "No background music, no score. Dialogue and natural ambient sound only." 를 반드시 붙인다(편집에서 음악을 따로 깐다).
 - 화면 비율 {asp}. 자막·글자를 화면에 넣지 않는다(화면 글자가 대본에 있으면 summary에만 적는다).
 - reference_names에는 이 컷 화면에 나오는 바이블 항목 이름을 바이블 표기 그대로(괄호·수식어 붙이지 말 것): 인물 최대 3, 장소 또는 배경 최대 1, PPL·중요 소품 최대 1. 사진이 없는 항목도 넣는다(제작 때 임시 기준 사진을 만들어 고정한다).
@@ -2452,9 +2453,11 @@ def t_prep_cut(t):
         rpc("agent_update_cut", p_token=TOKEN, p_id=c["id"], p={"prep_status": "preparing"})
         base = f"{sid}/E{enum:02d}/S{int(c['scene_no']):02d}/prep/C{int(c['cut_no']):02d}_{uuid.uuid4().hex[:6]}"
         problems = []
-        # ② 대사 미리 듣기
+        # ② 대사 미리 듣기 — 대표 결정(11/25): 목소리는 Seedance가 영상과 함께 만든다 → 미리 듣기(ElevenLabs)는 만들지 않는다
         lines = c.get("voice_lines") or parse_dialogue(c.get("dialogue"))
-        for i, ln in enumerate(lines):
+        if (gen.get("voice_source") or "seedance") == "seedance":
+            lines = [{k: ln.get(k) for k in ("speaker", "text", "direction", "tags") if ln.get(k)} for ln in lines]
+        for i, ln in (enumerate(lines) if (gen.get("voice_source") or "seedance") != "seedance" else []):
             if (gen.get("dialogue_tool") or "elevenlabs") == "none":   # 설정: 대사 도구 '쓰지 않음'
                 ln["error"] = "설정에서 대사 도구를 '쓰지 않음'으로 해 두어 미리 듣기를 만들지 않았습니다"
                 continue
@@ -2838,6 +2841,16 @@ def _generate(t):
     else:
         log("영상이 커서 미리보기 올리기를 건너뜀(로컬·윈도우에는 저장됨)")
     rpc("agent_save_take", p_token=TOKEN, p={"id": take_id, "files": {**pub, PLATFORM: files}})
+    # 제작에서 만든 목소리를 바이블에 저장(대표 결정): 한 사람만 말하는 컷의 대사 소리를 그 인물 카드에(처음 생긴 것만, 대표가 바꾼 것은 덮지 않음)
+    if pub.get("voice_preview"):
+        spk = {re.sub(r"\s*\(.*?\)\s*", "", (ln.get("speaker") or "")).strip() for ln in (cut.get("voice_lines") or parse_dialogue(cut.get("dialogue")))}
+        spk.discard("")
+        if len(spk) == 1:
+            try:
+                if rpc("agent_bible_voice_sample", p_token=TOKEN, p_episode=ep, p_name=next(iter(spk)), p_path="takes:" + pub["voice_preview"]):
+                    notify(f"{next(iter(spk))} 목소리를 바이블에 저장", f"{cut['code']} 영상의 목소리를 인물 카드에 넣었습니다(다른 컷 목소리로 바꾸려면 제작 탭 컷의 '이 목소리를 바이블에')")
+            except Exception as ex:
+                log(f"바이블 목소리 저장 실패: {ex}")
     if gen.get("auto_review"):   # 설정에서 자동 감수를 켰을 때만(예전 방식)
         rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "reviewing"})
         try:

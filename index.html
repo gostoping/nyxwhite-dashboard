@@ -391,7 +391,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.31.0"
+VERSION = "1.32.0"
 
 import base64
 import glob
@@ -1376,6 +1376,7 @@ def director_system(ctx):
 - 씬 번호는 대본에 나온 순서대로 1부터. 컷은 4~15초. 대사는 한 글자도 바꾸지 않는다.
 - 표정은 2~3초마다 바뀌도록 expression_beats를 컷 길이 전체에 빈틈없이 적는다.
 - 프롬프트: 인물 고정 묘사(바이블), 의상, 장소, 조명, 카메라, 시간대별 동작·표정(0-3s, 3-5s …), 대사(화자와 한국어 원문, 톤).
+- 목소리는 Seedance가 영상과 함께 만든다(대표 결정): 프롬프트의 대사마다 화자의 목소리를 영어로 적는다 — 기본은 "young adult in their early-to-mid 20s, soft gentle natural human voice, natural Korean delivery, sentence endings softly trailing off" + 이 대사의 감정 변화(작게 떨리며 시작 → 끝에서 커짐 등). 같은 인물은 모든 컷에서 같은 목소리 문장을 쓴다.
 - 소리: 대사와 현장음만. 배경음악은 넣지 않는다 → 프롬프트 끝에 "No background music, no score. Dialogue and natural ambient sound only." 를 반드시 붙인다(편집에서 음악을 따로 깐다).
 - 화면 비율 {asp}. 자막·글자를 화면에 넣지 않는다(화면 글자가 대본에 있으면 summary에만 적는다).
 - reference_names에는 이 컷 화면에 나오는 바이블 항목 이름을 바이블 표기 그대로(괄호·수식어 붙이지 말 것): 인물 최대 3, 장소 또는 배경 최대 1, PPL·중요 소품 최대 1. 사진이 없는 항목도 넣는다(제작 때 임시 기준 사진을 만들어 고정한다).
@@ -2833,9 +2834,11 @@ def t_prep_cut(t):
         rpc("agent_update_cut", p_token=TOKEN, p_id=c["id"], p={"prep_status": "preparing"})
         base = f"{sid}/E{enum:02d}/S{int(c['scene_no']):02d}/prep/C{int(c['cut_no']):02d}_{uuid.uuid4().hex[:6]}"
         problems = []
-        # ② 대사 미리 듣기
+        # ② 대사 미리 듣기 — 대표 결정(11/25): 목소리는 Seedance가 영상과 함께 만든다 → 미리 듣기(ElevenLabs)는 만들지 않는다
         lines = c.get("voice_lines") or parse_dialogue(c.get("dialogue"))
-        for i, ln in enumerate(lines):
+        if (gen.get("voice_source") or "seedance") == "seedance":
+            lines = [{k: ln.get(k) for k in ("speaker", "text", "direction", "tags") if ln.get(k)} for ln in lines]
+        for i, ln in (enumerate(lines) if (gen.get("voice_source") or "seedance") != "seedance" else []):
             if (gen.get("dialogue_tool") or "elevenlabs") == "none":   # 설정: 대사 도구 '쓰지 않음'
                 ln["error"] = "설정에서 대사 도구를 '쓰지 않음'으로 해 두어 미리 듣기를 만들지 않았습니다"
                 continue
@@ -3219,6 +3222,16 @@ def _generate(t):
     else:
         log("영상이 커서 미리보기 올리기를 건너뜀(로컬·윈도우에는 저장됨)")
     rpc("agent_save_take", p_token=TOKEN, p={"id": take_id, "files": {**pub, PLATFORM: files}})
+    # 제작에서 만든 목소리를 바이블에 저장(대표 결정): 한 사람만 말하는 컷의 대사 소리를 그 인물 카드에(처음 생긴 것만, 대표가 바꾼 것은 덮지 않음)
+    if pub.get("voice_preview"):
+        spk = {re.sub(r"\s*\(.*?\)\s*", "", (ln.get("speaker") or "")).strip() for ln in (cut.get("voice_lines") or parse_dialogue(cut.get("dialogue")))}
+        spk.discard("")
+        if len(spk) == 1:
+            try:
+                if rpc("agent_bible_voice_sample", p_token=TOKEN, p_episode=ep, p_name=next(iter(spk)), p_path="takes:" + pub["voice_preview"]):
+                    notify(f"{next(iter(spk))} 목소리를 바이블에 저장", f"{cut['code']} 영상의 목소리를 인물 카드에 넣었습니다(다른 컷 목소리로 바꾸려면 제작 탭 컷의 '이 목소리를 바이블에')")
+            except Exception as ex:
+                log(f"바이블 목소리 저장 실패: {ex}")
     if gen.get("auto_review"):   # 설정에서 자동 감수를 켰을 때만(예전 방식)
         rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "reviewing"})
         try:
@@ -7378,7 +7391,7 @@ async function viewBible(main) {
       <div class="brow"><span class="blbl">한꺼번에</span><div class="bbtns">
         ${showPhotoBtn ? `<button class="btn small" id="bphotos" title="적용된 묘사는 있고 사진이 없는 항목의 사진 후보를 만듭니다. '직접 올리기' 항목은 빠집니다(인물은 Soul 2 실사)">${catLabel ? esc(catLabel) + ' ' : ''}사진 만들기 (${photoTodo.length})</button>` : ''}
         <button class="btn small" id="bcoord" title="코디네이터가 지금 적용된 모든 항목의 묘사·영어 프롬프트·대본 일치를 감수하고 카드에 기록합니다(항목당 수십 원)">전체 감수 다시 하기</button>
-        <button class="btn small" id="bcast" title="목소리가 아직 없는 인물만 추천해 바로 넣습니다(이미 정한 목소리는 그대로)">목소리 없는 인물 추천받기</button></div></div>
+</div></div>
       <div class="brow"><span class="blbl">설정</span><div class="bbtns">
         <button class="btn small" id="hdrProp" title="협찬(PPL) 소품을 사진과 함께 넣으면 작가실이 세게 보일 화·씬을 추천합니다">+ 협찬 소품</button>
         <button class="btn small" id="hdrLoc" title="협찬(PPL) 장소를 사진과 함께 넣으면 작가실이 세게 보일 화·씬을 추천합니다">+ 협찬 장소</button>
@@ -7484,15 +7497,7 @@ async function viewBible(main) {
           <label class="btn small only-up" style="margin:0" title="외부에서 구한 사진을 기준 사진으로 넣고 바로 적용합니다. 코디네이터가 사진을 보고 묘사·영어 프롬프트를 자동으로 씁니다">사진 올리기<input type="file" accept="image/*" multiple hidden data-pup="${esc(e.id)}"></label>
           ${e.category === 'character' && (c?.image_paths || []).length ? `<button class="btn small only-up" data-pd="${esc(e.id)}" title="올린 사진으로 Soul ID를 학습해 같은 얼굴의 기준 사진을 만듭니다">${c?.soul_id ? '얼굴 다시 고정' : '이 사진으로 얼굴 고정'}</button>` : ''}</div></div>` : ''}
         ${['character', 'voice'].includes(e.category) ? `<div class="brow"><span class="blbl">목소리</span><div class="bbtns">
-          <span class="vlive" id="vlive-${esc(e.id)}">${c?.voice_id ? '' : '<span class="quiet">아직 목소리가 없어요</span>'}</span>
-          ${c?.voice_id ? `<button class="btn small" data-vlisten="${esc(e.id)}" title="만들어 둔 후보를 들어 보고 바꿉니다">다른 목소리 고르기</button>`
-            : `<button class="btn small primary" data-vrec="${esc(e.id)}" title="대본과 인물 설정을 읽고 어울리는 목소리를 만들어 바로 넣습니다(젊고 나긋한 사람 목소리 기본)">목소리 추천받기</button>`}
-          <details class="cmore vmore"><summary title="다른 방법">⋯</summary><div>
-            ${c?.voice_id ? `<button class="btn small" data-vrec="${esc(e.id)}">새로 추천받기</button>` : ''}
-            <button class="btn small" data-vd="${esc(e.id)}">원하는 느낌을 적어서 만들기</button>
-            <label class="btn small" style="margin:0" title="녹음 파일(30초~2분, 잡음 적게). 본인 목소리이거나 쓸 권리가 있는 녹음만 올려 주세요">내 녹음 파일로 만들기<input type="file" accept="audio/*,.m4a,.mp3,.wav" data-vup="${esc(e.id)}" hidden></label>
-            ${c?.voice_id ? `<button class="btn small" data-unapply="voice" data-ue="${esc(e.id)}">이 목소리 빼기</button>` : ''}
-          </div></details></div></div>` : ''}
+          <span class="vlive" data-vsample="${esc(c?.voice_path || '')}">${c?.voice_path ? '' : '<span class="quiet">아직 없어요 — 이 인물이 말하는 영상을 만들면 그 목소리가 여기 저장됩니다</span>'}</span></div></div>` : ''}
       <div id="be-${esc(e.id)}"></div>
       <div id="pd-${esc(e.id)}"></div>
       <div id="vd-${esc(e.id)}"></div>
@@ -7798,12 +7803,15 @@ async function viewBible(main) {
   main.querySelectorAll('[data-vd]').forEach(b => b.onclick = () => {
     const e = entries.find(x => x.id === b.dataset.vd); openVoiceDesign(e, cur(e.id), true);
   });
-  const vdsAll = entries.length ? await q(S.sb.from('voice_designs').select('*').in('entry_id', entries.map(e => e.id)).order('created_at', { ascending: false })) : [];
-  fillVoiceRows(entries, cur, vdsAll).catch(e => console.warn('목소리 줄', e));
-  const vds = vdsAll.filter(d => ['queued', 'ready', 'saving', 'failed'].includes(d.status) && vdsAll.find(x => x.entry_id === d.entry_id) === d);
-  const inherited = id => { const e = entries.find(x => x.id === id); return !!(e?.same_as && entries.some(x => x.id === e.same_as) && cur(id)?.voice_id); };
-  S.vgroup = {}; entries.forEach(e => { const r = e.same_as && entries.some(x => x.id === e.same_as) ? e.same_as : e.id; S.vgroup[e.id] = entries.filter(x => x.id === r || x.same_as === r).map(x => x.id); });
-  [...new Set(vds.map(d => d.entry_id))].filter(id => !inherited(id)).forEach(id => { const e = entries.find(x => x.id === id); if (e) openVoiceDesign(e, cur(e.id), false); });
+  // 목소리: Seedance가 영상과 함께 만든 목소리를 제작에서 저장한 것(대표 결정 11/25). 바이블에서 만들지 않는다
+  const vsEls = [...main.querySelectorAll('[data-vsample]')].filter(x => x.dataset.vsample);
+  if (vsEls.length) {
+    const all = [...new Set(vsEls.map(x => x.dataset.vsample))];
+    const tp = all.filter(p => p.startsWith('takes:')).map(p => p.slice(6)), bp = all.filter(p => !p.startsWith('takes:'));
+    const [ta, ba] = await Promise.all([tp.length ? S.sb.storage.from('takes').createSignedUrls(tp, 3600) : { data: [] }, bp.length ? S.sb.storage.from(BUCKET).createSignedUrls(bp, 3600) : { data: [] }]);
+    const u = {}; (ta.data || []).forEach(x => { if (x.signedUrl) u['takes:' + x.path] = x.signedUrl; }); (ba.data || []).forEach(x => { if (x.signedUrl) u[x.path] = x.signedUrl; });
+    vsEls.forEach(x => { const s = u[x.dataset.vsample]; x.innerHTML = s ? `<audio controls preload="none" src="${esc(s)}"></audio><span class="quiet">제작한 영상에서 저장된 목소리</span>` : '<span class="quiet">저장된 목소리를 불러오지 못했어요</span>'; });
+  }
   main.querySelectorAll('[data-bhist]').forEach(b => b.onclick = () => {
     const box = document.getElementById('bh-' + b.dataset.bhist);
     if (box.innerHTML) { box.innerHTML = ''; return; }
@@ -8158,16 +8166,13 @@ function openBibleEditor({ entry, base, urls, fromId }) {
     ${!isNew && entry.category === 'character' && base?.soul_id ? `<label class="row" style="gap:6px;margin-top:8px"><input type="checkbox" id="bredo" style="width:auto"> 저장한 뒤 이 묘사로 <b>실사 사진 후보 4장 새로 만들기</b> <span class="quiet">(얼굴이 고정돼 있어 체크할 때만 다시 만듭니다 · Higgsfield 비용)</span></label>` : ''}
     <div id="bmusicBox" ${(entry?.category || (isNew ? S.bibleCat : '')) === 'music' ? '' : 'hidden'}><label>적용 화 (배경음악: 쉼표로 · 비우면 전체 화)</label>
       <input id="bmeps" value="${esc([...new Set((entry?.appears || []).map(a => a.ep))].join(', '))}" placeholder="예: 1, 2, 5"></div>
-    <label>목소리 ID (음성 도구에서 고정한 목소리 번호, 선택)</label><input id="bvid" value="${esc(base?.voice_id || '')}">
+
     <label>기준 사진${imgs.length ? ': 체크를 풀면 이번 버전에서 뺍니다' : ' (정면·측면·전신 권장)'}</label>
     ${imgs.length ? `<div class="thumbs">${imgs.map((p, i) => `<label class="keep"><input type="checkbox" data-keep="${i}" checked>${urls[p]
       ? `<img src="${esc(urls[p])}" alt="">` : '<span class="quiet">사진</span>'}</label>`).join('')}</div>` : ''}
     <input type="file" id="bimg" accept="image/*" multiple>
     ${PHOTO_CATS.includes(entry?.category || S.bibleCat) || isNew ? `<label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" id="bauto" style="width:auto">
       실사 사진을 보고 고정 묘사·영어 프롬프트를 코디네이터가 다시 쓰기 <span class="quiet">(새 사진을 넣으면 자동으로 켜짐)</span></label>` : ''}
-    <label>목소리 샘플 (선택)</label>
-    ${base?.voice_path ? `<label class="quiet" style="margin:0 0 6px"><input type="checkbox" id="bkeepv" style="width:auto" checked> 기존 샘플 유지</label>` : ''}
-    <input type="file" id="bvoice" accept="audio/*">
     <label>바꾸는 이유 · 바꿀 내용 <span class="quiet">— 여기에 적은 요청은 작가실이 묘사와 영어 프롬프트에 반영합니다(묘사 칸을 직접 고치지 않아도 됨)</span></label><input id="breason" value="${esc(fromId ? base?.change_reason || '' : '')}" placeholder="예: 눈매를 더 날카롭게, 머리를 어깨 길이 갈색으로">
     <div class="row" style="margin-top:10px"><button class="btn primary" id="bsave">저장하고 바로 적용</button><button class="btn" id="bcancel">취소</button></div></div>`;
   $('#bcancel').onclick = () => { host.innerHTML = ''; };
@@ -8186,7 +8191,7 @@ function openBibleEditor({ entry, base, urls, fromId }) {
     }
     if (!description) description = '(작가실이 사진을 보고 쓰는 중) ' + ($('#bsum').value.trim() || $('#bname')?.value.trim() || entry?.name || '');
     if (isNew && !$('#bname').value.trim()) return toast('이름을 적어 주세요');
-    const files = [...$('#bimg').files], voice = $('#bvoice').files[0];
+    const files = [...$('#bimg').files], voice = null;   // 목소리는 제작(Seedance)에서 저장된다 — 바이블에서 올리지 않음
     if (files.some(f => f.size > 15e6) || (voice && voice.size > 30e6)) return toast('파일이 너무 큽니다 (사진 15MB, 음성 30MB까지)');
     const btn = $('#bsave'); btn.disabled = true; btn.textContent = '저장 중…';
     try {
@@ -8210,9 +8215,9 @@ function openBibleEditor({ entry, base, urls, fromId }) {
       const kept = imgs.filter((_, i) => document.querySelector(`[data-keep="${i}"]`)?.checked);
       const added = [];
       for (const f of files) added.push(await uploadBibleFile(entryId, f));
-      const voicePath = voice ? await uploadBibleFile(entryId, voice) : ($('#bkeepv')?.checked ? base.voice_path : null);
+      const voicePath = base?.voice_path || null;
       const v = await q(S.sb.from('bible_versions').insert({
-        entry_id: entryId, description, details: $('#bdet').value.trim() || null, voice_id: $('#bvid').value.trim() || null, soul_id: base?.soul_id || null,
+        entry_id: entryId, description, details: $('#bdet').value.trim() || null, voice_id: base?.voice_id || null, soul_id: base?.soul_id || null,
         image_paths: [...kept, ...added], voice_path: voicePath, change_reason: $('#breason').value.trim() || null, status: 'proposed',
       }).select('id,version_no').single());
       await q(S.sb.rpc('activate_bible_version', { p_id: v.id }));
@@ -9658,7 +9663,7 @@ async function renderProduction(ep, quietRefresh = false) {
   try {
     const chars = await q(S.sb.from('bible_entries').select('name,category,origin,bible_versions(voice_id,image_paths,status)').eq('series_id', S.seriesId).in('category', ['character', 'prop', 'location', 'background']));
     const act = c => (c.bible_versions || []).find(v => v.status === 'active');
-    S.noVoice = chars.filter(c => c.category === 'character' && !act(c)?.voice_id).map(c => c.name);
+    S.noVoice = [];   // 목소리는 Seedance가 영상과 함께 만든다(바이블에서 미리 정하지 않음)
     // 사진이 필요한 항목(인물·협찬)인데 바이블 기준 사진이 없는 것
     S.noPhoto = chars.filter(c => (c.category === 'character' || c.origin === 'sponsor') && !(act(c)?.image_paths || []).length).map(c => c.name);
   } catch { S.noVoice = []; S.noPhoto = []; }
@@ -9711,7 +9716,7 @@ async function renderProduction(ep, quietRefresh = false) {
     scr: p => btn('pScr', srBusy ? '대본 감수 중…' : '대본 감수', versions.length > 1 && !srBusy, p),
     avid: () => afterBtn('pAVid', 'video', '영상 감수'), avoi: () => afterBtn('pAVoi', 'voice', '음성 감수'), aemo: () => afterBtn('pAEmo', 'emotion', '감정 감수'),
     prep: p => { const n = toReview.filter(c => ['none', 'failed', 'fix'].includes(c.prep_status)).length;
-      return n ? btn('pPrep', `사진·목소리 준비 (${n}컷)`, !busyKinds.has('prep_cut'), p) : ''; },
+      return n ? btn('pPrep', `장면 사진 준비 (${n}컷)`, !busyKinds.has('prep_cut'), p) : ''; },
     dir: p => btn('pDir', `컷 ${cuts.length ? '다시 설계' : '설계'}`, !!confirmed, p),
     ap: p => designedCost ? btn('pApproveAll', `승인 대기 컷 전체 생성 · 예상 ${usdKrw(designedCost, rate)}`, true, p) : '',
     ed: p => passed ? btn('pEdit', `편집실 열기 (통과 ${passed}컷)`, true, p) : '',
@@ -9755,7 +9760,7 @@ async function renderProduction(ep, quietRefresh = false) {
       : srTask.status === 'failed' ? pill('실패', 'bad') + ' ' + esc(srTask.error || '') : pill(srRes.verdict === 'pass' ? '통과' : `확인 ${srRes.issues.length}건`, srRes.verdict === 'pass' ? 'good' : 'warn') + ` <span class="quiet">${esc(srRes.summary || '')} · 씬 ${srRes.scenes}개${srRes.cuts ? ` · 컷 ${srRes.cuts}개` : ''} · ${fmt(srTask.finished_at)}</span>`}</summary>
       ${srRes?.issues?.length ? `<table style="margin-top:6px"><tr><th>씬</th><th>종류</th><th>원문</th><th>지금</th><th>고칠 곳</th></tr>${srRes.issues.map(i => `<tr><td style="white-space:nowrap">${esc(i.scene || '')}</td><td style="white-space:nowrap">${esc(i.type || '')}</td>
         <td class="quiet">${esc(i.original || '')}</td><td>${esc(i.now || '')}</td><td>${esc([i.who, i.fix].filter(Boolean).join(': '))}</td></tr>`).join('')}</table>` : ''}</details>` : ''}
-    ${S.noVoice?.length || S.noPhoto?.length ? `<div class="msg" style="background:var(--accent-soft)"><b>바이블에 아직 없는 것</b> — 이대로 만들면 영상의 얼굴·목소리가 장면마다 달라질 수 있어요
+    ${S.noVoice?.length || S.noPhoto?.length ? `<div class="msg" style="background:var(--accent-soft)"><b>바이블에 아직 없는 것</b> — 이대로 만들면 영상의 얼굴이 장면마다 달라질 수 있어요
       ${S.noPhoto?.length ? `<div style="margin-top:4px">📷 사진이 정해지지 않은 인물·협찬: <b>${esc(S.noPhoto.join(', '))}</b> — <a href="#bible" data-bgo="photo">바이블에서 한꺼번에 만들기</a></div>` : ''}
       ${S.noVoice?.length ? `<div style="margin-top:4px">🔊 목소리가 정해지지 않은 인물: <b>${esc(S.noVoice.join(', '))}</b> — <a href="#bible" data-bgo="voice">바이블에서 한꺼번에 만들기</a></div>` : ''}</div>` : ''}
     ${online.length ? '' : '<div class="msg err">켜져 있는 에이전트가 없습니다. 버튼을 눌러도 에이전트가 켜질 때까지 기다립니다.</div>'}
@@ -9866,7 +9871,7 @@ function sceneCard(no, cs, takes, urls, pkg, rate, hasWin, isOpen, info, last) {
   </details>`;
 }
 
-const PREP = { none: ['준비 전', ''], preparing: ['준비 중', 'warn'], ready: ['사진·목소리 확인됨', 'good'], fix: ['감수 지적 있음', 'bad'], failed: ['준비 실패', 'bad'] };
+const PREP = { none: ['준비 전', ''], preparing: ['준비 중', 'warn'], ready: ['장면 사진 준비됨', 'good'], fix: ['감수 지적 있음', 'bad'], failed: ['준비 실패', 'bad'] };
 // 컷 설계 ②③: 대사 미리 듣기 + 장면 사진(첫·끝) + 사전 감수
 function prepBlock(c, urls) {
   const ff = c.frame_first || {}, fl = c.frame_last || {}, pr = c.prep_review || {};
@@ -9877,12 +9882,11 @@ function prepBlock(c, urls) {
   const frame = (f, label) => f.path && urls[f.path] ? `<a href="${esc(urls[f.path])}" target="_blank" class="kf"><img src="${esc(urls[f.path])}"><span>${label}</span></a>`
     : f.status === 'failed' ? `<div class="kf ph" title="${esc(f.error || '')}">${label}<br>실패</div>` : f.prompt ? `<div class="kf ph">${label}<br>${c.prep_status === 'preparing' ? '<span class="spin"></span>' : '대기'}</div>` : '';
   const iss = [...((pr.video || {}).issues || []).map(i => '영상감수: ' + i), ...((pr.emotion || {}).issues || []).map(i => '감정감수: ' + i), ...(pr.problems || [])].filter(Boolean);
-  return `<div class="prep"><div class="row" style="gap:6px"><b style="font-size:13px">사진·목소리</b>${pill(pl, pk)}${lines.length ? `<span class="quiet">대사 ${heard}/${lines.length}줄 들을 수 있음</span>` : ''}${c.continue_prev ? pill('앞 컷에서 이어짐') : ''}${c.use_end_frame ? pill('끝 장면 고정') : ''}</div>
+  return `<div class="prep"><div class="row" style="gap:6px"><b style="font-size:13px">장면 사진·대사</b>${pill(pl, pk)}${lines.length ? `<span class="quiet">목소리는 영상을 만들 때 함께 나옵니다</span>` : ''}${c.continue_prev ? pill('앞 컷에서 이어짐') : ''}${c.use_end_frame ? pill('끝 장면 고정') : ''}</div>
     ${ff.prompt || fl.prompt ? `<div class="kfs">${frame(ff, '첫 장면')}${c.use_end_frame ? frame(fl, '끝 장면') : ''}</div>` : ''}
     ${lines.map(l => `<div class="vline"><span class="sp">${esc(l.speaker || '')}</span><span class="tx">${esc(l.text || '')}</span>
       ${l.direction || l.tags ? `<span class="quiet dir">${esc(l.direction || '')} ${l.tags ? `<code>${esc(l.tags)}</code>` : ''}</span>` : ''}
-      ${l.path && urls[l.path] ? `<audio src="${esc(urls[l.path])}" controls preload="none"></audio>` : l.error ? `<span class="quiet" style="color:var(--bad)">${esc(l.error)}</span>`
-        : `<span class="quiet dir">🔊 미리 듣기 ${c.prep_status === 'preparing' ? '만드는 중 <span class="spin"></span>' : '아직 없음'}</span>`}
+      ${l.path && urls[l.path] ? `<audio src="${esc(urls[l.path])}" controls preload="none"></audio>` : ''}
       ${l.voice_note ? `<span class="quiet dir">🎙 ${esc(l.voice_note)}</span>` : ''}
       ${l.analysis?.per_second?.length ? `<span class="curve" title="1초마다 소리 크기">${l.analysis.per_second.map(p => `<i style="height:${Math.max(8, Math.min(100, (p.db + 50) * 2))}%"></i>`).join('')}</span>` : ''}</div>`).join('')}
     ${pr.summary || iss.length ? `<div class="quiet" style="margin-top:4px">${esc(pr.summary || '')}${iss.length ? `<ul>${iss.map(i => `<li>${esc(i)}</li>`).join('')}</ul>` : ''}${(pr.auto_fixed || []).length ? ` · 스스로 고친 것: ${esc(pr.auto_fixed.join(', '))}` : ''}</div>` : ''}
@@ -9946,8 +9950,9 @@ function cutCard(c, ts, urls, rate) {
         ${[['video', '영상 감수'], ['voice', '음성 감수'], ['emotion', '감정 감수']].map(([m, l]) => `<button class="btn small" ${u ? `data-after="${m}" data-cut="${c.id}"` : 'disabled title="영상이 생성되면 켜집니다"'}>${l}</button>`).join('')}
         ${['designed', 'failed', 'passed', 'hold'].includes(c.status) ? `<button class="btn small" data-fix="${c.id}" title="감독에게 고칠 점을 적어 보내면 이 컷만 다시 설계합니다">✏️ 보완 요청</button>` : ''}
         <button class="btn small ${(u || poster) && !canApprove ? 'primary' : ''}" ${u || poster ? `data-vplay="${esc(u || '')}" data-vposter="${esc(poster || '')}" data-vtitle="${esc(vidTitle)}"` : 'disabled title="아직 만든 영상이 없습니다"'}>▶ 영상 보기</button>
+        ${shown?.files?.voice_preview && ((c.voice_lines || []).length || parseDlg(c.dialogue).length) ? `<button class="btn small" data-vsave="${c.id}" data-vpath="${esc(shown.files.voice_preview)}" title="이 영상에서 말한 인물의 목소리를 바이블 인물 카드에 저장합니다(그 인물의 대표 목소리로)">🔊 이 목소리를 바이블에</button>` : ''}
         ${canApprove ? `<details class="cmore"><summary>⋯</summary><div>
-          <button class="btn small" data-prep="${c.id}">${c.prep_status === 'none' ? '사진·목소리 준비' : '사진·목소리 다시'}</button>
+          <button class="btn small" data-prep="${c.id}">${c.prep_status === 'none' ? '장면 사진 준비' : '장면 사진 다시'}</button>
           ${c.status === 'designed' ? `<button class="btn small" data-hold="${c.id}">보류</button>` : ''}</div></details>` : ''}
       </div>
     </div>
@@ -9993,9 +9998,9 @@ function bindProduction(ep, ctx) {
     const todo = ctx.cuts.filter(c => ['designed', 'failed', 'hold'].includes(c.status) && ['none', 'failed', 'fix'].includes(c.prep_status));
     const scenes = [...new Set(todo.map(c => c.scene_no))];
     if (!scenes.length) return toast('준비할 컷이 없습니다');
-    if (!confirm(`컷 ${todo.length}개(${scenes.length}씬)의 대사 미리 듣기와 첫 장면 사진을 만듭니다.\n바이블에 목소리가 없는 인물은 추천 목소리로 먼저 들려 드립니다(ElevenLabs·사진 비용 소액).`)) return;
+    if (!confirm(`컷 ${todo.length}개(${scenes.length}씬)의 첫 장면 사진을 만듭니다(목소리는 영상을 만들 때 Seedance가 함께 만듭니다).\n(Higgsfield 사진 비용 소액)`)) return;
     for (const sc of scenes) await addTask({ kind: 'prep_cut', scene_no: sc, payload: {} });
-    toast('사진·목소리 준비를 맡겼습니다'); again();
+    toast('장면 사진 준비를 맡겼습니다'); again();
   });
   // 생성된 영상 감수: 영상(화면)·음성(대사·목소리)·감정. 컷 상태는 바꾸지 않고 결과만 남긴다
   const FOC = { video: '영상', voice: '음성', emotion: '감정' };
@@ -10021,7 +10026,7 @@ function bindProduction(ep, ctx) {
     const cost = list.reduce((s, c) => s + Number(c.est_usd || 0), 0);
     if (!list.length) return;
     const notReady = list.filter(c => c.prep_status !== 'ready').length;
-    if (notReady && !confirm(`${notReady}개 컷은 사진·목소리 확인이 끝나지 않았습니다(준비 전·감수 지적·실패).\n그래도 생성할까요? 사진이 없으면 바이블 사진을 참고로만 만듭니다.`)) return;
+    if (notReady && !confirm(`${notReady}개 컷은 장면 사진 준비가 끝나지 않았습니다(준비 전·실패).\n그래도 생성할까요? 사진이 없으면 바이블 사진을 참고로만 만듭니다.`)) return;
     if (!confirm(`컷 ${list.length}개 영상을 생성합니다.\n예상 비용 ${usdKrw(cost, ctx.rate)} (Higgsfield 잔액에서 빠집니다)\n생성 → 영상 감수 → 씬 폴더 보관까지 자동으로 이어집니다.`)) return;
     // 화면이 몇 초 늦어도 같은 컷을 두 번 결제하지 않게: 지금도 대기 상태인 컷만 승인하고, 이미 생성 일이 걸린 컷은 뺀다
     const busy = new Set((await q(S.sb.from('pipeline_tasks').select('cut_id').eq('kind', 'generate').in('status', ['queued', 'running']).in('cut_id', list.map(c => c.id)))).map(r => r.cut_id));
@@ -10056,6 +10061,19 @@ function bindProduction(ep, ctx) {
     if (!confirm(`S${b.dataset.redesign} 씬의 승인 전 컷을 감독이 다시 설계합니다. 진행할까요?`)) return;
     await addTask({ kind: 'director', scene_no: +b.dataset.redesign, payload: { script_version_id: ctx.confirmed?.id, scenes: [+b.dataset.redesign] } });
     toast('감독에게 맡겼습니다'); again();
+  }));
+  pane.querySelectorAll('[data-vsave]').forEach(b => b.onclick = guard(async () => {
+    const c = ctx.cuts.find(x => x.id === b.dataset.vsave);
+    const names = [...new Set(((c.voice_lines || []).length ? c.voice_lines : parseDlg(c.dialogue)).map(l => String(l.speaker || '').replace(/\s*\(.*?\)\s*/g, '').trim()).filter(Boolean))];
+    if (!names.length) return toast('이 컷에는 대사가 없습니다');
+    const who = names.length === 1 ? (confirm(`${c.code} 영상의 ${names[0]} 목소리를 바이블 ${names[0]} 카드에 저장할까요? (지금 저장된 목소리는 바뀝니다)`) ? names[0] : null)
+      : await askChoice('누구의 목소리인가요?', `${c.code} 영상에 여러 명이 말합니다. 이 소리를 누구의 목소리로 저장할까요?\n(이 소리에 다른 사람 대사가 섞여 있으면 한 사람만 말하는 컷에서 저장하는 게 좋습니다)`, names.map(n => ({ value: n, label: n })));
+    if (!who) return;
+    const ents = await q(S.sb.from('bible_entries').select('id,name').eq('series_id', S.seriesId).eq('category', 'character'));
+    const e = ents.find(x => x.name === who) || ents.find(x => x.name.replace(/\s*\(.*?\)\s*/g, '').trim() === who);
+    if (!e) return toast(`바이블에 '${who}' 인물이 없습니다`);
+    await q(S.sb.rpc('owner_bible_voice_sample', { p_entry: e.id, p_path: 'takes:' + b.dataset.vpath }));
+    toast(`${who} 목소리를 바이블에 저장했습니다`);
   }));
   pane.querySelectorAll('[data-fix]').forEach(b => b.onclick = guard(async () => {
     const c = ctx.cuts.find(x => x.id === b.dataset.fix);
