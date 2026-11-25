@@ -212,7 +212,7 @@
   .vlive { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; } .vlive audio { height: 32px; width: 240px; min-width: 200px; max-width: 100%; flex: 0 0 auto; margin: 0; }
   .vfail { color: var(--bad); font-size: 13px; } .vfail .quiet { display: block; font-size: 12px; }
   .srbox { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); } .srbox > summary { cursor: pointer; }
-  .srbox table td { font-size: 13px; vertical-align: top; }
+  .srbox table td { font-size: 13px; vertical-align: top; } .srbox tr.srdone td:not(:last-child) { color: var(--muted, #888); }
   .balrow { display: grid; grid-template-columns: 170px auto 1fr auto; gap: 4px 12px; align-items: baseline; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
   .balrow .good { color: var(--good); font-weight: 600; } .balrow .warn { color: var(--warn); font-weight: 600; } .balrow .bad { color: var(--bad); font-weight: 600; }
   @media (max-width: 760px) { .balrow { grid-template-columns: 1fr auto; } .balrow > .quiet:nth-child(3) { grid-column: 1 / -1; } }
@@ -9714,10 +9714,13 @@ async function renderProduction(ep, quietRefresh = false) {
   let srRes = null; try { srRes = srTask?.status === 'done' ? JSON.parse(srTask.result || 'null') : null; } catch (e) {}
   const srBusy = srTask && ['queued', 'running'].includes(srTask.status);
   // '그대로 적용하기'를 눌렀으면: 작가실 반영 → 확정 → 감독 다시 설계가 끝날 때까지 '반영 중', 끝나면 '반영 완료'(확인 N건은 접어 둔다)
-  const srAp = srTask?.payload?.applied ? (() => {
-    const at = new Date(srTask.payload.applied_at || 0).getTime();
+  // 적용 표시가 없더라도(예전에 누른 것) 감수 뒤에 '대본 감수 반영' 작가실 일이 있으면 적용한 것으로 본다
+  const srFixWr = srTask?.finished_at ? tasks.filter(t => t.kind === 'writers_room' && t.payload?.fix_issues && new Date(t.created_at) >= new Date(srTask.finished_at))
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))[0] : null;
+  const srAp = srTask?.payload?.applied || srFixWr ? (() => {
+    const at = new Date(srTask.payload?.applied_at || srFixWr?.created_at || 0).getTime();
     const chain = tasks.filter(t => ['writers_room', 'director'].includes(t.kind) && new Date(t.created_at).getTime() >= at - 2000);
-    const wr = chain.find(t => t.id === srTask.payload.applied) || chain.find(t => t.kind === 'writers_room');
+    const wr = chain.find(t => t.id === srTask.payload?.applied) || srFixWr || chain.find(t => t.kind === 'writers_room');
     if (chain.some(t => ['queued', 'running'].includes(t.status))) return { st: 'run', msg: chain.some(t => t.kind === 'director' && ['queued', 'running'].includes(t.status)) ? '감독이 컷을 다시 설계하는 중' : '작가실이 고친 정리본을 만드는 중' };
     if (wr && wr.status === 'failed') return { st: 'fail', msg: wr.error || '반영 실패' };
     if (wr && wr.status === 'done' && /확정 대기/.test(wr.result || '')) return { st: 'wait', msg: '작가실이 흐름 변경도 제안해 자동 확정하지 않았습니다 — 대본 탭에서 정리본을 확정해 주세요' };
@@ -9776,13 +9779,14 @@ async function renderProduction(ep, quietRefresh = false) {
     <div class="row" style="margin-top:10px;gap:6px">${others}
       <span class="quiet" style="margin-left:auto;font-size:12.5px">${G.generation?.video_model === 'kling-4.0' ? 'Kling 4.0' : 'Seedance 2.5'} · 대사 ${G.generation?.dialogue_tool === 'elevenlabs' ? 'ElevenLabs' : 'Higgsfield'} · ${esc(G.generation?.resolution || '480p')} · ${esc(G.generation?.aspect_ratio || '9:16')}
         · 보관 ${hasWin ? '집 PC(OneDrive)' : '<b>집 PC 에이전트 미설치</b>'} · <a href="#settings" id="pSet">바꾸기</a></span></div>
-    ${srTask && (srRes || srTask.status === 'failed' || srBusy) ? `<details class="srbox" ${srRes?.verdict === 'fix' && (!srAp || srAp.st !== 'done') ? 'open' : ''}><summary><b>대본 감수</b> ${srBusy ? '<span class="spin"></span> 대본감수자가 원고·정리본을 대조하는 중'
+    ${srTask && (srRes || srTask.status === 'failed' || srBusy) ? `<details class="srbox" ${srRes?.verdict === 'fix' ? 'open' : ''}><summary><b>대본 감수</b> ${srBusy ? '<span class="spin"></span> 대본감수자가 원고·정리본을 대조하는 중'
       : srTask.status === 'failed' ? pill('실패', 'bad') + ' ' + esc(srTask.error || '')
       : srAp ? (srAp.st === 'run' ? `<span class="spin"></span> ${pill('반영 중', 'warn')} <span class="quiet">${esc(srAp.msg)}</span>` : srAp.st === 'done' ? `${pill(`반영 완료 · ${srRes.issues.length}건`, 'good')} <span class="quiet">고친 정리본이 확정됐고 감독이 컷을 다시 설계했습니다. 필요하면 대본 감수를 한 번 더 하세요</span>`
           : srAp.st === 'wait' ? `${pill('확정 대기', 'warn')} <span class="quiet">${esc(srAp.msg)}</span>` : `${pill('반영 실패', 'bad')} <span class="quiet">${esc(srAp.msg)}</span>`)
       : pill(srRes.verdict === 'pass' ? '통과' : `확인 ${srRes.issues.length}건`, srRes.verdict === 'pass' ? 'good' : 'warn') + ` <span class="quiet">${esc(srRes.summary || '')} · 씬 ${srRes.scenes}개${srRes.cuts ? ` · 컷 ${srRes.cuts}개` : ''} · ${fmt(srTask.finished_at)}</span>`}</summary>
-      ${srRes?.issues?.length ? `${srAp && srAp.st !== 'fail' ? '<details style="margin-top:6px"><summary class="quiet">반영한 내용 보기</summary>' : ''}<table style="margin-top:6px"><tr><th>씬</th><th>종류</th><th>원문</th><th>지금</th><th>고칠 곳</th></tr>${srRes.issues.map(i => `<tr><td style="white-space:nowrap">${esc(i.scene || '')}</td><td style="white-space:nowrap">${esc(i.type || '')}</td>
-        <td class="quiet">${esc(i.original || '')}</td><td>${esc(i.now || '')}</td><td>${esc([i.who, i.fix].filter(Boolean).join(': '))}</td></tr>`).join('')}</table>${srAp && srAp.st !== 'fail' ? '</details>' : ''}
+      ${srRes?.issues?.length ? `<table style="margin-top:6px"><tr><th>씬</th><th>종류</th><th>원문</th><th>지금</th><th>고칠 곳</th>${srAp ? '<th>반영</th>' : ''}</tr>${srRes.issues.map(i => `<tr${srAp?.st === 'done' ? ' class="srdone"' : ''}><td style="white-space:nowrap">${esc(i.scene || '')}</td><td style="white-space:nowrap">${esc(i.type || '')}</td>
+        <td class="quiet">${esc(i.original || '')}</td><td>${esc(i.now || '')}</td><td>${esc([i.who, i.fix].filter(Boolean).join(': '))}</td>
+        ${srAp ? `<td style="white-space:nowrap">${srAp.st === 'done' ? pill('✓ 반영됨', 'good') : srAp.st === 'run' ? pill('반영 중', 'warn') : srAp.st === 'wait' ? pill('확정 대기', 'warn') : pill('실패', 'bad')}</td>` : ''}</tr>`).join('')}</table>
         <div class="row" style="margin-top:8px;gap:8px;${srAp && srAp.st !== 'fail' ? 'display:none' : ''}"><button class="btn small primary" id="srApply" ${busyKinds.has('writers_room') || busyKinds.has('director') ? 'disabled' : ''}>그대로 적용하기</button>
           <span class="quiet">작가실이 위 내용을 모두 고친 정리본을 만들어 바로 확정 → 감독이 컷을 다시 설계합니다(이미 생성한 컷은 그대로). 감독만 고칠 것(컷 누락)이면 그 씬만 다시 설계합니다.</span></div>` : ''}</details>` : ''}
     ${S.noVoice?.length || S.noPhoto?.length ? `<div class="msg" style="background:var(--accent-soft)"><b>바이블에 아직 없는 것</b> — 이대로 만들면 영상의 얼굴이 장면마다 달라질 수 있어요
