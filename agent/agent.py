@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.37.0"
+VERSION = "1.38.0"
 
 import base64
 import glob
@@ -1002,7 +1002,9 @@ CUT_SCHEMA = """{"scene_no": 1, "cut_no": 1, "code": "E01-S01-C01", "scene_headi
              "lighting": "조명: 빛이 어디서 어떻게(예: 오른쪽 창에서 늦은 오후 햇빛이 비스듬히, 얼굴 왼쪽은 그늘)",
              "blocking": "연출: 인물 동선·움직임 방향(예: 린이 화면 왼쪽에서 오른쪽으로 걸어 들어와 탄 앞에 멈춤)",
              "connect": "다음 컷으로 이어지는 법(예: 린이 문고리를 잡는 동작 중간에 다음 컷으로 — 다음 컷은 같은 동작의 손 클로즈업에서 시작)"},
- "prompt": "Seedance에 보낼 영어 프롬프트(대사는 한국어 원문 그대로 따옴표)", "director_note": "반영한 메모·교훈",
+ "prompt": "Seedance에 보낼 영어 프롬프트(대사는 한국어 원문 그대로 따옴표)",
+ "prompt_ko": "같은 프롬프트의 한국어판 — 머리말(SHOT: FRAME: LIGHT: CHARACTERS: HANDS: ACTION 0-3s: DIALOGUE: CONTINUITY: ANATOMY:)은 영어 그대로, 내용만 한국어로 빠짐없이",
+ "director_note": "반영한 메모·교훈",
  "voice_lines": [{"speaker": "린", "text": "대사 그대로(괄호 지문 빼고)", "tags": "[nervous] [whispers]", "direction": "작게 떨리며 시작 → 끝에서 목소리가 갈라지며 높아짐"}],
  "frame_first": {"prompt": "첫 장면 사진용 영어 프롬프트: 인물 고정 묘사·의상·자세·첫 표정·장소·조명·구도"},
  "use_end_frame": false, "frame_last": {"prompt": "끝 장면이 중요할 때만: 마지막 순간의 자세·표정·위치"},
@@ -1034,6 +1036,48 @@ def tidy_prompt(prompt):
         p = p.replace(tail, "").rstrip()
         return f"{p}\n{ANATOMY_LINE}\n{tail}"
     return f"{p}\n{ANATOMY_LINE}"
+
+
+def ko_from_prompt(prompt):
+    """영어 프롬프트 → 대표가 읽고 고칠 한국어판(머리말은 영어 그대로, 내용은 빠짐없이)."""
+    txt, _ = claude("claude-sonnet-5-5", "너는 영상 프롬프트 번역가다. 영어 영상 생성 프롬프트를 한국어로 옮긴다. "
+                    "줄 머리말(SHOT: FRAME: LIGHT: CHARACTERS: HANDS: ACTION 0-3s: DIALOGUE: CONTINUITY: ANATOMY: 등)은 영어 그대로 두고 내용만 자연스러운 한국어로. "
+                    "빼거나 보태지 않는다. 따옴표 안 한국어 대사는 그대로. 답은 한국어판 본문만.", prompt, max_tokens=4000, stage="other", note="한글 프롬프트")
+    return re.sub(r"^```\w*\n?|\n?```$", "", (txt or "").strip())
+
+
+def prompt_ko_task(t, cut, ctx):
+    """mode ko: 한국어판만 만든다. mode from_ko: 대표가 고친 한국어판을 영어 프롬프트에 그대로 반영."""
+    p = t.get("payload") or {}
+    cid = cut["id"]
+    if p.get("mode") == "ko":
+        progress(f"{cut.get('code')} 한글 프롬프트 만드는 중")
+        ko = ko_from_prompt(cut.get("prompt") or "")
+        rpc("agent_update_cut", p_token=TOKEN, p_id=cid, p={"prompt_ko": ko})
+        return f"{cut.get('code')} 한글 프롬프트 만듦"
+    new_ko = (p.get("ko") or "").strip()
+    if not new_ko:
+        raise RuntimeError("반영할 한글 프롬프트가 비어 있습니다")
+    progress(f"감독이 {cut.get('code')} 대표가 고친 한글 프롬프트를 영어 프롬프트에 반영하는 중")
+    dmodel = setting(ctx, "generation", "claude_director", "claude-opus-5-5")
+    system = (guide(ctx, "감독") or "너는 실사 AI 드라마 감독이다.") + """
+
+[이번 일] 대표가 한국어판 프롬프트를 직접 고쳤다. 고친 한국어판이 기준이다(대표 지시 — 최우선).
+- 영어 프롬프트를 고친 한국어판과 같은 내용이 되게 다시 쓴다. 대표가 바꾼 곳은 빠짐없이 반영하고, 바꾸지 않은 곳은 지금 영어 표현을 그대로 둔다.
+- 줄 머리말(SHOT: FRAME: …)은 영어 그대로. 따옴표 안 한국어 대사는 글자 그대로. 인물 고정 묘사는 대표가 바꾸지 않았다면 지금 영어 그대로.
+- 답: <json>{"prompt": "영어 프롬프트 전체", "summary": "무엇을 바꿨는지 한 줄(한국어)"}</json>"""
+    user = f"[지금 영어 프롬프트]\n{cut.get('prompt') or ''}\n\n[고치기 전 한국어판]\n{cut.get('prompt_ko') or p.get('old_ko') or '(없음)'}\n\n[대표가 고친 한국어판 — 기준]\n{new_ko}"
+    text, _ = claude(dmodel, system, user, max_tokens=5000, stage="cut_card", episode_id=cut.get("episode_id"), scene_no=cut.get("scene_no"),
+                     cut_code=cut.get("code"), note="한글 프롬프트 반영")
+    r = pick_json(text)
+    if not r.get("prompt"):
+        raise RuntimeError("감독이 영어 프롬프트를 만들지 못했습니다")
+    then_gen = bool(p.get("then_generate"))
+    rpc("agent_update_cut", p_token=TOKEN, p_id=cid, p={"prompt": tidy_prompt(r["prompt"]), "prompt_ko": new_ko, "clear_fix": True,
+                                                         "status": "approved" if then_gen else "designed",
+                                                         "director_note": "대표가 한글 프롬프트를 직접 고침: " + (r.get("summary") or "")[:200]})
+    notify(f"{cut.get('code')} 한글 프롬프트 반영", (r.get("summary") or "영어 프롬프트를 고친 한국어판에 맞췄습니다")[:300])
+    return f"{cut.get('code')} 한글 프롬프트 반영: {(r.get('summary') or '')[:120]}"
 
 
 def director_system(ctx):
@@ -1542,6 +1586,8 @@ def director_revise(t, cut_id):
     ep = cut["episode_id"]
     ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep, p_version=cut.get("script_version_id"))
     fr = (cut.get("fix_request") or "").strip()
+    if (t.get("payload") or {}).get("mode") == "ko":
+        fr = ""   # 한글판만 만드는 일: 바이블 판단 없음
     if fr and not fr.startswith("[자동 재시도") and not (t.get("payload") or {}).get("auto_retry") and not (t.get("payload") or {}).get("bible_synced"):
         try:
             saved = owner_to_bible(ctx, ep, cut, fr)
@@ -1549,6 +1595,9 @@ def director_revise(t, cut_id):
                 log("대표 지시 → 바이블 저장: " + " / ".join(saved))
         except Exception as ex:
             log(f"대표 지시 바이블 저장 판단 실패(컷 수정은 계속): {ex}")
+    pmode = (t.get("payload") or {}).get("mode")
+    if pmode in ("ko", "from_ko"):
+        return prompt_ko_task(t, cut, ctx)
     last = (cut.get("takes") or [{}])[-1] if cut.get("takes") else {}
     dmodel = setting(ctx, "generation", "claude_director", "claude-opus-5-5")
     progress(f"감독이 {cut.get('code')} 프롬프트를 고치는 중")
@@ -1572,11 +1621,16 @@ def director_revise(t, cut_id):
     if not new or not new.get("prompt"):
         raise RuntimeError("감독이 고친 프롬프트를 만들지 못했습니다")
     new["prompt"] = tidy_prompt(new["prompt"])
+    if not new.get("prompt_ko"):
+        try:
+            new["prompt_ko"] = ko_from_prompt(new["prompt"])
+        except Exception as ex:
+            log(f"한글 프롬프트 만들기 실패(영어는 그대로): {ex}")
     refs = has_images(ctx, new.get("reference_names") or cut.get("reference_names"))
     secs = max(4, min(15, int(new.get("seconds") or cut.get("seconds") or 10)))
     then_gen = bool((t.get("payload") or {}).get("then_generate"))   # 대표가 '보완해서 다시 만들기'로 생성까지 맡긴 것
     rpc("agent_update_cut", p_token=TOKEN, p_id=cut_id, p={
-        "status": "approved" if then_gen else "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"), "staging": new.get("staging") if isinstance(new.get("staging"), dict) else None, "camera": new.get("camera") or None,
+        "status": "approved" if then_gen else "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"), "staging": new.get("staging") if isinstance(new.get("staging"), dict) else None, "camera": new.get("camera") or None, "prompt_ko": new.get("prompt_ko") or None,
         "reference_names": refs, "director_note": new.get("director_note"), "est_usd": est_cut_usd(ctx, secs, refs), "clear_fix": True,
         "voice_lines": new.get("voice_lines") or cut.get("voice_lines") or [], "frame_first": new.get("frame_first") or {"prompt": (cut.get("frame_first") or {}).get("prompt")},
         "frame_last": new.get("frame_last") or {}, "use_end_frame": bool(new.get("use_end_frame")), "continue_prev": bool(new.get("continue_prev")), "prep_status": "none",
