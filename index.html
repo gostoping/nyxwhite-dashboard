@@ -9753,8 +9753,11 @@ async function renderProduction(ep, quietRefresh = false) {
     : inProg ? { t: '영상 만드는 중', d: `${inProg}컷 생성·감수 중 · 통과 ${passed}/${cuts.length}` }
     : passed ? { t: '편집실에서 이어 붙이기', d: `통과 ${passed}/${cuts.length}컷`, k: 'ed' }
     : { t: '컷 상태 확인', d: '아래 씬에서 불합격·보류 컷을 확인하세요' };
-  const others = ['wr', 'scr', 'dir', 'prep', 'ap', 'ed'].filter(k => k !== next.k).map(k => B[k](false)).join('')
-    + `<span class="quiet" style="font-size:12px;margin-left:4px" title="영상이 생성된 컷이 생기면 켜집니다">생성 후 →</span>` + ['avid', 'avoi', 'aemo'].map(k => B[k]()).join('');
+  // 자주 쓰는 것만 보이게: 작가실 정리 · 대본 감수 · 전체 생성 · 편집실 / 생성 후 감수. 컷 다시 설계·장면 사진 준비는 컷 설계·대본 감수 반영 때 자동이라 ⋯ 안으로
+  const more = ['dir', 'prep'].filter(k => k !== next.k).map(k => B[k](false)).filter(Boolean);
+  const others = ['wr', 'scr', 'ap', 'ed'].filter(k => k !== next.k).map(k => B[k](false)).join('')
+    + `<span class="quiet" style="font-size:12px;margin-left:4px" title="영상이 생성된 컷이 생기면 켜집니다">생성 후 →</span>` + ['avid', 'avoi', 'aemo'].map(k => B[k]()).join('')
+    + (more.length ? `<details class="cmore pmore"><summary title="자주 쓰지 않는 것">⋯</summary><div>${more.join('')}</div></details>` : '');
 
   pane.innerHTML = `
   ${stale.length ? `<div class="msg warn"><b>PPL 수정 전에 만든 컷 ${stale.length}개</b> — ${[...new Set(stale.map(c => c.scene_no))].map(s => 'S' + s).join(', ')}에 PPL이 들어갔지만 이 컷들은 그 전에 설계·생성됐습니다(비용 때문에 자동으로 다시 만들지 않음).
