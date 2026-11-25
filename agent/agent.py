@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.33.1"
+VERSION = "1.33.2"
 
 import base64
 import glob
@@ -1474,9 +1474,9 @@ def director_revise(t, cut_id):
     user = f"""아래 컷 하나를 고쳐서 같은 형식(cuts 배열에 1개)으로 주세요. 대사는 바꾸지 않습니다.
 [지금 컷]
 {json.dumps({k: cut.get(k) for k in ('scene_no', 'cut_no', 'code', 'scene_heading', 'seconds', 'summary', 'dialogue', 'emotion', 'expression_beats', 'camera', 'reference_names', 'prompt')}, ensure_ascii=False)}
-[대표 수정 요청]
+[대표 지시 — 최우선. 아래를 빠짐없이 프롬프트에 반영한다. 바이블·감수 의견과 부딪히면 대표 지시를 따른다]
 {cut.get('fix_request') or '(없음)'}
-[지난 영상 감수 결과]
+[지난 영상 감수 결과(참고, 대표 지시보다 뒤)]
 {json.dumps(last.get('review') or {}, ensure_ascii=False)}
 [같은 씬의 다른 컷]
 {json.dumps(cut.get('scene_cuts') or [], ensure_ascii=False)}"""
