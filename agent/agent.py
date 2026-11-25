@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.32.1"
+VERSION = "1.32.2"
 
 import base64
 import glob
@@ -966,7 +966,7 @@ def t_writers_room(t):
     changes = meta.get("changes") or []
     summary = (meta.get("summary") or "") + f"\n변경 {len(changes)}곳" + (f" · 흐름 변경 제안 {len(props)}건(대표 승인 필요)" if props else "")
     confirmed = None
-    if p.get("fix_issues") and not props:   # 대본 감수 결과를 대표가 '그대로 적용'으로 맡긴 것 → 바로 확정(→ 감독이 컷 설계를 다시)
+    if p.get("fix_issues"):   # 대본 감수 결과를 대표가 '그대로 적용'으로 맡긴 것 → 바로 확정(→ 감독이 컷 설계를 다시). 흐름 변경 제안은 정리본에 안 들어가고 따로 대표 결정을 기다린다
         confirmed = rpc("agent_confirm_script", p_token=TOKEN, p_id=vid, p_summary="대본 감수 반영: " + summary[:300])
     elif wr.get("auto_confirm") is True and not props and not ppl:   # PPL을 넣고 축약한 수정본은 늘 대표가 읽고 확정
         confirmed = rpc("agent_confirm_script", p_token=TOKEN, p_id=vid, p_summary=summary)   # 확정되면 DB가 감독 컷 설계를 바로 맡긴다

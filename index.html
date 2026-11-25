@@ -391,7 +391,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.32.1"
+VERSION = "1.32.2"
 
 import base64
 import glob
@@ -1347,7 +1347,7 @@ def t_writers_room(t):
     changes = meta.get("changes") or []
     summary = (meta.get("summary") or "") + f"\n변경 {len(changes)}곳" + (f" · 흐름 변경 제안 {len(props)}건(대표 승인 필요)" if props else "")
     confirmed = None
-    if p.get("fix_issues") and not props:   # 대본 감수 결과를 대표가 '그대로 적용'으로 맡긴 것 → 바로 확정(→ 감독이 컷 설계를 다시)
+    if p.get("fix_issues"):   # 대본 감수 결과를 대표가 '그대로 적용'으로 맡긴 것 → 바로 확정(→ 감독이 컷 설계를 다시). 흐름 변경 제안은 정리본에 안 들어가고 따로 대표 결정을 기다린다
         confirmed = rpc("agent_confirm_script", p_token=TOKEN, p_id=vid, p_summary="대본 감수 반영: " + summary[:300])
     elif wr.get("auto_confirm") is True and not props and not ppl:   # PPL을 넣고 축약한 수정본은 늘 대표가 읽고 확정
         confirmed = rpc("agent_confirm_script", p_token=TOKEN, p_id=vid, p_summary=summary)   # 확정되면 DB가 감독 컷 설계를 바로 맡긴다
@@ -9723,7 +9723,10 @@ async function renderProduction(ep, quietRefresh = false) {
     const wr = chain.find(t => t.id === srTask.payload?.applied) || srFixWr || chain.find(t => t.kind === 'writers_room');
     if (chain.some(t => ['queued', 'running'].includes(t.status))) return { st: 'run', msg: chain.some(t => t.kind === 'director' && ['queued', 'running'].includes(t.status)) ? '감독이 컷을 다시 설계하는 중' : '작가실이 고친 정리본을 만드는 중' };
     if (wr && wr.status === 'failed') return { st: 'fail', msg: wr.error || '반영 실패' };
-    if (wr && wr.status === 'done' && /확정 대기/.test(wr.result || '')) return { st: 'wait', msg: '작가실이 흐름 변경도 제안해 자동 확정하지 않았습니다 — 대본 탭에서 정리본을 확정해 주세요' };
+    if (wr && wr.status === 'done' && /확정 대기/.test(wr.result || '') && !(confirmed && new Date(confirmed.created_at) > new Date(wr.created_at))) {
+      const dr = versions.filter(v => v.status === 'draft' && new Date(v.created_at) >= new Date(wr.created_at)).sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+      return { st: 'wait', draft: dr?.id, msg: '고친 정리본이 확정을 기다립니다' + (props.length ? ` · 작가실의 흐름 변경 제안 ${props.length}건은 정리본에 들어가지 않고 따로 결정 대기` : '') };
+    }
     return { st: 'done', msg: (wr?.result || '').slice(0, 120) };
   })() : null;
   // 지금 컷 기준으로 한 대본 감수인가(컷을 다시 설계했으면 다시 감수)
@@ -9782,7 +9785,7 @@ async function renderProduction(ep, quietRefresh = false) {
     ${srTask && (srRes || srTask.status === 'failed' || srBusy) ? `<details class="srbox" ${srRes?.verdict === 'fix' ? 'open' : ''}><summary><b>대본 감수</b> ${srBusy ? '<span class="spin"></span> 대본감수자가 원고·정리본을 대조하는 중'
       : srTask.status === 'failed' ? pill('실패', 'bad') + ' ' + esc(srTask.error || '')
       : srAp ? (srAp.st === 'run' ? `<span class="spin"></span> ${pill('반영 중', 'warn')} <span class="quiet">${esc(srAp.msg)}</span>` : srAp.st === 'done' ? `${pill(`반영 완료 · ${srRes.issues.length}건`, 'good')} <span class="quiet">고친 정리본이 확정됐고 감독이 컷을 다시 설계했습니다. 필요하면 대본 감수를 한 번 더 하세요</span>`
-          : srAp.st === 'wait' ? `${pill('확정 대기', 'warn')} <span class="quiet">${esc(srAp.msg)}</span>` : `${pill('반영 실패', 'bad')} <span class="quiet">${esc(srAp.msg)}</span>`)
+          : srAp.st === 'wait' ? `${pill('확정 대기', 'warn')} <span class="quiet">${esc(srAp.msg)}</span>${srAp.draft ? ` <button class="btn small primary" id="srConfirm" data-v="${esc(srAp.draft)}">지금 확정하기</button>` : ''}` : `${pill('반영 실패', 'bad')} <span class="quiet">${esc(srAp.msg)}</span>`)
       : pill(srRes.verdict === 'pass' ? '통과' : `확인 ${srRes.issues.length}건`, srRes.verdict === 'pass' ? 'good' : 'warn') + ` <span class="quiet">${esc(srRes.summary || '')} · 씬 ${srRes.scenes}개${srRes.cuts ? ` · 컷 ${srRes.cuts}개` : ''} · ${fmt(srTask.finished_at)}</span>`}</summary>
       ${srRes?.issues?.length ? `<table style="margin-top:6px"><tr><th>씬</th><th>종류</th><th>원문</th><th>지금</th><th>고칠 곳</th>${srAp ? '<th>반영</th>' : ''}</tr>${srRes.issues.map(i => `<tr${srAp?.st === 'done' ? ' class="srdone"' : ''}><td style="white-space:nowrap">${esc(i.scene || '')}</td><td style="white-space:nowrap">${esc(i.type || '')}</td>
         <td class="quiet">${esc(i.original || '')}</td><td>${esc(i.now || '')}</td><td>${esc([i.who, i.fix].filter(Boolean).join(': '))}</td>
@@ -10017,6 +10020,12 @@ function bindProduction(ep, ctx) {
     if (hasOpen('writers_room')) return toast('작가실이 이미 일하고 있습니다');
     if (!confirm('작가실이 원고를 장소별 씬으로 나누고(한 씬 30초 이하), 흐름은 그대로 둔 채 감정선을 다듬은 정리본을 만듭니다.\n정리본을 확정하면 컷 설계까지 바로 이어집니다. 옆의 \'대본 감수\'로 원고와 정리본이 씬 순서대로 빠짐없이 맞는지 확인한 뒤 제작(생성)하세요.\n(Claude 비용, 한 화에 수백 원 수준)')) return;
     await addTask({ kind: 'writers_room', payload: {} }); toast('작가실에 맡겼습니다'); again();
+  });
+  const sc = $('#srConfirm'); if (sc) sc.onclick = guard(async ev => {
+    ev.preventDefault(); ev.stopPropagation();
+    if (!confirm('대본 감수 내용을 반영한 정리본을 확정합니다. 확정하면 감독이 바로 컷을 다시 설계합니다(이미 생성한 컷은 그대로).')) return;
+    const no = await q(S.sb.rpc('confirm_script_version', { p_id: sc.dataset.v, p_note: '대본 감수 반영' }));
+    toast(`v${no}로 확정했습니다. 감독이 컷을 다시 설계합니다`); again();
   });
   const sa = $('#srApply'); if (sa) sa.onclick = guard(async () => {
     const st = (await q(S.sb.from('pipeline_tasks').select('id,payload,result').eq('episode_id', ep.id).eq('kind', 'cut_review').eq('status', 'done').eq('payload->>mode', 'script').order('finished_at', { ascending: false }).limit(1)))[0];
