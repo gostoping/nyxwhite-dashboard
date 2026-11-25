@@ -211,6 +211,7 @@
   .vmore[open] > div { left: auto; right: 0; min-width: 220px; } .vmore[open] > div > .btn, .vmore[open] > div > label { width: 100%; text-align: left; justify-content: flex-start; box-sizing: border-box; }
   .vlive { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; } .vlive audio { height: 32px; width: 240px; min-width: 200px; max-width: 100%; flex: 0 0 auto; margin: 0; }
   .vfail { color: var(--bad); font-size: 13px; } .vfail .quiet { display: block; font-size: 12px; }
+  .fixbox { margin-top: 10px; padding: 10px; border: 1px solid var(--accent); border-radius: 8px; background: var(--panel); }
   .srbox { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); } .srbox > summary { cursor: pointer; }
   .srbox table td { font-size: 13px; vertical-align: top; } .srbox tr.srdone td:not(:last-child) { color: var(--muted, #888); }
   .balrow { display: grid; grid-template-columns: 170px auto 1fr auto; gap: 4px 12px; align-items: baseline; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
@@ -391,7 +392,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.32.2"
+VERSION = "1.33.0"
 
 import base64
 import glob
@@ -1868,8 +1869,9 @@ def director_revise(t, cut_id):
         raise RuntimeError("감독이 고친 프롬프트를 만들지 못했습니다")
     refs = has_images(ctx, new.get("reference_names") or cut.get("reference_names"))
     secs = max(4, min(15, int(new.get("seconds") or cut.get("seconds") or 10)))
+    then_gen = bool((t.get("payload") or {}).get("then_generate"))   # 대표가 '보완해서 다시 만들기'로 생성까지 맡긴 것
     rpc("agent_update_cut", p_token=TOKEN, p_id=cut_id, p={
-        "status": "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"),
+        "status": "approved" if then_gen else "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"),
         "reference_names": refs, "director_note": new.get("director_note"), "est_usd": est_cut_usd(ctx, secs, refs), "clear_fix": True,
         "voice_lines": new.get("voice_lines") or cut.get("voice_lines") or [], "frame_first": new.get("frame_first") or {"prompt": (cut.get("frame_first") or {}).get("prompt")},
         "frame_last": new.get("frame_last") or {}, "use_end_frame": bool(new.get("use_end_frame")), "continue_prev": bool(new.get("continue_prev")), "prep_status": "none",
@@ -1877,7 +1879,9 @@ def director_revise(t, cut_id):
     if setting(ctx, "generation", "auto_prep", True):
         rpc("agent_add_task", p_token=TOKEN, p={"kind": "prep_cut", "episode_id": ep, "scene_no": cut.get("scene_no"), "cut_id": cut_id,
                                                "payload": {"force": True, "auto_retry": bool((t.get("payload") or {}).get("auto_retry"))}})
-    if (t.get("payload") or {}).get("auto_retry"):
+    if then_gen:
+        notify(f"{cut.get('code')} 보완 완료 → 다시 만드는 중", "대표 보완 내용을 반영해 프롬프트를 고쳤고, 바로 영상을 다시 만듭니다", "info")
+    elif (t.get("payload") or {}).get("auto_retry"):
         notify(f"{cut.get('code')} 자동 재시도", "감수 불합격이라 감독이 고쳤고, 사진·목소리를 다시 준비한 뒤 자동으로 다시 생성합니다", "info")
     else:
         notify(f"{cut.get('code')} 수정 완료", "사진·목소리를 다시 준비한 뒤 제작 탭에서 생성 승인을 눌러 주세요")
@@ -3067,6 +3071,15 @@ def _generate(t):
     cut = rpc("agent_get_cut", p_token=TOKEN, p_id=t["cut_id"])
     if not cut:
         raise RuntimeError("컷을 찾지 못했습니다")
+    if (t.get("payload") or {}).get("after_director") and cut.get("fix_request"):   # '보완해서 다시 만들기': 감독이 보완을 끝낼 때까지 기다렸다가 만든다
+        try:
+            waited = time.time() - datetime.fromisoformat(str(t.get("created_at")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            waited = 0
+        if waited > 25 * 60:
+            rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "designed"})
+            raise RuntimeError("감독 보완이 25분 넘게 끝나지 않아 생성을 멈췄습니다(감독 일이 실패했을 수 있음). 제작 탭에서 확인하고 다시 눌러 주세요")
+        raise Retry(30, "감독이 보완하는 중 — 끝나면 바로 만듭니다")
     if cut["status"] not in ("approved", "generating"):
         return f"생성 승인 상태가 아니어서 건너뜀 ({cut['status']})"
     ep = cut["episode_id"]
@@ -9982,7 +9995,7 @@ function cutCard(c, ts, urls, rate) {
           : c.status === 'approved' ? `<button class="btn small" data-unapprove="${c.id}">생성 대기 · 취소</button>`
           : ['generating', 'reviewing'].includes(c.status) ? `<button class="btn small" disabled><span class="spin"></span> ${c.status === 'generating' ? '생성 중' : '감수 중'}</button>` : ''}
         ${[['video', '영상 감수'], ['voice', '음성 감수'], ['emotion', '감정 감수']].map(([m, l]) => `<button class="btn small" ${u ? `data-after="${m}" data-cut="${c.id}"` : 'disabled title="영상이 생성되면 켜집니다"'}>${l}</button>`).join('')}
-        ${['designed', 'failed', 'passed', 'hold'].includes(c.status) ? `<button class="btn small" data-fix="${c.id}" title="감독에게 고칠 점을 적어 보내면 이 컷만 다시 설계합니다">✏️ 보완 요청</button>` : ''}
+        ${['designed', 'failed', 'passed', 'hold'].includes(c.status) ? `<button class="btn small" data-fix="${c.id}" title="프롬프트를 보고, 보완할 내용을 적어 이 컷만 다시 만듭니다">✏️ 보완해서 다시 만들기</button>` : ''}
         <button class="btn small ${(u || poster) && !canApprove ? 'primary' : ''}" ${u || poster ? `data-vplay="${esc(u || '')}" data-vposter="${esc(poster || '')}" data-vtitle="${esc(vidTitle)}"` : 'disabled title="아직 만든 영상이 없습니다"'}>▶ 영상 보기</button>
         ${shown?.files?.voice_preview && ((c.voice_lines || []).length || parseDlg(c.dialogue).length) ? `<button class="btn small" data-vsave="${c.id}" data-vpath="${esc(shown.files.voice_preview)}" title="이 영상에서 말한 인물의 목소리를 바이블 인물 카드에 저장합니다(그 인물의 대표 목소리로)">🔊 이 목소리를 바이블에</button>` : ''}
         ${canApprove ? `<details class="cmore"><summary>⋯</summary><div>
@@ -10135,15 +10148,45 @@ function bindProduction(ep, ctx) {
     await q(S.sb.rpc('owner_bible_voice_sample', { p_entry: e.id, p_path: 'takes:' + b.dataset.vpath }));
     toast(`${who} 목소리를 바이블에 저장했습니다`);
   }));
-  pane.querySelectorAll('[data-fix]').forEach(b => b.onclick = guard(async () => {
+  // 보완해서 다시 만들기: 컷 아래에 프롬프트(고칠 수 있음) + 보완 내용 → 감독이 반영해 바로 다시 생성, 또는 고친 프롬프트로 바로 생성, 또는 보완만
+  pane.querySelectorAll('[data-fix]').forEach(b => b.onclick = () => {
     const c = ctx.cuts.find(x => x.id === b.dataset.fix);
+    const card = b.closest('.cut'); if (!card) return;
+    const old = card.querySelector('.fixbox'); if (old) { old.remove(); return; }
     const auto = ['video', 'voice', 'emotion'].map(m => c.reviews?.['after_' + m]).filter(r => r && r.verdict !== 'pass' && r.fix).map(r => r.fix).join(' / ');
-    const text = prompt(`${c.code} — 고칠 점을 적어 주세요 (대사는 바뀌지 않습니다)\n예: 린 표정을 더 크게, 카메라를 천천히 다가가게 / 린 머리를 단발로 / 탄 목소리를 더 밝게\n※ 인물 생김새·장소·소품·목소리처럼 계속 유지할 변경은 바이블에도 저장되어 다음 장면부터 그대로 씁니다.${auto ? '\n(영상·음성·감정 감수 의견을 미리 넣어 두었습니다)' : ''}`, c.fix_request || auto || '');
-    if (text == null) return;
-    await q(S.sb.from('production_cuts').update({ fix_request: text.trim() || '영상 감수 의견대로 고쳐 주세요', status: c.status === 'passed' ? 'designed' : c.status }).eq('id', c.id));
-    await addTask({ kind: 'director', scene_no: c.scene_no, cut_id: c.id, payload: { cut_id: c.id } });
-    toast('감독에게 수정 요청을 보냈습니다'); again();
-  }));
+    const box = document.createElement('div'); box.className = 'fixbox';
+    box.innerHTML = `<label style="margin-top:0">지금 프롬프트 <span class="quiet">— 직접 고쳐도 됩니다(영어). 대사는 바뀌지 않습니다</span></label>
+      <textarea class="fxp" style="min-height:120px;font-size:12.5px">${esc(c.prompt || '')}</textarea>
+      <label>보완할 내용 <span class="quiet">— 한국어로 편하게. 예: 린 표정을 더 크게, 카메라를 천천히 다가가게 / 린 머리를 단발로(계속 유지할 변경은 바이블에도 저장)</span></label>
+      <textarea class="fxt" style="min-height:70px;font-family:inherit" placeholder="비워 두고 위 프롬프트만 고쳐서 다시 만들어도 됩니다">${esc(c.fix_request || auto || '')}</textarea>
+      <div class="row" style="margin-top:8px;gap:6px">
+        <button class="btn small primary" data-fx="director">감독이 반영해 다시 만들기 · ${usdKrw(c.est_usd, ctx.rate)}</button>
+        <button class="btn small" data-fx="prompt">고친 프롬프트로 바로 다시 만들기</button>
+        <button class="btn small" data-fx="only">보완만 하고 생성은 나중에</button>
+        <button class="btn small" data-fx="x">닫기</button></div>`;
+    card.querySelector('.body').appendChild(box);
+    box.querySelector('.fxt').focus();
+    box.querySelectorAll('[data-fx]').forEach(x => x.onclick = guard(async () => {
+      const mode = x.dataset.fx; if (mode === 'x') return box.remove();
+      const p0 = (c.prompt || '').trim(), p1 = box.querySelector('.fxp').value.trim(), note = box.querySelector('.fxt').value.trim();
+      const edited = p1 && p1 !== p0;
+      if (mode === 'prompt') {
+        if (!edited && !note) return toast('프롬프트를 고치거나 보완할 내용을 적어 주세요');
+        if (note && !confirm('보완할 내용은 감독이 반영해야 프롬프트에 들어갑니다. 고친 프롬프트로만 바로 만들까요?')) return;
+        if (!confirm(`${c.code}을(를) 고친 프롬프트로 다시 만듭니다.\n예상 비용 ${usdKrw(c.est_usd, ctx.rate)} (Higgsfield)`)) return;
+        await q(S.sb.from('production_cuts').update({ prompt: p1, status: 'approved', fix_request: null }).eq('id', c.id));
+        await addTask({ kind: 'generate', scene_no: c.scene_no, cut_id: c.id });
+        toast('고친 프롬프트로 다시 만드는 중입니다'); return again();
+      }
+      if (!note && !edited) return toast('보완할 내용을 적어 주세요');
+      const req = [note, edited ? '대표가 프롬프트를 직접 고침(이 프롬프트를 바탕으로): ' + p1 : ''].filter(Boolean).join('\n');
+      if (mode === 'director' && !confirm(`${c.code}: 감독이 보완 내용을 반영해 프롬프트를 고친 뒤 바로 다시 만듭니다.\n예상 비용 ${usdKrw(c.est_usd, ctx.rate)} (Higgsfield) + Claude 수십 원`)) return;
+      await q(S.sb.from('production_cuts').update({ fix_request: req, ...(edited ? { prompt: p1 } : {}), status: mode === 'director' ? 'approved' : (c.status === 'passed' ? 'designed' : c.status) }).eq('id', c.id));
+      await addTask({ kind: 'director', scene_no: c.scene_no, cut_id: c.id, payload: { cut_id: c.id, ...(mode === 'director' ? { then_generate: true } : {}) } });
+      if (mode === 'director') await addTask({ kind: 'generate', scene_no: c.scene_no, cut_id: c.id, payload: { after_director: true } });
+      toast(mode === 'director' ? '감독이 보완한 뒤 바로 다시 만듭니다' : '감독에게 보완을 맡겼습니다(생성은 나중에 승인)'); again();
+    }));
+  });
   pane.querySelectorAll('[data-hold]').forEach(b => b.onclick = guard(async () => { await q(S.sb.from('production_cuts').update({ status: 'hold' }).eq('id', b.dataset.hold)); again(); }));
   pane.querySelectorAll('[data-unapprove]').forEach(b => b.onclick = guard(async () => {
     await q(S.sb.from('pipeline_tasks').update({ status: 'cancelled' }).eq('cut_id', b.dataset.unapprove).eq('kind', 'generate').eq('status', 'queued'));

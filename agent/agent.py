@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.32.2"
+VERSION = "1.33.0"
 
 import base64
 import glob
@@ -1487,8 +1487,9 @@ def director_revise(t, cut_id):
         raise RuntimeError("감독이 고친 프롬프트를 만들지 못했습니다")
     refs = has_images(ctx, new.get("reference_names") or cut.get("reference_names"))
     secs = max(4, min(15, int(new.get("seconds") or cut.get("seconds") or 10)))
+    then_gen = bool((t.get("payload") or {}).get("then_generate"))   # 대표가 '보완해서 다시 만들기'로 생성까지 맡긴 것
     rpc("agent_update_cut", p_token=TOKEN, p_id=cut_id, p={
-        "status": "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"),
+        "status": "approved" if then_gen else "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"),
         "reference_names": refs, "director_note": new.get("director_note"), "est_usd": est_cut_usd(ctx, secs, refs), "clear_fix": True,
         "voice_lines": new.get("voice_lines") or cut.get("voice_lines") or [], "frame_first": new.get("frame_first") or {"prompt": (cut.get("frame_first") or {}).get("prompt")},
         "frame_last": new.get("frame_last") or {}, "use_end_frame": bool(new.get("use_end_frame")), "continue_prev": bool(new.get("continue_prev")), "prep_status": "none",
@@ -1496,7 +1497,9 @@ def director_revise(t, cut_id):
     if setting(ctx, "generation", "auto_prep", True):
         rpc("agent_add_task", p_token=TOKEN, p={"kind": "prep_cut", "episode_id": ep, "scene_no": cut.get("scene_no"), "cut_id": cut_id,
                                                "payload": {"force": True, "auto_retry": bool((t.get("payload") or {}).get("auto_retry"))}})
-    if (t.get("payload") or {}).get("auto_retry"):
+    if then_gen:
+        notify(f"{cut.get('code')} 보완 완료 → 다시 만드는 중", "대표 보완 내용을 반영해 프롬프트를 고쳤고, 바로 영상을 다시 만듭니다", "info")
+    elif (t.get("payload") or {}).get("auto_retry"):
         notify(f"{cut.get('code')} 자동 재시도", "감수 불합격이라 감독이 고쳤고, 사진·목소리를 다시 준비한 뒤 자동으로 다시 생성합니다", "info")
     else:
         notify(f"{cut.get('code')} 수정 완료", "사진·목소리를 다시 준비한 뒤 제작 탭에서 생성 승인을 눌러 주세요")
@@ -2686,6 +2689,15 @@ def _generate(t):
     cut = rpc("agent_get_cut", p_token=TOKEN, p_id=t["cut_id"])
     if not cut:
         raise RuntimeError("컷을 찾지 못했습니다")
+    if (t.get("payload") or {}).get("after_director") and cut.get("fix_request"):   # '보완해서 다시 만들기': 감독이 보완을 끝낼 때까지 기다렸다가 만든다
+        try:
+            waited = time.time() - datetime.fromisoformat(str(t.get("created_at")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            waited = 0
+        if waited > 25 * 60:
+            rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "designed"})
+            raise RuntimeError("감독 보완이 25분 넘게 끝나지 않아 생성을 멈췄습니다(감독 일이 실패했을 수 있음). 제작 탭에서 확인하고 다시 눌러 주세요")
+        raise Retry(30, "감독이 보완하는 중 — 끝나면 바로 만듭니다")
     if cut["status"] not in ("approved", "generating"):
         return f"생성 승인 상태가 아니어서 건너뜀 ({cut['status']})"
     ep = cut["episode_id"]
