@@ -3261,6 +3261,8 @@ def _voice_design(t):
     if d.get("sample_path"):
         return _voice_clone(d)
     progress(f"{d['entry_name']} 목소리 후보를 만드는 중")
+    if len((d.get("sample_text") or "").strip()) < 100:   # 들어 볼 대사는 코디네이터가 대본에서 뽑아 쓴다
+        d["sample_text"] = voice_sample_text(d)
     body = {"voice_description": d["description"].split("\n[노래]")[0][:1000]}
     sample = (d.get("sample_text") or "").strip()
     if len(sample) >= 100:
@@ -3291,11 +3293,42 @@ def _voice_design(t):
         d = dict(d, previews=previews, chosen_generated_id=previews[0]["generated_voice_id"])
         rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "saving", "chosen_generated_id": d["chosen_generated_id"]})
         vid = _voice_save_design(d)
-        r = rpc("agent_voice_link", p_token=TOKEN, p_design=did)
+        r = rpc("agent_voice_link", p_token=TOKEN, p_design=did, p_force=bool(d.get("force_apply")))
         notify(f"{d['entry_name']} 추천 목소리 적용", f"후보 {len(previews)}개 중 1번을 먼저 넣었습니다({'바이블 적용' if r == 'linked' else '대표가 정한 목소리는 그대로 둠'}). 바이블 → 목소리에서 다른 후보로 바꿀 수 있습니다")
         return f"{d['entry_name']} 추천 목소리 적용 ({vid})"
     notify(f"{d['entry_name']} 목소리 후보 {len(previews)}개 도착", "바이블 탭에서 들어 보고 골라 주세요")
     return f"{d['entry_name']} 후보 {len(previews)}개"
+
+
+def voice_sample_text(d):
+    """코디네이터: 목소리 후보를 들어 볼 한국어 대사 120~250자. 대본에 이 인물 대사가 있으면 그 대사를 이어 붙여 쓰고,
+    적으면 인물 설정·감정선에 맞춘 자기소개로 쓴다(감정이 두세 번 바뀌게 → 목소리 폭을 들을 수 있게)."""
+    name = re.sub(r"\s*\(.*?\)\s*", "", d.get("entry_name") or "").strip()
+    lines = []
+    try:
+        cast = rpc("agent_series_cast", p_token=TOKEN, p_series=d.get("series_id")) or {}
+        for s in cast.get("scripts") or []:
+            for ln in (s.get("text") or "").splitlines():
+                m = re.match(r"\s*([^:：]{1,15})[:：]\s*(.+)", ln)
+                if m and re.sub(r"\s*\(.*?\)\s*", "", m.group(1)).strip() == name:
+                    lines.append(m.group(2).strip())
+    except Exception as ex:
+        log(f"대본에서 대사 찾기 실패: {ex}")
+    try:
+        text, _ = claude("claude-sonnet-5-5", """너는 코디네이터다. ElevenLabs 목소리 후보를 들어 볼 한국어 대사를 쓴다.
+- 대본 대사가 있으면 그 대사들을 인용해 자연스럽게 이어 붙인다(괄호 지문은 빼고). 모자라면 인물 말투로 한두 문장 보탠다.
+- 대사가 거의 없으면 인물 설정과 감정선에 맞춘 자기소개를 쓴다.
+- 120~250자, 감정이 두세 번 바뀌게(예: 설렘 → 긴장 → 다짐). 대사 문장만, 따옴표·설명·이름표 없이.
+답: <json>{"text": ""}</json>""", json.dumps({"인물": d.get("entry_name"), "요약": d.get("entry_summary"), "설정": (d.get("entry_description") or "")[:800],
+                         "목소리 설명": (d.get("description") or "")[:500], "대본 대사": lines[:40]}, ensure_ascii=False),
+            max_tokens=800, stage="other", note=f"목소리 시험 대사: {d.get('entry_name')}")
+        t = (safe_json(text).get("text") or "").strip()
+        if len(t) >= 80:
+            return t[:400]
+    except Exception as ex:
+        log(f"시험 대사 쓰기 실패: {ex}")
+    base = " ".join(lines)[:250]
+    return base if len(base) >= 100 else (base + f" 안녕하세요, 저는 {name}이에요. 오늘은 정말 떨리지만, 여기까지 온 이유를 잊지 않을 거예요. 끝까지 해낼게요.")[:300]
 
 
 def _voice_clone(d):
@@ -4349,7 +4382,8 @@ def t_voice_cast(t):
         if len(sample) < 100:
             sample = (sample + " " + "오늘은 정말 긴 하루였어요. 그래도 끝까지 해낼 거예요. 지켜봐 주세요.")[:300]
         desc = v["voice_description"] + (f"\n[노래] {v['singing_hint']}" if v.get("singing_hint") else "")
-        did = rpc("agent_add_voice_design2", p_token=TOKEN, p_entry=v["entry_id"], p_description=desc[:1000], p_sample=sample, p_auto=bool(p.get("auto")))
+        did = rpc("agent_add_voice_design3", p_token=TOKEN, p_entry=v["entry_id"], p_description=desc[:1000], p_sample=sample,
+                  p_auto=bool(p.get("auto")), p_force=bool(p.get("force")))
         rpc("agent_add_task", p_token=TOKEN, p={"kind": "voice_design", "payload": {"design_id": did}})
         made.append(v.get("name") or "")
     notify(f"「{title}」 목소리 후보 준비 시작", f"{', '.join(made)} — " + ("추천 목소리(후보 1번)를 바로 바이블에 넣습니다. 바이블 → 목소리에서 다른 후보로 바꿀 수 있습니다" if p.get("auto") else "몇 분 뒤 바이블 탭에서 인물별 후보 3개를 듣고 골라 주세요"))
