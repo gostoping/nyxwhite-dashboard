@@ -10157,7 +10157,7 @@ async function renderProduction(ep, quietRefresh = false) {
     ${tasks.slice(0, 5).map(t => `<div class="tli">${pill(TASK_LABEL[t.kind] || t.kind, t.status === 'failed' ? 'bad' : t.status === 'done' ? 'good' : '')}
       <span class="quiet">${esc(t.status === 'failed' ? (t.error || '실패') : t.status === 'done' ? (t.kind === 'balance_check' ? '잔액 조회 완료' : t.result || '완료') : t.status === 'cancelled' ? '취소됨' : '')}</span><span class="quiet eta">${fmt(t.finished_at || t.created_at)}</span></div>`).join('')}</details>` : ''}
 
-  ${sceneNos.length ? flowView(ep, sceneNos, scenes, scText, scInfo, rate, pkgs)
+  ${sceneNos.length ? flowView(ep, sceneNos, scenes, scText, scInfo, rate, pkgs, takes, urls)
     : `<div class="card quiet">${confirmed ? '확정 대본에서 씬(S#)을 찾지 못했습니다. 대본 탭에서 씬 머리(S#1 | …)를 확인하세요.' : '대본을 확정하면 여기 왼쪽에 대본, 오른쪽에 씬별 컷(대사·장면·느낌·구도·조명·연출)이 나옵니다.'}</div>`}
   `;
 
@@ -10290,7 +10290,7 @@ function sceneJudge(rows, sc, cs) {
   return { est, rec, tot, bad };
 }
 const fmtMS = s => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
-function flowView(ep, sceneNos, scenes, scText, scInfo, rate, pkgs = []) {
+function flowView(ep, sceneNos, scenes, scText, scInfo, rate, pkgs = [], takes = [], urls = {}) {
   const rows = scriptRows(scText);
   const F = flowMap(rows, scenes); S.flowMap = F; S.flowRows = rows;
   const ordered = sceneNos.flatMap(no => (scenes[no] || []).slice().sort((a, b) => a.cut_no - b.cut_no));
@@ -10324,8 +10324,11 @@ function flowView(ep, sceneNos, scenes, scText, scInfo, rate, pkgs = []) {
           <dl>${dl ? fld('대사', dl) : '<dt>대사</dt><dd class="none">대사 없음</dd>'}${fld('장면', c.summary)}${fld('느낌', c.emotion)}${fld('구도', st.composition || c.camera)}${fld('조명', st.lighting)}${fld('연출', st.blocking)}${fld('연결', st.connect || (c.continue_prev ? '앞 컷 마지막 장면에서 이어 시작' : ''))}</dl>
           ${w.length ? `<div class="fw">${w.map(esc).join('<br>')}</div>` : ''}
           ${c.fix_request ? `<div class="quiet" style="font-size:12px;margin-top:4px">대표 요청: ${esc(c.fix_request.slice(0, 160))}</div>` : ''}
-          <div class="cacts">${['designed', 'failed', 'hold'].includes(c.status) ? `<button class="btn small" data-approve="${c.id}">🎬 생성 승인 · ${usdKrw(c.est_usd, rate)}</button>` : ''}
-            ${['designed', 'failed', 'passed', 'hold'].includes(c.status) ? `<button class="btn small" data-fix="${c.id}" title="프롬프트를 보고, 고칠 내용을 적어 이 컷만 다시 설계·생성">✏️ 고치기</button>` : ''}</div>
+          <div class="cacts">${(() => { const ts = takes.filter(x => x.cut_id === c.id);
+              const sh = ts.find(x => x.id === c.best_take_id && urls[x.files?.preview]) || ts.filter(x => urls[x.files?.preview]).at(-1);
+              return sh ? `<button class="btn small primary" data-vplay="${esc(urls[sh.files.preview])}" data-vposter="${esc(urls[sh.files?.poster] || '')}" data-vtitle="${esc(`S#${c.scene_no} C${c.cut_no} · ${c.seconds}초${sh.take_no ? ' · 테이크 ' + sh.take_no : ''}`)}">▶ 영상 보기</button>` : ''; })()}
+            ${['designed', 'failed', 'hold'].includes(c.status) ? `<button class="btn small" data-approve="${c.id}">🎬 생성 승인 · ${usdKrw(c.est_usd, rate)}</button>` : ''}
+            ${['designed', 'failed', 'passed', 'hold'].includes(c.status) ? `<button class="btn small" data-fix="${c.id}" title="프롬프트를 보고, 보완할 내용을 적어 이 컷만 다시 설계·생성">✏️ 보완해서 다시 만들기</button>` : ''}</div>
         </div>`; }).join('')}
       ${cs.length ? '</details>' : ''}
     </div>`; }).join('');
