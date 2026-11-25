@@ -10634,7 +10634,7 @@ function flowPromptPopup(id) {
     inner.querySelectorAll('[data-secin]').forEach(t => { if (drafts[t.dataset.secin]) t.value = drafts[t.dataset.secin]; });
     if (koDraft != null && inner.querySelector('#pKo') && koDraft !== (c.prompt_ko || '')) inner.querySelector('#pKo').value = koDraft;
     const bd = inner.querySelector('.ppbody'); if (bd) bd.scrollTop = keep;
-    bindPromptPopup(inner, c, close, msg => { busy = msg; render(); });
+    bindPromptPopup(inner, c, close, msg => { if (msg !== undefined) busy = msg; render(); });
   };
   render();
   // 한글판이 없으면 바로 만든다(이미 요청돼 있으면 기다림)
@@ -10648,8 +10648,19 @@ function flowPromptPopup(id) {
   // 감독이 반영하면 바로 새 내용으로
   timer = setInterval(async () => {
     if (!document.body.contains(box)) return clearInterval(timer);
-    if (!busy) return;
+    const making = ['approved', 'generating', 'reviewing'].includes(c.status);
+    if (!busy && !making) return;
     const r = (await q(S.sb.from('production_cuts').select('*').eq('id', c.id)).catch(() => []))?.[0]; if (!r) return;
+    if (!busy && making) {   // 영상 만드는 중: 끝나면 새 영상을 불러와 왼쪽에 보여 준다
+      if (r.status === c.status) return;
+      Object.assign(c, r);
+      if (!['approved', 'generating', 'reviewing'].includes(r.status)) {
+        const tk = await q(S.sb.from('production_takes').select('*').eq('cut_id', c.id).order('take_no')).catch(() => []);
+        if (tk?.length) { S.flowTakes = [...(S.flowTakes || []).filter(t => t.cut_id !== c.id), ...tk]; Object.assign(S.flowUrls ||= {}, await signTakeUrls(tk, [c]).catch(() => ({}))); }
+        toast(r.status === 'failed' ? `${c.code} 영상 만들기 실패` : `${c.code} 새 영상이 나왔습니다`);
+      }
+      return render();
+    }
     const open = await q(S.sb.from('pipeline_tasks').select('id,status,progress,error,payload,created_at').eq('cut_id', c.id).eq('kind', 'director').order('created_at', { ascending: false }).limit(3)).catch(() => []);
     const run = (open || []).find(t => ['queued', 'running'].includes(t.status));
     const changed = r.prompt !== c.prompt || r.prompt_ko !== c.prompt_ko || r.fix_request !== c.fix_request;
@@ -10685,10 +10696,14 @@ function promptPopupHtml(c, busy) {
   const sh = ts.find(x => x.id === c.best_take_id && U[x.files?.preview]) || ts.filter(x => U[x.files?.preview]).at(-1);
   const video = sh ? `<video src="${esc(U[sh.files.preview])}" ${U[sh.files?.poster] ? `poster="${esc(U[sh.files.poster])}"` : ''} controls playsinline loop></video><div class="quiet" style="font-size:12px;margin-top:4px">테이크 ${sh.take_no || ''} · ${c.seconds}초</div>`
     : `<div class="novid">아직 만든 영상이 없습니다</div>`;
+  const genState = ['approved', 'generating', 'reviewing'].includes(c.status) ? (c.status === 'approved' ? '생성 대기 중' : '영상 만드는 중') : '';
+  const genBtn = `<div class="ppgen">${genState ? `<button class="btn primary" disabled><span class="spin"></span> ${genState}</button>`
+    : `<button class="btn primary" id="pGen" ${busy ? 'disabled title="프롬프트 반영이 끝나면 누를 수 있습니다"' : ''}>🎬 ${ts.length ? '이 프롬프트로 영상 다시 만들기' : '이 프롬프트로 영상 만들기'}</button>`}
+    <div class="quiet" style="font-size:12px;margin-top:4px">${genState ? '끝나면 왼쪽에 새 영상이 나옵니다' : `지금 프롬프트(오른쪽 영어) 그대로 만듭니다 · ${usdKrw(c.est_usd, ctx0rate())}`}</div></div>`;
   return `<div class="row pphead"><b>📝 S#${c.scene_no} C${c.cut_no} 프롬프트</b><span class="quiet" style="font-size:12.5px">${esc(c.code || '')} · ${c.seconds}초 · ${esc((c.summary || '').slice(0, 80))}</span>
       <button class="btn small" id="zClose" style="margin-left:auto">닫기 (Esc)</button></div>
     ${busy ? `<div class="ppbusy"><span class="spin"></span> ${esc(busy)}</div>` : ''}
-    <div class="ppgrid"><div class="ppvid">${video}</div><div class="ppbody">
+    <div class="ppgrid"><div class="ppvid">${video}${genBtn}</div><div class="ppbody">
     <div class="pedit">
       <div class="row" style="justify-content:space-between"><b style="font-size:13.5px">한글 프롬프트 ↔ 영어 프롬프트</b>
         <span class="quiet" style="font-size:12px">한글을 고치고 "프롬프트 반영"을 누르면 영어 프롬프트에 그대로 반영됩니다</span></div>
@@ -10697,9 +10712,9 @@ function promptPopupHtml(c, busy) {
           ${c.prompt_ko ? `<textarea id="pKo" ${dis}>${esc(c.prompt_ko)}</textarea>` : `<div class="pc ko-wait">${busy ? '<span class="spin"></span> 한글판을 만드는 중입니다…' : '한글판이 없습니다'}</div>`}</div>
         <div><div class="quiet" style="font-size:12px">영어 (영상 생성에 쓰임)</div><pre class="pc en">${esc(c.prompt || '')}</pre></div>
       </div>
-      ${c.prompt_ko ? `<div class="row" style="gap:6px;margin-top:8px"><button class="btn small primary" id="pKoApply" ${dis}>프롬프트 반영</button><span class="quiet" style="font-size:12px">바꾼 줄은 대본 연출 메모에 대표 지시로 남고, 계속 유지할 변경은 바이블에도 저장</span></div>` : ''}
+      ${c.prompt_ko ? `<div class="row" style="gap:6px;margin-top:8px"><button class="btn small primary" id="pKoApply" ${dis}>프롬프트 반영</button><span class="quiet" style="font-size:12px">프롬프트 글만 고칩니다(영상은 왼쪽 버튼으로) · 바꾼 줄은 대표 지시로 기록, 계속 유지할 변경은 바이블에도</span></div>` : ''}
     </div>
-    <div class="quiet" style="font-size:12px;margin:10px 0 2px">항목마다 아래 칸에 지시를 적고 "반영해 주기"를 누르면 감독이 프롬프트(한글·영어)에 반영하고, 아래 항목들이 새 내용으로 바뀝니다.${Object.keys(P).length <= 1 ? ' · 이 프롬프트는 항목 구분 없이 쓰였습니다(반영하면 항목별로 다시 씁니다)' : ''}</div>
+    <div class="quiet" style="font-size:12px;margin:10px 0 2px">항목마다 아래 칸에 지시를 적고 "반영해 주기"를 누르면 감독이 프롬프트 글(한글·영어)만 고치고, 아래 항목들이 새 내용으로 바뀝니다. 영상은 왼쪽 "영상 만들기"로.${Object.keys(P).length <= 1 ? ' · 이 프롬프트는 항목 구분 없이 쓰였습니다(반영하면 항목별로 다시 씁니다)' : ''}</div>
     ${sec('move', '⏱', '시간 흐름에 따른 움직임', chip(P.ACTION ? 'ok' : 'wn', P.ACTION ? '구간별 동작 있음' : '구간별 동작이 프롬프트에 없음'), [P.ACTION, st.blocking ? '연출: ' + st.blocking : ''].filter(Boolean).join('\n'), '예: 0~2초 린이 문을 열고 들어옴 → 2~4초 멈춰서 탄을 봄 → 4~6초 천천히 다가감')}
     ${sec('link', '🔗', '앞뒤 컷·씬 연결', chip(P.CONTINUITY || st.connect || c.continue_prev ? 'ok' : 'wn', c.continue_prev ? '앞 컷 마지막 장면에서 이어 시작' : P.CONTINUITY ? '연결 적힘' : '연결이 적혀 있지 않음'),
       [P.CONTINUITY, st.connect ? '다음 컷으로: ' + st.connect : '', !prev && plan.transition_in ? '앞 씬에서: ' + plan.transition_in : '', !next && plan.transition_out ? '다음 씬으로: ' + plan.transition_out : '', plan.flow ? '씬 흐름: ' + plan.flow : ''].filter(Boolean).join('\n'), '예: 앞 컷에서 손을 뻗던 동작 그대로 시작, 끝은 문 쪽을 돌아보며 다음 컷으로')}
@@ -10714,9 +10729,15 @@ function promptPopupHtml(c, busy) {
 }
 function bindPromptPopup(inner, c, close, setBusy) {
   inner.querySelector('#zClose').onclick = close;
-  const ask = async (title, text) => askChoice(title, text, [
-    { value: 'only', label: '반영만 하기', desc: '감독이 프롬프트(한글·영어)를 고쳐 둡니다. 생성은 나중에', primary: true },
-    { value: 'gen', label: '반영하고 바로 다시 만들기', desc: `고친 뒤 바로 영상을 만듭니다 · ${usdKrw(c.est_usd, ctx0rate())}` }]);
+  const ask = async () => 'only';   // 반영은 프롬프트 글만. 영상은 왼쪽 '영상 만들기' 버튼으로
+  const gb = inner.querySelector('#pGen'); if (gb) gb.onclick = guard(async () => {
+    if (!confirm(`${c.code}을(를) 지금 프롬프트로 ${takesOf(c.id).length ? '다시 ' : ''}만듭니다.\n예상 ${usdKrw(c.est_usd, ctx0rate())}`)) return;
+    const ep = S.flowEp;
+    await q(S.sb.from('production_cuts').update({ status: 'approved' }).eq('id', c.id));
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'generate', episode_id: ep.id, scene_no: c.scene_no, cut_id: c.id, payload: {} }));
+    c.status = 'approved'; setBusy(undefined);
+    toast('영상을 만들기 시작했습니다. 끝나면 이 컷에 새 영상이 나옵니다');
+  });
   inner.querySelectorAll('[data-secgo]').forEach(b => b.onclick = guard(async () => {
     const t = inner.querySelector(`[data-secin="${b.dataset.secgo}"]`).value.trim(); if (!t) return toast('반영할 내용을 적어 주세요');
     const how = await ask(`${b.dataset.sectitle} — 반영`, `${c.code}\n${t}`); if (!how) return;
