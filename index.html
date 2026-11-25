@@ -204,7 +204,8 @@
   .pk { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 0; cursor: pointer; color: var(--ink); } .pk.on { border-color: var(--accent); background: var(--accent-soft); }
   .pk input { width: auto; margin-right: 4px; } .pk { position: relative; } .pkhold { position: absolute; right: 8px; top: 6px; font-size: 12px; cursor: pointer; }
   .vidpop video, .vidpop img { max-height: calc(100vh - 110px); max-width: 94vw; width: auto; border-radius: 8px; background: #000; display: block; }
-  .vlive { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; } .vlive audio { height: 32px; max-width: 260px; margin: 0; }
+  .vmore[open] > div { left: auto; right: 0; min-width: 220px; } .vmore[open] > div > .btn, .vmore[open] > div > label { width: 100%; text-align: left; justify-content: flex-start; box-sizing: border-box; }
+  .vlive { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; } .vlive audio { height: 32px; width: 240px; min-width: 200px; max-width: 100%; flex: 0 0 auto; margin: 0; }
   .vfail { color: var(--bad); font-size: 13px; } .vfail .quiet { display: block; font-size: 12px; }
   .srbox { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); } .srbox > summary { cursor: pointer; }
   .srbox table td { font-size: 13px; vertical-align: top; }
@@ -7320,8 +7321,7 @@ async function viewBible(main) {
         ? `<div class="msg warn" style="margin-top:6px;font-size:12.5px">직접 올리기로 정했지만 아직 사진이 없습니다. 이대로 제작하면 컷 설계 때 작가실 묘사로 <b>임시 기준 사진 1장</b>을 만들어 모든 컷에 고정합니다(임의의 모습).</div>` : ''}
       ${sameAsLine(e, entries)}
       ${c?.details ? `<details style="margin-top:8px"><summary class="quiet">세부 사항</summary><pre class="doc" style="margin-top:6px">${esc(c.details)}</pre></details>` : ''}
-      ${c?.soul_id ? `<div class="quiet" style="margin-top:6px">${pill('얼굴 고정됨', 'good')} Soul ID <code>${esc(c.soul_id.slice(0, 8))}</code></div>` : ''}
-      ${c?.voice_id ? `<div class="quiet" style="margin-top:8px">목소리 ID: <code>${esc(c.voice_id)}</code></div>` : ''}
+      ${c?.soul_id ? `<div class="quiet" style="margin-top:6px">${pill('얼굴 고정됨', 'good')} 이 얼굴로 모든 장면을 만듭니다</div>` : ''}
       ${c?.voice_path && urls[c.voice_path] ? `<audio controls preload="none" src="${esc(urls[c.voice_path])}"></audio>` : ''}
       <div class="bact">
         ${e.category === 'character' && 'same_as' in e ? `<div class="brow"><span class="blbl">동일인</span><div class="bbtns">
@@ -7335,18 +7335,21 @@ async function viewBible(main) {
         ${PHOTO_CATS.includes(e.category) ? `<div class="brow"><span class="blbl">사진</span><div class="bbtns">
           ${hasPhotoSrc ? `<span class="seg" data-psrc="${esc(e.id)}" title="직접 올리기로 정하면 '사진 만들기'를 한꺼번에 눌러도 이 항목은 만들지 않습니다">
             <button type="button" data-v="auto" class="${e.photo_source !== 'upload' ? 'on' : ''}">자동으로 만들기</button><button type="button" data-v="upload" class="${e.photo_source === 'upload' ? 'on' : ''}">직접 올리기</button></span>` : ''}
-          ${c && ((c.image_paths || []).length || c.soul_id) ? `<button class="btn small" data-unapply="photo" data-ue="${esc(e.id)}" title="기준 사진${c.soul_id ? '·얼굴 고정' : ''}을 바이블에서 뺍니다(이전 버전은 이력에 남아 되돌릴 수 있음)">사진 적용 해제</button>` : ''}
+          ${c && ((c.image_paths || []).length || c.soul_id) ? `<button class="btn small" data-unapply="photo" data-ue="${esc(e.id)}" title="이 사진${c.soul_id ? '(얼굴 고정 포함)' : ''}을 빼고 새로 만들 수 있게 합니다(이전 것은 이력에서 되돌릴 수 있음)">사진 빼기</button>` : ''}
           ${e.category === 'character' && c?.soul_id ? `<span class="quiet only-auto">✓ 얼굴 고정됨 · 바꾸려면 <b>고쳐쓰기</b>에서 "사진 후보 새로 만들기"를 체크</span>`
             : `<button class="btn small only-auto" data-pd="${esc(e.id)}">${e.category === 'character' ? '실사 사진 만들기·얼굴 고정' : '사진 만들기'}</button>`}
           <label class="btn small only-up" style="margin:0" title="외부에서 구한 사진을 기준 사진으로 넣고 바로 적용합니다. 코디네이터가 사진을 보고 묘사·영어 프롬프트를 자동으로 씁니다">사진 올리기<input type="file" accept="image/*" multiple hidden data-pup="${esc(e.id)}"></label>
           ${e.category === 'character' && (c?.image_paths || []).length ? `<button class="btn small only-up" data-pd="${esc(e.id)}" title="올린 사진으로 Soul ID를 학습해 같은 얼굴의 기준 사진을 만듭니다">${c?.soul_id ? '얼굴 다시 고정' : '이 사진으로 얼굴 고정'}</button>` : ''}</div></div>` : ''}
         ${['character', 'voice'].includes(e.category) ? `<div class="brow"><span class="blbl">목소리</span><div class="bbtns">
-          <span class="vlive" id="vlive-${esc(e.id)}"></span>
-          ${c?.voice_id ? `<button class="btn small" data-vlisten="${esc(e.id)}">후보 보기·바꾸기</button><button class="btn small" data-unapply="voice" data-ue="${esc(e.id)}" title="목소리를 바이블에서 뺍니다(동일인 카드도 함께). 만든 목소리는 남아 있어 다시 적용할 수 있습니다">목소리 적용 해제</button>`
-            : e.same_as || entries.some(x => x.same_as === e.id) ? `<span class="quiet">동일인 카드 중 한쪽에서 목소리를 정하면 다른 쪽에도 같이 들어갑니다</span>` : `<span class="quiet">추천 목소리를 자동으로 만들어 넣습니다(후보 1번 먼저 적용)</span>`}
-          <button class="btn small" data-vd="${esc(e.id)}">${c?.voice_id ? '목소리 다시 디자인' : '목소리 디자인'}</button>
-          <label class="btn small" style="margin:0" title="녹음 파일(30초~2분, 잡음 적게)을 올리면 ElevenLabs가 그 목소리로 만들어 바로 바이블에 넣습니다. 사용 권리가 있는 목소리만 올려 주세요">목소리 파일 올리기<input type="file" accept="audio/*,.m4a,.mp3,.wav" data-vup="${esc(e.id)}" hidden></label></div></div>` : ''}
-      </div>
+          <span class="vlive" id="vlive-${esc(e.id)}">${c?.voice_id ? '' : '<span class="quiet">아직 목소리가 없어요</span>'}</span>
+          ${c?.voice_id ? `<button class="btn small" data-vlisten="${esc(e.id)}" title="만들어 둔 후보를 들어 보고 바꿉니다">다른 목소리 고르기</button>`
+            : `<button class="btn small primary" data-vrec="${esc(e.id)}" title="대본과 인물 설정을 읽고 어울리는 목소리를 만들어 바로 넣습니다(젊고 나긋한 사람 목소리 기본)">목소리 추천받기</button>`}
+          <details class="cmore vmore"><summary title="다른 방법">⋯</summary><div>
+            ${c?.voice_id ? `<button class="btn small" data-vrec="${esc(e.id)}">새로 추천받기</button>` : ''}
+            <button class="btn small" data-vd="${esc(e.id)}">원하는 느낌을 적어서 만들기</button>
+            <label class="btn small" style="margin:0" title="녹음 파일(30초~2분, 잡음 적게). 본인 목소리이거나 쓸 권리가 있는 녹음만 올려 주세요">내 녹음 파일로 만들기<input type="file" accept="audio/*,.m4a,.mp3,.wav" data-vup="${esc(e.id)}" hidden></label>
+            ${c?.voice_id ? `<button class="btn small" data-unapply="voice" data-ue="${esc(e.id)}">이 목소리 빼기</button>` : ''}
+          </div></details></div></div>` : ''}
       <div id="be-${esc(e.id)}"></div>
       <div id="pd-${esc(e.id)}"></div>
       <div id="vd-${esc(e.id)}"></div>
@@ -7610,6 +7613,7 @@ async function viewBible(main) {
     if (locked(e) && new Date(latest.created_at) < lockAt(e)) return;
     openPhotoDesign(e, cur(e.id), false);
   });
+  main.querySelectorAll('[data-vrec]').forEach(b => b.onclick = guard(() => { b.closest('details')?.removeAttribute('open'); const e = entries.find(x => x.id === b.dataset.vrec); return recommendVoice(e, cur(e.id)); }));
   main.querySelectorAll('[data-unapply]').forEach(b => b.onclick = guard(async () => {
     const e = entries.find(x => x.id === b.dataset.ue), what = b.dataset.unapply, c = cur(e.id);
     const grp = entries.filter(x => x.id !== e.id && (x.same_as === (e.same_as || e.id) || x.id === e.same_as));
@@ -7836,17 +7840,16 @@ async function fillVoiceRows(entries, cur, vds) {
     const fail = d && d.status === 'failed';
     if (from[e.id]) {   // 동일인의 다른 카드에서 정한 목소리 → 여기서는 듣기만, 디자인 칸은 없앤다
       const src = entries.find(x => x.id === from[e.id]);
-      el.parentElement.querySelectorAll('[data-vd],[data-vlisten],[data-vnew],[data-unapply],label').forEach(x => x.remove());
-      [...el.parentElement.querySelectorAll('span.quiet')].filter(x => !el.contains(x)).forEach(x => x.remove());
+      el.parentElement.querySelectorAll('[data-vlisten],[data-vrec],details.vmore').forEach(x => x.remove());
       document.getElementById('vd-' + e.id)?.replaceChildren();
-      el.innerHTML = `${u ? `<audio controls preload="none" src="${esc(u)}"></audio>` : ''}<span class="quiet">원래 인물 <b>${esc(src?.name || '')}</b> 카드와 같은 목소리 · 바꾸거나 새로 만들기는 ${esc(src?.name || '')} 카드에서</span>`;
+      el.innerHTML = `${u ? `<audio controls preload="none" src="${esc(u)}"></audio>` : ''}<span class="quiet">${esc(src?.name || '')}와(과) 같은 사람이라 목소리도 같아요 · 바꾸려면 ${esc(src?.name || '')} 카드에서</span>`;
       return;
     }
     el.innerHTML = `${u ? `<audio controls preload="none" src="${esc(u)}" title="지금 바이블에 적용된 목소리"></audio>`
-        : c?.voice_id ? `<span class="quiet">목소리 적용됨 · 들을 샘플이 없음(후보 보기에서 다시 만들기)</span>` : ''}
-      ${busy ? `<span class="quiet"><span class="spin"></span> ${d.sample_path ? '올린 파일로 ElevenLabs가 목소리를 만드는 중' : d.status === 'saving' ? '목소리 저장 중' : '목소리 후보 만드는 중'}</span>` : ''}
-      ${!c?.voice_id && d && d.status === 'saved' && d.voice_id ? `<button class="btn small" data-vre="1">저장된 목소리 다시 적용·듣기</button>` : ''}
-      ${fail ? `<span class="vfail">❌ ${d.sample_path ? '올린 목소리' : '목소리'} 실패: ${esc(explainFail('voice_design', d.error).what)} <span class="quiet">${esc((d.error || '').slice(0, 220))}</span></span>` : ''}`;
+        : c?.voice_id ? `<span class="quiet">목소리 있음 · 들어 볼 샘플이 없어요(⋯ → 새로 추천받기)</span>` : '<span class="quiet">아직 목소리가 없어요</span>'}
+      ${busy ? `<span class="quiet"><span class="spin"></span> 목소리 만드는 중이에요(1~2분)</span>` : ''}
+      ${!c?.voice_id && d && d.status === 'saved' && d.voice_id ? `<button class="btn small" data-vre="1">전에 쓰던 목소리 다시 쓰기</button>` : ''}
+      ${fail ? `<span class="vfail">❌ 목소리를 못 만들었어요: ${esc(explainFail('voice_design', d.error).what)} <span class="quiet">${esc((d.error || '').slice(0, 220))}</span></span>` : ''}`;
   });
   entries.forEach(e => { const b = document.querySelector(`#vlive-${e.id} [data-vre]`); if (b) b.onclick = () => openVoiceDesign(e, cur(e.id), false, true); });
 }
@@ -7923,27 +7926,27 @@ async function openVoiceDesign(entry, cur, fresh, listen) {
   if (busy) S.vdBusy[entry.id] = 1;
   const upl = !!d.sample_path, linked = d.status === 'linked';
   box.innerHTML = `<div class="vdbox"><div class="row"><b>${linked ? '목소리 듣기' : '목소리 ' + (upl ? '(올린 파일)' : '디자인')}</b>${pill({ queued: upl ? 'ElevenLabs가 만드는 중' : '후보 만드는 중', ready: '골라 주세요', saving: '저장 중', saved: '저장됨 · 적용 대기', failed: '실패',
-      linked: upl ? '올린 목소리 적용됨' : d.auto ? '추천 목소리 적용됨' : '바이블 적용됨' }[d.status] || d.status,
+      linked: '지금 쓰는 중' }[d.status] || d.status,
       d.status === 'failed' ? 'bad' : linked ? 'good' : d.status === 'ready' || d.status === 'saved' ? 'accent' : 'warn')}
       <button class="btn small" id="vdNew-${entry.id}" style="margin-left:auto">새로 만들기</button></div>
     <div class="quiet" style="margin:4px 0">${esc(d.description)}</div>
     ${busy ? '<p><span class="spin"></span>ElevenLabs에서 작업 중입니다. 잠시 뒤 자동으로 새로 고칩니다.</p>' : ''}
     ${d.status === 'failed' ? `<div class="msg err">${esc(d.error || '실패')}</div>` : ''}
     ${d.preview_path && urls[d.preview_path] ? `<div class="vdp"><b>이 목소리로 읽은 시험 대사</b><audio controls preload="none" src="${esc(urls[d.preview_path])}"></audio></div>` : ''}
-    ${linked && d.auto && !upl ? '<p class="quiet" style="margin:6px 0 0">코디네이터가 후보 1번을 먼저 넣었습니다. 들어 보고 다른 후보가 낫다면 바꾸세요(바꾸면 생성 전 컷의 대사 미리 듣기도 새 목소리로 다시 만듭니다).</p>' : ''}
+    ${linked && !upl ? '<p class="quiet" style="margin:6px 0 0">1번을 먼저 넣어 뒀어요. 들어 보고 다른 게 더 좋으면 바꾸세요. 아직 안 만든 장면의 대사도 새 목소리로 바뀝니다.</p>' : ''}
     ${d.status === 'ready' || linked && !upl ? (d.previews || []).map((p, i) => { const on = linked && p.generated_voice_id === d.chosen_generated_id;
-      return `<div class="vdp"><b>후보 ${i + 1}</b>${on ? pill('지금 쓰는 목소리', 'good') : ''}
+      return `<div class="vdp"><b>목소리 ${i + 1}</b>${on ? pill('지금 쓰는 중', 'good') : ''}
       <audio controls preload="none" src="${esc(urls[p.path] || '')}"></audio>
-      ${on ? '' : `<button class="btn small ${linked ? '' : 'primary'}" data-pick="${esc(p.generated_voice_id)}">${linked ? '이 후보로 바꾸기' : '이 목소리로 정하기'}</button>`}</div>`; }).join('') : ''}
-    ${d.status === 'saved' ? `<p>ElevenLabs에 저장됐습니다 (<code>${esc(d.voice_id)}</code>). 바이블에 적용하면 감독·목소리 고정 작업이 이 목소리를 씁니다.</p>
-      <button class="btn small primary" id="vdLink-${entry.id}">바이블에 적용</button>` : ''}</div>`;
+      ${on ? '' : `<button class="btn small ${linked ? '' : 'primary'}" data-pick="${esc(p.generated_voice_id)}">${linked ? '이걸로 바꾸기' : '이걸로 정하기'}</button>`}</div>`; }).join('') : ''}
+    ${d.status === 'saved' ? `<p>만들어 둔 목소리예요. 쓰려면 아래 버튼을 누르세요. 모든 장면의 이 인물 대사가 이 목소리로 나옵니다.</p>
+      <button class="btn small primary" id="vdLink-${entry.id}">이 목소리 쓰기</button>` : ''}</div>`;
   // 고정된 목소리(바이블 적용됨) 상자: '새로 만들기'는 기본(젊고 나긋한 사람 목소리)+감정선으로 새로 추천해 바로 넣는다. 설명을 직접 쓰려면 '설명 직접 쓰기'
   const vnew = document.getElementById('vdNew-' + entry.id);
   if (linked) {
-    vnew.textContent = '🔄 새로 만들기'; vnew.classList.add('primary');
-    vnew.title = '기본(젊고 나긋한 사람 목소리) + 이 인물 감정선으로 새로 추천해 후보 1번을 바로 넣습니다';
+    vnew.textContent = '🔄 새로 추천받기'; vnew.classList.add('primary');
+    vnew.title = '대본과 인물 설정을 읽고 새 목소리 3개를 만들어 1번을 바로 넣습니다';
     vnew.onclick = guard(() => recommendVoice(entry, cur));
-    vnew.insertAdjacentHTML('afterend', `<button class="btn small" id="vdOwn-${entry.id}" title="목소리 설명을 직접 써서 후보 3개를 만듭니다">설명 직접 쓰기</button>`);
+    vnew.insertAdjacentHTML('afterend', `<button class="btn small" id="vdOwn-${entry.id}" title="원하는 느낌을 적으면 그대로 3개를 만듭니다">느낌 적어서 만들기</button>`);
     document.getElementById('vdOwn-' + entry.id).onclick = () => openVoiceDesign(entry, cur, true);
   } else vnew.onclick = () => openVoiceDesign(entry, cur, true);
   box.querySelectorAll('[data-pick]').forEach(b => b.onclick = guard(async () => {
