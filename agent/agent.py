@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.38.0"
+VERSION = "1.38.1"
 
 import base64
 import glob
@@ -1067,11 +1067,16 @@ def prompt_ko_task(t, cut, ctx):
 - 줄 머리말(SHOT: FRAME: …)은 영어 그대로. 따옴표 안 한국어 대사는 글자 그대로. 인물 고정 묘사는 대표가 바꾸지 않았다면 지금 영어 그대로.
 - 답: <json>{"prompt": "영어 프롬프트 전체", "summary": "무엇을 바꿨는지 한 줄(한국어)"}</json>"""
     user = f"[지금 영어 프롬프트]\n{cut.get('prompt') or ''}\n\n[고치기 전 한국어판]\n{cut.get('prompt_ko') or p.get('old_ko') or '(없음)'}\n\n[대표가 고친 한국어판 — 기준]\n{new_ko}"
-    text, _ = claude(dmodel, system, user, max_tokens=5000, stage="cut_card", episode_id=cut.get("episode_id"), scene_no=cut.get("scene_no"),
-                     cut_code=cut.get("code"), note="한글 프롬프트 반영")
-    r = pick_json(text)
+    r = {}
+    for attempt in range(2):
+        text, _ = claude(dmodel, system, user + ("" if not attempt else "\n\n[중요] 설명 없이 <json>{\"prompt\": \"...\", \"summary\": \"...\"}</json> 하나만."),
+                         max_tokens=10000, stage="cut_card", episode_id=cut.get("episode_id"), scene_no=cut.get("scene_no"),
+                         cut_code=cut.get("code"), note="한글 프롬프트 반영" + (" (다시)" if attempt else ""))
+        r = safe_json(text)
+        if r.get("prompt"):
+            break
     if not r.get("prompt"):
-        raise RuntimeError("감독이 영어 프롬프트를 만들지 못했습니다")
+        raise RuntimeError("감독이 영어 프롬프트를 만들지 못했습니다 — " + ("답이 길이 제한에 잘림" if CURRENT.get("last_stop") == "max_tokens" else "답 형식(JSON)이 깨짐") + " (두 번 시도)")
     then_gen = bool(p.get("then_generate"))
     rpc("agent_update_cut", p_token=TOKEN, p_id=cid, p={"prompt": tidy_prompt(r["prompt"]), "prompt_ko": new_ko, "clear_fix": True,
                                                          "status": "approved" if then_gen else "designed",
@@ -1615,11 +1620,20 @@ def director_revise(t, cut_id):
 {json.dumps(last.get('review') or {}, ensure_ascii=False)}
 [같은 씬의 다른 컷]
 {json.dumps(cut.get('scene_cuts') or [], ensure_ascii=False)}"""
-    text, _ = claude(dmodel, director_system(ctx), user, max_tokens=6000, stage="cut_card", episode_id=ep,
-                     scene_no=cut.get("scene_no"), cut_code=cut.get("code"), note="감독 컷 수정")
-    new = (pick_json(text).get("cuts") or [None])[0]
+    new, why = None, ""
+    for attempt in range(2):   # 답이 길어 잘리거나 형식이 깨지면 한 번 더(짧게)
+        u = user if attempt == 0 else user + "\n\n[중요] 지난 답이 길이 제한에 잘렸거나 형식이 깨졌다. 설명 없이 <json>{\"cuts\": [컷 1개]}</json> 하나만, voice_lines·expression_beats는 짧게."
+        text, _ = claude(dmodel, director_system(ctx), u, max_tokens=12000, stage="cut_card", episode_id=ep,
+                         scene_no=cut.get("scene_no"), cut_code=cut.get("code"), note="감독 컷 수정" + (" (다시)" if attempt else ""))
+        d = safe_json(text) or {}
+        new = (d.get("cuts") or [None])[0] if isinstance(d.get("cuts"), list) else None
+        if isinstance(new, dict) and new.get("prompt"):
+            break
+        why = ("감독 답이 길이 제한에 걸려 중간에 잘렸습니다" if CURRENT.get("last_stop") == "max_tokens"
+               else f"감독 답이 정해진 형식(JSON)이 아니었습니다: {(text or '').strip()[:120]!r}")
+        log(f"{cut.get('code')} 감독 컷 수정 실패({attempt + 1}/2): {why}")
     if not new or not new.get("prompt"):
-        raise RuntimeError("감독이 고친 프롬프트를 만들지 못했습니다")
+        raise RuntimeError(f"감독이 고친 프롬프트를 만들지 못했습니다 — {why} (두 번 시도)")
     new["prompt"] = tidy_prompt(new["prompt"])
     if not new.get("prompt_ko"):
         try:
