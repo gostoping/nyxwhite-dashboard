@@ -9713,6 +9713,16 @@ async function renderProduction(ep, quietRefresh = false) {
   const srTask = tasks.filter(t => t.kind === 'cut_review' && t.payload?.mode === 'script').sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
   let srRes = null; try { srRes = srTask?.status === 'done' ? JSON.parse(srTask.result || 'null') : null; } catch (e) {}
   const srBusy = srTask && ['queued', 'running'].includes(srTask.status);
+  // '그대로 적용하기'를 눌렀으면: 작가실 반영 → 확정 → 감독 다시 설계가 끝날 때까지 '반영 중', 끝나면 '반영 완료'(확인 N건은 접어 둔다)
+  const srAp = srTask?.payload?.applied ? (() => {
+    const at = new Date(srTask.payload.applied_at || 0).getTime();
+    const chain = tasks.filter(t => ['writers_room', 'director'].includes(t.kind) && new Date(t.created_at).getTime() >= at - 2000);
+    const wr = chain.find(t => t.id === srTask.payload.applied) || chain.find(t => t.kind === 'writers_room');
+    if (chain.some(t => ['queued', 'running'].includes(t.status))) return { st: 'run', msg: chain.some(t => t.kind === 'director' && ['queued', 'running'].includes(t.status)) ? '감독이 컷을 다시 설계하는 중' : '작가실이 고친 정리본을 만드는 중' };
+    if (wr && wr.status === 'failed') return { st: 'fail', msg: wr.error || '반영 실패' };
+    if (wr && wr.status === 'done' && /확정 대기/.test(wr.result || '')) return { st: 'wait', msg: '작가실이 흐름 변경도 제안해 자동 확정하지 않았습니다 — 대본 탭에서 정리본을 확정해 주세요' };
+    return { st: 'done', msg: (wr?.result || '').slice(0, 120) };
+  })() : null;
   // 지금 컷 기준으로 한 대본 감수인가(컷을 다시 설계했으면 다시 감수)
   const lastCut = cuts.reduce((m, c) => Math.max(m, new Date(c.created_at).getTime()), 0);
   const srFresh = srRes && srTask.finished_at && new Date(srTask.finished_at).getTime() >= lastCut - 60e3;
@@ -9737,7 +9747,8 @@ async function renderProduction(ep, quietRefresh = false) {
     // 작가실 정리 → 확정 → 컷 설계(자동)까지 넘어오면: 대본 감수로 빠진 것 없는지 확인 → 승인 대기 컷 전체 생성
     : designedCost && srBusy ? { t: '대본 감수 중', d: '대본감수자가 원고·정리본·컷을 씬 순서대로 대조하고 있습니다. 끝나면 아래에 결과가 나옵니다' }
     : designedCost && !srFresh ? { t: '대본 감수', d: `작가실이 정리해 온 대본과 컷 ${toReview.length}개가 씬 순서대로 빠짐없는지 확인합니다(Claude 비용, 수백 원). 이상 없으면 전체 생성으로`, k: 'scr' }
-    : designedCost && srRes?.verdict === 'fix' ? { t: '대본 감수에서 확인할 것 ' + srRes.issues.length + '건', d: '아래 표를 확인하세요. 괜찮으면 그대로 승인 대기 컷 전체 생성을 누르면 됩니다', k: 'ap' }
+    : srAp?.st === 'run' ? { t: '대본 감수 반영 중', d: srAp.msg + ' — 끝나면 아래 씬 순서가 새로 채워집니다' }
+    : designedCost && srRes?.verdict === 'fix' && !srAp ? { t: '대본 감수에서 확인할 것 ' + srRes.issues.length + '건', d: '아래 표를 확인하세요. 괜찮으면 그대로 승인 대기 컷 전체 생성을 누르면 됩니다', k: 'ap' }
     : designedCost ? { t: '영상 생성 승인', d: `승인 대기 컷 ${cuts.filter(c => ['designed', 'failed', 'hold'].includes(c.status)).length}개 · 씬마다 따로 승인할 수도 있습니다`, k: 'ap' }
     : inProg ? { t: '영상 만드는 중', d: `${inProg}컷 생성·감수 중 · 통과 ${passed}/${cuts.length}` }
     : passed ? { t: '편집실에서 이어 붙이기', d: `통과 ${passed}/${cuts.length}컷`, k: 'ed' }
@@ -9762,11 +9773,14 @@ async function renderProduction(ep, quietRefresh = false) {
     <div class="row" style="margin-top:10px;gap:6px">${others}
       <span class="quiet" style="margin-left:auto;font-size:12.5px">${G.generation?.video_model === 'kling-4.0' ? 'Kling 4.0' : 'Seedance 2.5'} · 대사 ${G.generation?.dialogue_tool === 'elevenlabs' ? 'ElevenLabs' : 'Higgsfield'} · ${esc(G.generation?.resolution || '480p')} · ${esc(G.generation?.aspect_ratio || '9:16')}
         · 보관 ${hasWin ? '집 PC(OneDrive)' : '<b>집 PC 에이전트 미설치</b>'} · <a href="#settings" id="pSet">바꾸기</a></span></div>
-    ${srTask && (srRes || srTask.status === 'failed' || srBusy) ? `<details class="srbox" ${srRes?.verdict === 'fix' ? 'open' : ''}><summary><b>대본 감수</b> ${srBusy ? '<span class="spin"></span> 대본감수자가 원고·정리본을 대조하는 중'
-      : srTask.status === 'failed' ? pill('실패', 'bad') + ' ' + esc(srTask.error || '') : pill(srRes.verdict === 'pass' ? '통과' : `확인 ${srRes.issues.length}건`, srRes.verdict === 'pass' ? 'good' : 'warn') + ` <span class="quiet">${esc(srRes.summary || '')} · 씬 ${srRes.scenes}개${srRes.cuts ? ` · 컷 ${srRes.cuts}개` : ''} · ${fmt(srTask.finished_at)}</span>`}</summary>
-      ${srRes?.issues?.length ? `<table style="margin-top:6px"><tr><th>씬</th><th>종류</th><th>원문</th><th>지금</th><th>고칠 곳</th></tr>${srRes.issues.map(i => `<tr><td style="white-space:nowrap">${esc(i.scene || '')}</td><td style="white-space:nowrap">${esc(i.type || '')}</td>
-        <td class="quiet">${esc(i.original || '')}</td><td>${esc(i.now || '')}</td><td>${esc([i.who, i.fix].filter(Boolean).join(': '))}</td></tr>`).join('')}</table>
-        <div class="row" style="margin-top:8px;gap:8px"><button class="btn small primary" id="srApply" ${busyKinds.has('writers_room') || busyKinds.has('director') ? 'disabled' : ''}>그대로 적용하기</button>
+    ${srTask && (srRes || srTask.status === 'failed' || srBusy) ? `<details class="srbox" ${srRes?.verdict === 'fix' && (!srAp || srAp.st !== 'done') ? 'open' : ''}><summary><b>대본 감수</b> ${srBusy ? '<span class="spin"></span> 대본감수자가 원고·정리본을 대조하는 중'
+      : srTask.status === 'failed' ? pill('실패', 'bad') + ' ' + esc(srTask.error || '')
+      : srAp ? (srAp.st === 'run' ? `<span class="spin"></span> ${pill('반영 중', 'warn')} <span class="quiet">${esc(srAp.msg)}</span>` : srAp.st === 'done' ? `${pill(`반영 완료 · ${srRes.issues.length}건`, 'good')} <span class="quiet">고친 정리본이 확정됐고 감독이 컷을 다시 설계했습니다. 필요하면 대본 감수를 한 번 더 하세요</span>`
+          : srAp.st === 'wait' ? `${pill('확정 대기', 'warn')} <span class="quiet">${esc(srAp.msg)}</span>` : `${pill('반영 실패', 'bad')} <span class="quiet">${esc(srAp.msg)}</span>`)
+      : pill(srRes.verdict === 'pass' ? '통과' : `확인 ${srRes.issues.length}건`, srRes.verdict === 'pass' ? 'good' : 'warn') + ` <span class="quiet">${esc(srRes.summary || '')} · 씬 ${srRes.scenes}개${srRes.cuts ? ` · 컷 ${srRes.cuts}개` : ''} · ${fmt(srTask.finished_at)}</span>`}</summary>
+      ${srRes?.issues?.length ? `${srAp && srAp.st !== 'fail' ? '<details style="margin-top:6px"><summary class="quiet">반영한 내용 보기</summary>' : ''}<table style="margin-top:6px"><tr><th>씬</th><th>종류</th><th>원문</th><th>지금</th><th>고칠 곳</th></tr>${srRes.issues.map(i => `<tr><td style="white-space:nowrap">${esc(i.scene || '')}</td><td style="white-space:nowrap">${esc(i.type || '')}</td>
+        <td class="quiet">${esc(i.original || '')}</td><td>${esc(i.now || '')}</td><td>${esc([i.who, i.fix].filter(Boolean).join(': '))}</td></tr>`).join('')}</table>${srAp && srAp.st !== 'fail' ? '</details>' : ''}
+        <div class="row" style="margin-top:8px;gap:8px;${srAp && srAp.st !== 'fail' ? 'display:none' : ''}"><button class="btn small primary" id="srApply" ${busyKinds.has('writers_room') || busyKinds.has('director') ? 'disabled' : ''}>그대로 적용하기</button>
           <span class="quiet">작가실이 위 내용을 모두 고친 정리본을 만들어 바로 확정 → 감독이 컷을 다시 설계합니다(이미 생성한 컷은 그대로). 감독만 고칠 것(컷 누락)이면 그 씬만 다시 설계합니다.</span></div>` : ''}</details>` : ''}
     ${S.noVoice?.length || S.noPhoto?.length ? `<div class="msg" style="background:var(--accent-soft)"><b>바이블에 아직 없는 것</b> — 이대로 만들면 영상의 얼굴이 장면마다 달라질 수 있어요
       ${S.noPhoto?.length ? `<div style="margin-top:4px">📷 사진이 정해지지 않은 인물·협찬: <b>${esc(S.noPhoto.join(', '))}</b> — <a href="#bible" data-bgo="photo">바이블에서 한꺼번에 만들기</a></div>` : ''}
@@ -9998,18 +10012,21 @@ function bindProduction(ep, ctx) {
     await addTask({ kind: 'writers_room', payload: {} }); toast('작가실에 맡겼습니다'); again();
   });
   const sa = $('#srApply'); if (sa) sa.onclick = guard(async () => {
-    const st = (await q(S.sb.from('pipeline_tasks').select('result').eq('episode_id', ep.id).eq('kind', 'cut_review').eq('status', 'done').eq('payload->>mode', 'script').order('finished_at', { ascending: false }).limit(1)))[0];
+    const st = (await q(S.sb.from('pipeline_tasks').select('id,payload,result').eq('episode_id', ep.id).eq('kind', 'cut_review').eq('status', 'done').eq('payload->>mode', 'script').order('finished_at', { ascending: false }).limit(1)))[0];
     let r = null; try { r = JSON.parse(st?.result || 'null'); } catch (e) {}
     const issues = r?.issues || []; if (!issues.length) return toast('적용할 내용이 없습니다');
+    const markApplied = async id => { if (st?.id) await q(S.sb.from('pipeline_tasks').update({ payload: { ...(st.payload || {}), applied: id || true, applied_at: new Date().toISOString() } }).eq('id', st.id)); };
     const writerIss = issues.filter(i => i.who !== '감독'), dirIss = issues.filter(i => i.who === '감독');
     if (writerIss.length) {
       if (!confirm(`대본 감수 ${issues.length}건을 그대로 적용합니다.\n작가실이 고친 정리본을 만들어 바로 확정하고, 감독이 컷을 다시 설계합니다(이미 생성한 컷은 그대로).\n(Claude 비용, 한 화에 수백 원~천 원대)`)) return;
-      await addTask({ kind: 'writers_room', payload: { source_version_id: ctx.confirmed?.id, fix_issues: issues.map(i => ({ scene: i.scene, type: i.type, original: i.original, now: i.now, fix: i.fix })) } });
+      const wt = await addTask({ kind: 'writers_room', payload: { source_version_id: ctx.confirmed?.id, fix_issues: issues.map(i => ({ scene: i.scene, type: i.type, original: i.original, now: i.now, fix: i.fix })) } });
+      await markApplied(wt?.id);
       toast('작가실이 대본 감수 내용을 반영하고 있습니다'); return again();
     }
     const scenes = [...new Set(dirIss.map(i => parseInt(String(i.scene || '').replace(/\D+/g, ''), 10)).filter(n => n > 0))];
     if (!confirm(`감독이 ${scenes.length ? 'S#' + scenes.join(', S#') : '이 화 전체'} 컷을 다시 설계합니다(이미 생성한 컷은 그대로).`)) return;
-    await addTask({ kind: 'director', payload: { script_version_id: ctx.confirmed?.id, ...(scenes.length ? { scenes, prepped: true } : {}) } });
+    const dt = await addTask({ kind: 'director', payload: { script_version_id: ctx.confirmed?.id, ...(scenes.length ? { scenes, prepped: true } : {}) } });
+    await markApplied(dt?.id);
     toast('감독에게 맡겼습니다'); again();
   });
   const ps = $('#pScr'); if (ps) ps.onclick = guard(async () => {
