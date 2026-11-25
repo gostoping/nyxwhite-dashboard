@@ -270,6 +270,10 @@
   .ed-lane-h { height: var(--th, 46px); display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--quiet); border-bottom: 1px solid var(--line); }
   .ed-lane-h:first-child { height: 24px; }
   .ed-scroll { overflow-x: auto; overflow-y: hidden; position: relative; }
+  .ed-scroll::-webkit-scrollbar { height: 12px; } .ed-scroll::-webkit-scrollbar-thumb { background: #b9c0cc; border-radius: 6px; } .ed-scroll::-webkit-scrollbar-track { background: var(--bg); }
+  .ed-nav { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .ed-nav input[type=range] { flex: 1; min-width: 200px; }
+  .ed-nav .quiet { font-size: 12px; min-width: 130px; text-align: center; }
   .ed-canvas { position: relative; min-width: 100%; touch-action: pan-x; }
   .ed-ruler { position: relative; height: 24px; border-bottom: 1px solid var(--line); background: var(--bg); cursor: pointer; }
   .ed-ruler span { position: absolute; top: 4px; font-size: 10.5px; color: var(--quiet); transform: translateX(2px); border-left: 1px solid var(--line); padding-left: 3px; }
@@ -10673,8 +10677,18 @@ function edRender() {
         <div class="ed-track" data-track="voice">${L.clips.map(x => edVoiceBlock(x)).join('')}</div>
         <div class="ed-track" data-track="music">${ED.tl.music.map(m => edMusicBlock(m)).join('')}</div>
         <div class="ed-track" data-track="subs">${L.subs.map(x => edSubBlock(x)).join('')}</div>
-        <div class="ed-head" id="eHead" style="left:${ED.t * ED.pps}px"><div class="grip" title="끌어서 원하는 곳으로 옮기면 그 자리부터 재생됩니다"></div></div>
+        <div class="ed-head" id="eHead" style="left:${ED.t * ED.pps}px"><div class="grip" title="끌어서 옮기세요 — 멈춘 상태면 그 자리에 그대로 있어 자르기·나누기 위치가 되고, 재생 중이면 그 자리부터 이어서 재생됩니다"></div></div>
       </div></div>
+    </div>
+    <div class="ed-nav">
+      <button class="btn small" id="eNavStart" title="화면만 맨 앞(첫 컷)으로 — 재생 위치는 그대로">⏮ 처음</button>
+      <button class="btn small" id="eNavL" title="화면을 왼쪽으로">◀</button>
+      <input type="range" id="eNavBar" min="0" max="1000" value="0" title="끌어서 타임라인을 왼쪽·오른쪽으로 옮겨 봅니다(재생 위치는 그대로)">
+      <button class="btn small" id="eNavR" title="화면을 오른쪽으로">▶</button>
+      <button class="btn small" id="eNavEnd" title="화면만 맨 뒤(마지막 컷)로 — 재생 위치는 그대로">끝 ⏭</button>
+      <span class="quiet" id="eNavTxt"></span>
+      <button class="btn small" id="eNavHead" title="빨간 선이 있는 곳으로 화면을 옮깁니다">📍 빨간 선으로</button>
+      <label class="quiet" style="min-width:0"><input type="checkbox" id="eFollow" ${ED.follow === false ? '' : 'checked'}> 빨간 선 따라가기</label>
     </div>
     <div class="quiet ed-keys">단축키: 스페이스 재생 · ←/→ 0.1초 이동(⇧ 1초) · +/− 크게·작게 · S 나누기 · Q 앞 잘라내기 · W 뒤 잘라내기 · Delete 빼기 · ⌘Z 되돌리기 · 컷을 끌어 순서 변경 · 가장자리를 끌어 자르기 · 대사 막대를 끌어 대사 위치 조정</div>
   </div>
@@ -10835,7 +10849,8 @@ function edBind() {
   $('#ePrev').onclick = () => { const xs = ED.L.clips; const cur = xs.findLast(x => x.start < ED.t - 0.3); edSeek(cur ? cur.start : 0); };
   $('#eNext').onclick = () => { const nx = ED.L.clips.find(x => x.start > ED.t + 0.01); if (nx) edSeek(nx.start); };
   $('#eShowSub').onchange = e => { ED.showSub = e.target.checked; edSyncSub(); };
-  $('#eZoom').oninput = e => { ED.pps = +e.target.value; ED.ppsSet = true; edRender(); };
+  $('#eZoom').oninput = e => { ED.pps = +e.target.value; ED.ppsSet = true; ED.userScrollAt = 0; edRender(); edFollow(true); };
+  edNavBind();
   $('#eFit').onclick = () => { ED.ppsSet = false; edRender(); };
   $('#eSplit').onclick = edSplit;
   $('#eLoop').onclick = edLoopToggle;
@@ -10971,11 +10986,9 @@ function edLiveTracks() {
 // 크게/작게: 가로(초당 픽셀)와 칸 높이를 함께 바꾸고, 재생 위치가 화면 같은 자리에 머물게
 const ED_TH = [46, 64, 84, 110];
 function edZoom(dir) {
-  const sc = $('#eScroll'); const off = sc ? ED.t * ED.pps - sc.scrollLeft : 60;
   ED.pps = Math.max(4, Math.min(400, Math.round(ED.pps * (dir > 0 ? 1.6 : 1 / 1.6))));
   const i = ED_TH.indexOf(ED.th || 46); ED.th = ED_TH[Math.max(0, Math.min(ED_TH.length - 1, (i < 0 ? 0 : i) + (dir > 0 ? 1 : -1)))];
-  ED.ppsSet = true; edRender();
-  const sc2 = $('#eScroll'); if (sc2) sc2.scrollLeft = Math.max(0, ED.t * ED.pps - off);
+  ED.ppsSet = true; ED.userScrollAt = 0; edRender(); edFollow(true);   // 확대하면 빨간 선 자리를 중심으로 크게
 }
 function edLoopToggle() {
   if (ED.loop) { ED.loop = null; edLiveTracks(); edLoopBtn(); return toast('반복재생을 풀었습니다 — 이어서 재생합니다'); }
@@ -11082,7 +11095,43 @@ function edSyncSub() {
 function edUiTime() {
   const h = $('#eHead'); if (h) h.style.left = ED.t * ED.pps + 'px';
   const tm = $('#eTime'); if (tm) tm.textContent = `${fmtT(ED.t)} / ${fmtT(ED.L.total)}`;
-  const sc = $('#eScroll'); if (sc && ED.playing) { const px = ED.t * ED.pps; if (px < sc.scrollLeft || px > sc.scrollLeft + sc.clientWidth - 40) sc.scrollLeft = px - 60; }
+  edFollow();
+}
+// 빨간 선 따라가기: 재생 중에는 빨간 선이 화면 40% 자리에 머물게 영상·대사·자막이 함께 따라 움직이고,
+// 멈춰 있을 때는 빨간 선이 화면 밖으로 나가면 다시 데려온다. 직접 화면을 옮기는 동안(3초)은 따라가지 않는다.
+function edFollow(force) {
+  const sc = $('#eScroll'); if (!sc) return;
+  if (!force && (ED.dragHead || ED.follow === false || Date.now() - (ED.userScrollAt || 0) < 3000)) return;
+  const px = ED.t * ED.pps, w = sc.clientWidth;
+  const out = px < sc.scrollLeft + 20 || px > sc.scrollLeft + w - 40;
+  if (force || ED.playing || out) edScrollTo(px - w * 0.4);
+}
+function edScrollTo(x) {
+  const sc = $('#eScroll'); if (!sc) return;
+  const nx = Math.max(0, Math.min(sc.scrollWidth - sc.clientWidth, Math.round(x)));
+  if (Math.abs(sc.scrollLeft - nx) < 1) return edNavSync();
+  ED.progScroll = true; sc.scrollLeft = nx; edNavSync();
+}
+function edNavSync() {
+  const sc = $('#eScroll'), bar = $('#eNavBar'), tx = $('#eNavTxt'); if (!sc || !bar) return;
+  const max = Math.max(0, sc.scrollWidth - sc.clientWidth);
+  bar.disabled = max < 2; bar.value = max ? Math.round(sc.scrollLeft / max * 1000) : 0;
+  const a = sc.scrollLeft / ED.pps, b = Math.min(ED.L.total, (sc.scrollLeft + sc.clientWidth) / ED.pps);
+  if (tx) tx.textContent = `보는 구간 ${fmtT(a)} ~ ${fmtT(b)}`;
+}
+function edNavBind() {
+  const sc = $('#eScroll'), bar = $('#eNavBar'); if (!sc || !bar) return;
+  sc.addEventListener('scroll', () => { if (ED.progScroll) ED.progScroll = false; else ED.userScrollAt = Date.now(); edNavSync(); });
+  sc.addEventListener('wheel', () => { ED.userScrollAt = Date.now(); }, { passive: true });
+  const max = () => Math.max(0, sc.scrollWidth - sc.clientWidth);
+  bar.oninput = () => { ED.userScrollAt = Date.now(); ED.progScroll = true; sc.scrollLeft = +bar.value / 1000 * max(); edNavSync(); };
+  const page = d => { ED.userScrollAt = Date.now(); ED.progScroll = true; sc.scrollLeft += d * sc.clientWidth * 0.7; edNavSync(); };
+  $('#eNavL').onclick = () => page(-1); $('#eNavR').onclick = () => page(1);
+  $('#eNavStart').onclick = () => { ED.userScrollAt = Date.now(); ED.progScroll = true; sc.scrollLeft = 0; edNavSync(); };
+  $('#eNavEnd').onclick = () => { ED.userScrollAt = Date.now(); ED.progScroll = true; sc.scrollLeft = max(); edNavSync(); };
+  $('#eNavHead').onclick = () => { ED.userScrollAt = 0; edFollow(true); };
+  $('#eFollow').onchange = e => { ED.follow = e.target.checked; if (ED.follow) { ED.userScrollAt = 0; edFollow(true); } };
+  edNavSync();
 }
 function edPlay(stopAt) {
   if (!ED.L.clips.length) return;
@@ -11126,11 +11175,13 @@ function edBindHead() {
   const head = $('#eHead'), grip = head?.querySelector('.grip'), cv = $('#eCanvas'); if (!grip || !cv) return;
   grip.onpointerdown = ev => {
     ev.preventDefault(); ev.stopPropagation(); grip.setPointerCapture(ev.pointerId);
-    const wasPlaying = ED.playing; edPause(); head.classList.add('drag');
+    const wasPlaying = ED.playing; edPause(); head.classList.add('drag'); ED.dragHead = true;
     const at = e => Math.max(0, (e.clientX - cv.getBoundingClientRect().left) / ED.pps);
     let raf = 0;
     grip.onpointermove = e => { const t = at(e); ED.t = Math.min(ED.L.total, t); edUiTime(); if (!raf) raf = requestAnimationFrame(() => { raf = 0; edShowFrame(); }); };
-    grip.onpointerup = e => { grip.onpointermove = grip.onpointerup = null; head.classList.remove('drag'); edSeek(at(e), false); edPlay(); void wasPlaying; };
+    // 멈춘 상태에서 옮기면 그 자리에 그대로 둔다(자르기·나누기 위치). 재생 중이었으면 옮긴 자리부터 이어서 재생
+    grip.onpointerup = grip.onpointercancel = e => { grip.onpointermove = grip.onpointerup = grip.onpointercancel = null; head.classList.remove('drag'); ED.dragHead = false;
+      edSeek(Math.min(ED.L.total, at(e)), false); if (wasPlaying) edPlay(); };
   };
 }
 function edMusicSync() {
