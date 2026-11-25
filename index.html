@@ -204,6 +204,8 @@
   .pk { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 0; cursor: pointer; color: var(--ink); } .pk.on { border-color: var(--accent); background: var(--accent-soft); }
   .pk input { width: auto; margin-right: 4px; } .pk { position: relative; } .pkhold { position: absolute; right: 8px; top: 6px; font-size: 12px; cursor: pointer; }
   .vidpop video, .vidpop img { max-height: calc(100vh - 110px); max-width: 94vw; width: auto; border-radius: 8px; background: #000; display: block; }
+  .vlive { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; } .vlive audio { height: 32px; max-width: 260px; margin: 0; }
+  .vfail { color: var(--bad); font-size: 13px; } .vfail .quiet { display: block; font-size: 12px; }
   .srbox { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); } .srbox > summary { cursor: pointer; }
   .srbox table td { font-size: 13px; vertical-align: top; }
   .balrow { display: grid; grid-template-columns: 170px auto 1fr auto; gap: 4px 12px; align-items: baseline; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
@@ -7265,7 +7267,8 @@ async function viewBible(main) {
           <label class="btn small only-up" style="margin:0" title="외부에서 구한 사진을 기준 사진으로 넣고 바로 적용합니다. 코디네이터가 사진을 보고 묘사·영어 프롬프트를 자동으로 씁니다">사진 올리기<input type="file" accept="image/*" multiple hidden data-pup="${esc(e.id)}"></label>
           ${e.category === 'character' && (c?.image_paths || []).length ? `<button class="btn small only-up" data-pd="${esc(e.id)}" title="올린 사진으로 Soul ID를 학습해 같은 얼굴의 기준 사진을 만듭니다">${c?.soul_id ? '얼굴 다시 고정' : '이 사진으로 얼굴 고정'}</button>` : ''}</div></div>` : ''}
         ${['character', 'voice'].includes(e.category) ? `<div class="brow"><span class="blbl">목소리</span><div class="bbtns">
-          ${c?.voice_id ? `<button class="btn small" data-vlisten="${esc(e.id)}">🔊 지금 목소리 듣기·바꾸기</button>`
+          <span class="vlive" id="vlive-${esc(e.id)}"></span>
+          ${c?.voice_id ? `<button class="btn small" data-vlisten="${esc(e.id)}">후보 보기·바꾸기</button>`
             : e.same_as ? `<span class="quiet">동일인의 목소리를 그대로 씁니다</span>` : `<span class="quiet">추천 목소리를 자동으로 만들어 넣습니다(후보 1번 먼저 적용)</span>`}
           <button class="btn small" data-vd="${esc(e.id)}">${c?.voice_id ? '목소리 다시 디자인' : '목소리 디자인'}</button>
           <label class="btn small" style="margin:0" title="녹음 파일(30초~2분, 잡음 적게)을 올리면 ElevenLabs가 그 목소리로 만들어 바로 바이블에 넣습니다. 사용 권리가 있는 목소리만 올려 주세요">목소리 파일 올리기<input type="file" accept="audio/*,.m4a,.mp3,.wav" data-vup="${esc(e.id)}" hidden></label></div></div>` : ''}
@@ -7555,8 +7558,9 @@ async function viewBible(main) {
   main.querySelectorAll('[data-vd]').forEach(b => b.onclick = () => {
     const e = entries.find(x => x.id === b.dataset.vd); openVoiceDesign(e, cur(e.id), true);
   });
-  const vds = entries.length ? await q(S.sb.from('voice_designs').select('*').in('entry_id', entries.map(e => e.id))
-    .in('status', ['queued', 'ready', 'saving', 'saved', 'failed']).order('created_at', { ascending: false })) : [];
+  const vdsAll = entries.length ? await q(S.sb.from('voice_designs').select('*').in('entry_id', entries.map(e => e.id)).order('created_at', { ascending: false })) : [];
+  fillVoiceRows(entries, cur, vdsAll).catch(e => console.warn('목소리 줄', e));
+  const vds = vdsAll.filter(d => ['queued', 'ready', 'saving', 'failed'].includes(d.status) && vdsAll.find(x => x.entry_id === d.entry_id) === d);
   [...new Set(vds.map(d => d.entry_id))].forEach(id => { const e = entries.find(x => x.id === id); if (e) openVoiceDesign(e, cur(e.id), false); });
   main.querySelectorAll('[data-bhist]').forEach(b => b.onclick = () => {
     const box = document.getElementById('bh-' + b.dataset.bhist);
@@ -7726,6 +7730,26 @@ async function openPhotoDesign(entry, cur, fresh) {
 
 // 목소리 디자인: 설명 → ElevenLabs 후보 3개 → 듣고 고르기 → 바이블 새 버전으로 적용
 const vdSample = full => { const name = full.replace(/\s*\(.*?\)\s*/g, '').trim(); return `안녕하세요, 저는 ${name}예요. 오늘 처음으로 무대에 서는 날이라 너무 떨려요. 그래도 여기까지 온 이유를 잊지 않을 거예요. 끝까지 해 볼게요. 지켜봐 주세요!`; };
+// 바이블 카드 '목소리' 줄: 지금 쓰는 목소리를 바로 들을 수 있게(재생기) + 만드는 중·실패 이유를 그 자리에서
+async function fillVoiceRows(entries, cur, vds) {
+  const latest = {}; vds.forEach(d => { if (!latest[d.entry_id]) latest[d.entry_id] = d; });
+  const inUse = {};   // 지금 바이블 목소리(voice_id)를 만든 디자인 → 그 소리 파일
+  entries.forEach(e => { const vid = cur(e.id)?.voice_id; const d = vid && vds.find(x => x.entry_id === e.id && x.voice_id === vid);
+    if (d) inUse[e.id] = d.preview_path || (d.previews || []).find(p => p.generated_voice_id === d.chosen_generated_id)?.path || null; });
+  const paths = Object.values(inUse).filter(Boolean);
+  const urls = {};
+  if (paths.length) { const { data } = await S.sb.storage.from('takes').createSignedUrls(paths, 3600); (data || []).forEach(x => { if (x.signedUrl) urls[x.path] = x.signedUrl; }); }
+  entries.forEach(e => {
+    const el = document.getElementById('vlive-' + e.id); if (!el) return;
+    const d = latest[e.id], c = cur(e.id), u = inUse[e.id] && urls[inUse[e.id]];
+    const busy = d && ['queued', 'saving'].includes(d.status);
+    const fail = d && d.status === 'failed';
+    el.innerHTML = `${u ? `<audio controls preload="none" src="${esc(u)}" title="지금 바이블에 적용된 목소리"></audio>`
+        : c?.voice_id ? `<span class="quiet">목소리 적용됨 · 들을 샘플이 없음(후보 보기에서 다시 만들기)</span>` : ''}
+      ${busy ? `<span class="quiet"><span class="spin"></span> ${d.sample_path ? '올린 파일로 ElevenLabs가 목소리를 만드는 중' : d.status === 'saving' ? '목소리 저장 중' : '목소리 후보 만드는 중'}</span>` : ''}
+      ${fail ? `<span class="vfail">❌ ${d.sample_path ? '올린 목소리' : '목소리'} 실패: ${esc(explainFail('voice_design', d.error).what)} <span class="quiet">${esc((d.error || '').slice(0, 220))}</span></span>` : ''}`;
+  });
+}
 async function openVoiceDesign(entry, cur, fresh, listen) {
   const box = document.getElementById('vd-' + entry.id); if (!box) return;
   S.vdTimer = S.vdTimer || {}; clearTimeout(S.vdTimer[entry.id]);
