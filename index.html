@@ -204,6 +204,8 @@
   .pk { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 0; cursor: pointer; color: var(--ink); } .pk.on { border-color: var(--accent); background: var(--accent-soft); }
   .pk input { width: auto; margin-right: 4px; } .pk { position: relative; } .pkhold { position: absolute; right: 8px; top: 6px; font-size: 12px; cursor: pointer; }
   .vidpop video, .vidpop img { max-height: calc(100vh - 110px); max-width: 94vw; width: auto; border-radius: 8px; background: #000; display: block; }
+  .srbox { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); } .srbox > summary { cursor: pointer; }
+  .srbox table td { font-size: 13px; vertical-align: top; }
   .balrow { display: grid; grid-template-columns: 170px auto 1fr auto; gap: 4px 12px; align-items: baseline; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
   .balrow .good { color: var(--good); font-weight: 600; } .balrow .warn { color: var(--warn); font-weight: 600; } .balrow .bad { color: var(--bad); font-weight: 600; }
   @media (max-width: 760px) { .balrow { grid-template-columns: 1fr auto; } .balrow > .quiet:nth-child(3) { grid-column: 1 / -1; } }
@@ -3271,7 +3273,7 @@ def review_take(take_id, local_mp4=None):
                         + "\n컷 설계 때 승인된 대사 미리 듣기(목표): " + json.dumps(sound["planned"], ensure_ascii=False)})
     content.append({"type": "text", "text": "[컷 설계]\n" + json.dumps({k: cut.get(k) for k in (
         'code', 'seconds', 'summary', 'dialogue', 'emotion', 'expression_beats', 'camera', 'reference_names', 'prompt')}, ensure_ascii=False)})
-    system = (guide(ctx, "영상감수자", "감정감수자", "최종감수자") or "너는 영상감수자다.") + f"""
+    system = (guide(ctx, "영상감수자", "감정감수자") or "너는 영상감수자다.") + f"""
 
 [시리즈 바이블]
 {bible_text(ctx)}
@@ -3379,6 +3381,9 @@ def auto_rough_cut(ep):
 
 @task("video_review")
 def t_video_review(t):
+    mode = (t.get("payload") or {}).get("mode")
+    if mode in FOCUS:   # 대표가 컷에서 누른 영상·음성·감정 감수(컷 상태는 바꾸지 않음)
+        return review_take_focus(t["take_id"], mode)
     try:
         v, s = review_take(t["take_id"])
     except Exception as e:
@@ -4315,12 +4320,145 @@ VIDEO_REVIEW_RULES = """[영상감수자 — 영상을 만들기 전에 컷 설�
 6) 프롬프트가 영어로 명확한가(대사는 한국어 원문 그대로 따옴표)."""
 
 
+def script_review(t):
+    """대본감수자: 원고 → 작가실 정리본(→ 컷 설계)이 씬 순서대로 빠짐없이 옮겨졌는지. 결과는 JSON으로 남겨 제작 탭이 보여 준다."""
+    ep = t["episode_id"]
+    ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep)
+    vers = rpc("agent_script_versions", p_token=TOKEN, p_episode=ep) or []
+    orig = next((v for v in vers if (v.get("note") or "").startswith("원고") or v.get("version_no") is None), vers[0] if vers else None)
+    conf = next((v for v in reversed(vers) if v.get("status") == "confirmed"), None)
+    draft = conf or next((v for v in reversed(vers) if v is not orig and v.get("status") in ("draft", "proposed", "review")), None)
+    if not orig or not draft or orig is draft:
+        raise RuntimeError("대본 감수할 정리본이 없습니다. 먼저 '작가실 정리 실행'으로 정리본을 만들어 주세요")
+    # ① 기계 점검: 씬 번호가 1부터 빠짐·겹침 없이 이어지는가
+    nos = [n for n, _, _ in split_scenes(draft["content"]) if n]
+    mech = []
+    if not nos:
+        mech.append("정리본에 씬 머리(S#번호)가 없습니다")
+    else:
+        dup = sorted({n for n in nos if nos.count(n) > 1})
+        gap = [n for n in range(1, max(nos) + 1) if n not in nos]
+        if dup:
+            mech.append("겹치는 씬 번호: " + ", ".join(f"S#{n}" for n in dup))
+        if gap:
+            mech.append("빠진 씬 번호: " + ", ".join(f"S#{n}" for n in gap))
+        if nos != sorted(nos):
+            mech.append("씬 번호가 순서대로가 아닙니다: " + " → ".join(f"S#{n}" for n in nos[:30]))
+    cuts = rpc("agent_list_cuts", p_token=TOKEN, p_episode=ep) or []
+    cut_view = [{k: c.get(k) for k in ("scene_no", "cut_no", "dialogue", "summary")} for c in cuts if c.get("status") != "cancelled"]
+    if cut_view:
+        no_cut = [n for n in nos if not any(int(c["scene_no"] or 0) == n for c in cut_view)]
+        if no_cut:
+            mech.append("컷이 없는 씬: " + ", ".join(f"S#{n}" for n in no_cut))
+    model = setting(ctx, "generation", "claude_reviewer", "claude-sonnet-5-5")
+    system = (guide(ctx, "대본감수자") or "너는 대본감수자다. 원고 → 작가실 정리본 → 컷 설계가 씬 순서대로 빠짐없이 옮겨졌는지 감수한다.") + """
+
+[답 형식] 문제만 적는다. 감정선 보강으로 늘어난 지문·숨은 문제가 아니다. 대사는 글자 그대로여야 한다.
+<json>{"verdict": "pass|fix", "summary": "대표용 한두 줄",
+ "issues": [{"scene": "S#3", "type": "순서|누락|대사 변경|장소 구분|컷 누락|기타", "original": "원고(또는 정리본) 원문 짧게", "now": "지금 상태", "fix": "고칠 곳과 방법", "who": "작가실|감독|대표"}]}</json>"""
+    user = ("[대표 원고]\n" + orig["content"][:40000] + "\n\n[작가실 정리본" + (" — 확정" if draft is conf else " — 확정 전") + "]\n" + draft["content"][:50000]
+            + ("\n\n[컷 설계(씬·컷·대사)]\n" + json.dumps(cut_view, ensure_ascii=False)[:30000] if cut_view else "")
+            + ("\n\n[기계 점검에서 나온 것]\n" + "\n".join(mech) if mech else ""))
+    progress(f"대본감수자가 원고·정리본{'·컷 설계' if cut_view else ''}를 씬 순서대로 대조하는 중")
+    text, _ = claude(model, system, user, max_tokens=8000, stage="prompt_review", episode_id=ep, note="대본감수자: 원고·정리본 대조")
+    r = safe_json(text) or {}
+    issues = [i for i in (r.get("issues") or []) if isinstance(i, dict)][:40]
+    for m in mech:
+        issues.insert(0, {"scene": "", "type": "순서" if "번호" in m else "컷 누락", "original": "", "now": m, "fix": "", "who": "작가실" if "번호" in m or "머리" in m else "감독"})
+    verdict = "pass" if not issues and r.get("verdict") != "fix" else "fix"
+    out = {"verdict": verdict, "summary": r.get("summary") or ("문제 없음" if verdict == "pass" else f"확인할 것 {len(issues)}건"),
+           "issues": issues, "scenes": len(nos), "cuts": len(cut_view), "draft_version": draft.get("version_no"), "confirmed": draft is conf,
+           "at": datetime.now().isoformat(timespec="seconds")}
+    notify(f"{(ctx.get('episode') or {}).get('number')}화 대본 감수 {'통과' if verdict == 'pass' else f'확인 {len(issues)}건'}", out["summary"][:300],
+           "info" if verdict == "pass" else "warning")
+    return json.dumps(out, ensure_ascii=False)
+
+
+FOCUS = {
+    "video": ("영상감수자", "화면", "얼굴·의상·소품·배경이 바이블·앞뒤 컷과 같은가, 2~3초마다 표정 변화, 손짓·동작의 자연스러움(손가락·관절 왜곡), 움직임·카메라 속도, 깜빡임·AI 티, 화면 글자, 설계(프롬프트)대로인가"),
+    "voice": ("영상감수자", "음성", "들린 대사가 대본과 글자 그대로인가(빠진 말·바뀐 말), 화자가 맞는가, 같은 인물 목소리(높이·음색·나이)가 목표 미리 듣기·다른 컷과 같은가, 잡음·끊김·배경음악 섞임, 입모양과 대사 타이밍"),
+    "emotion": ("감정감수자", "감정", "표정·목소리 크기와 높낮이·동작이 대사의 감정선을 순서대로 따라가는가, 감정 정점에서 표정과 목소리가 함께 가장 큰가, 앞뒤 컷과 감정 온도가 이어지는가, 연기가 과하거나 밋밋하지 않은가"),
+}
+
+
+def review_take_focus(take_id, mode):
+    """생성된 영상을 한 가지 관점(영상·음성·감정)으로만 다시 감수한다. 컷 상태는 바꾸지 않고 결과만 남긴다(대표가 보고 '보완 요청')."""
+    who, label, what = FOCUS[mode]
+    take = rpc("agent_get_take", p_token=TOKEN, p_id=take_id)
+    cut = take["cut"]
+    ep = cut["episode_id"]
+    ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep, p_version=cut.get("script_version_id"))
+    model = setting(ctx, "generation", "claude_reviewer", "claude-sonnet-5-5")
+    src = os.path.join(HOME, "work", f"{take_id}_{mode}.mp4")
+    prev = (take.get("files") or {}).get("preview")
+    if prev:
+        fetch_to(storage_signed_url("takes", prev, 900), src)
+    elif take.get("remote_url"):
+        fetch_to(take["remote_url"], src)
+    else:
+        raise RuntimeError("감수할 영상 파일이 없습니다")
+    content = []
+    try:
+        if mode in ("video", "emotion"):
+            progress(f"{cut['code']} {who}가 {label} 감수: 장면을 1초 간격으로 보는 중")
+            fdir = os.path.join(HOME, "work", f"ff_{take_id}_{mode}")
+            os.makedirs(fdir, exist_ok=True)
+            ff("-i", src, "-vf", "fps=1,scale=448:-2", "-frames:v", "16", "-q:v", "4", os.path.join(fdir, "f_%02d.jpg"))
+            for i, fp in enumerate(sorted(glob.glob(os.path.join(fdir, "f_*.jpg")))):
+                with open(fp, "rb") as f:
+                    content += [{"type": "text", "text": f"{i}초"}, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.b64encode(f.read()).decode()}}]
+            shutil.rmtree(fdir, ignore_errors=True)
+        if mode in ("voice", "emotion"):
+            if not has_audio(src):
+                if mode == "voice":
+                    raise RuntimeError("이 영상에는 소리가 없습니다(음성 감수 불가)")
+            else:
+                progress(f"{cut['code']} {who}가 {label} 감수: 소리 받아쓰기·크기·높낮이 분석 중")
+                wav = os.path.join(HOME, "work", f"fa_{take_id}_{mode}.wav")
+                ff("-i", src, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav)
+                heard, words = "", []
+                try:
+                    heard, words = stt_words(wav, setting(ctx, "generation", "stt_model", "scribe_v1"))
+                except Exception as ex:
+                    log(f"받아쓰기 실패: {ex}")
+                content.append({"type": "text", "text": "[영상 소리 분석]\n들린 대사(받아쓰기): " + (heard or "(실패)") + "\n단어별 시간: " + json.dumps(words[:120], ensure_ascii=False)
+                                + "\n1초마다 크기(dBFS)·높낮이(Hz): " + json.dumps(curve_summary(audio_curve(wav)), ensure_ascii=False)
+                                + "\n목표 대사 미리 듣기: " + json.dumps([{k: ln.get(k) for k in ("speaker", "text", "direction", "tags", "analysis")} for ln in (cut.get("voice_lines") or [])], ensure_ascii=False)})
+                os.remove(wav)
+    finally:
+        try:
+            os.remove(src)
+        except OSError:
+            pass
+    content.append({"type": "text", "text": "[컷 설계]\n" + json.dumps({k: cut.get(k) for k in (
+        "code", "seconds", "summary", "dialogue", "emotion", "expression_beats", "camera", "reference_names", "prompt")}, ensure_ascii=False)})
+    system = (guide(ctx, who) or f"너는 {who}다.") + f"""
+
+[시리즈 바이블]
+{bible_text(ctx)}
+
+[이번 감수: {label}만 본다] {what}
+다른 관점은 판단하지 않는다. 0~100점, 문제는 몇 초·무엇이·어떻게 달라야 하는지 감독이 프롬프트에 바로 옮길 수 있게.
+<json>{{"score": 0, "verdict": "pass|fix", "summary": "대표용 한두 줄", "issues": [{{"t": "3초", "problem": "", "fix": ""}}], "fix_for_director": "보완 요청에 넣을 한 문단"}}</json>"""
+    text, _ = claude(model, system, content, max_tokens=3000, stage="video_review", episode_id=ep, scene_no=cut.get("scene_no"),
+                     cut_code=cut.get("code"), note=f"{label} 감수(대표 요청)")
+    rv = safe_json(text) or {}
+    res = {"verdict": "pass" if rv.get("verdict") == "pass" else "fix", "score": num(rv.get("score")), "summary": str(rv.get("summary") or "")[:300],
+           "issues": [f"{i.get('t') or ''} {i.get('problem') or ''}{' → ' + i['fix'] if i.get('fix') else ''}".strip() for i in (rv.get("issues") or []) if isinstance(i, dict)][:8],
+           "fix": str(rv.get("fix_for_director") or "")[:600] or None, "take_id": take_id, "at": datetime.now().isoformat(timespec="seconds")}
+    rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"reviews": {"after_" + mode: res}})
+    notify(f"{cut['code']} {label} 감수 {'통과' if res['verdict'] == 'pass' else '확인 필요'}" + (f" ({res['score']}점)" if res["score"] is not None else ""), res["summary"][:300])
+    return f"{label} 감수 {res['verdict']} ({res['score']}점)"
+
+
 @task("cut_review")
 def t_cut_review(t):
     """작가실이 가져온 컷 설계를 제작 전에 감수: mode emotion(감정감수자: 대사·소리·감정선) | video(영상감수자: 화면·동작·일관성).
     고칠 수 있는 것은 감수자가 프롬프트를 직접 고치고(대표 승인 없이 설계 단계만), 결과를 컷마다 남긴다."""
     ep = t["episode_id"]
     p = t.get("payload") or {}
+    if p.get("mode") == "script":
+        return script_review(t)
     mode = p.get("mode") if p.get("mode") in ("emotion", "video") else "emotion"
     who = "감정감수자" if mode == "emotion" else "영상감수자"
     ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep)
@@ -9212,13 +9350,16 @@ async function renderProduction(ep, quietRefresh = false) {
   const btn = (id, label, on, primary) => `<button class="btn ${primary ? 'primary' : 'small'}" id="${id}" ${on ? '' : 'disabled'}>${label}</button>`;
   // 감수 현황: 작가실이 가져온 컷(설계 단계)을 제작 전에 감정감수자·영상감수자가 본다
   const toReview = cuts.filter(c => ['designed', 'failed', 'hold'].includes(c.status));
-  const rvDone = m => toReview.filter(c => c.reviews?.[m]).length;
-  const rvFix = m => toReview.filter(c => ['fix', 'fixed'].includes(c.reviews?.[m]?.verdict)).length;
-  const reviewed = toReview.length && rvDone('emotion') === toReview.length && rvDone('video') === toReview.length;
+  // 생성된 영상이 있는 컷(통과·불합격 포함) → 영상·음성·감정 감수는 이 컷들만
+  const madeCuts = cuts.filter(c => c.best_take_id || takes.some(t => t.cut_id === c.id && (t.files?.preview || t.remote_url)));
+  const srTask = tasks.filter(t => t.kind === 'cut_review' && t.payload?.mode === 'script').sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+  let srRes = null; try { srRes = srTask?.status === 'done' ? JSON.parse(srTask.result || 'null') : null; } catch (e) {}
+  const srBusy = srTask && ['queued', 'running'].includes(srTask.status);
+  const afterBtn = (id, m, label) => btn(id, `${label}${madeCuts.length ? ` (${madeCuts.filter(c => c.reviews?.['after_' + m]).length}/${madeCuts.length})` : ''}`, madeCuts.length > 0, false);
   const B = {
     wr: p => btn('pWr', versions.length ? '작가실 정리 실행' : '작가실 정리(원고 필요)', versions.length, p),
-    emo: p => btn('pEmo', `감정 감수${toReview.length ? ` (${rvDone('emotion')}/${toReview.length})` : ''}`, toReview.length && !busyKinds.has('cut_review'), p),
-    vid: p => btn('pVid', `영상 감수${toReview.length ? ` (${rvDone('video')}/${toReview.length})` : ''}`, toReview.length && !busyKinds.has('cut_review'), p),
+    scr: p => btn('pScr', srBusy ? '대본 감수 중…' : '대본 감수', versions.length > 1 && !srBusy, p),
+    avid: () => afterBtn('pAVid', 'video', '영상 감수'), avoi: () => afterBtn('pAVoi', 'voice', '음성 감수'), aemo: () => afterBtn('pAEmo', 'emotion', '감정 감수'),
     prep: p => { const n = toReview.filter(c => ['none', 'failed', 'fix'].includes(c.prep_status)).length;
       return n ? btn('pPrep', `사진·목소리 준비 (${n}컷)`, !busyKinds.has('prep_cut'), p) : ''; },
     dir: p => btn('pDir', `컷 ${cuts.length ? '다시 설계' : '설계'}`, !!confirmed, p),
@@ -9232,14 +9373,12 @@ async function renderProduction(ep, quietRefresh = false) {
     : !confirmed ? { t: '작가실 정리 실행', d: '원고를 장소별 씬으로 나누고 감정선을 다듬습니다 → 확정하면 컷 설계까지 이어집니다(Claude 비용, 수백 원)', k: 'wr' }
     : busyKinds.has('director') ? { t: `감독이 ${ep.number}화 컷을 설계하는 중`, d: '끝나면 아래 씬 순서에 컷이 채워집니다' }
     : !cuts.length ? { t: `${ep.number}화 컷 설계`, d: '감독이 씬마다 4~15초 컷으로 나누고 감정감수자가 감수합니다(Claude 비용, 수백 원)', k: 'dir' }
-    : busyKinds.has('cut_review') ? { t: '감수 중', d: '감정감수자·영상감수자가 컷 설계를 보고 고치는 중입니다' }
-    : toReview.length && rvDone('emotion') < toReview.length ? { t: '감정 감수', d: `작가실이 가져온 컷 ${toReview.length}개를 감정감수자가 봅니다(대사·소리·감정선, 고칠 것은 바로 고침)`, k: 'emo' }
-    : toReview.length && rvDone('video') < toReview.length ? { t: '영상 감수', d: `영상감수자가 컷 ${toReview.length}개를 봅니다(한 장면·동작·표정·인물/장소 일관성, 고칠 것은 바로 고침)`, k: 'vid' }
     : designedCost ? { t: '영상 생성 승인', d: `승인 대기 컷 ${cuts.filter(c => ['designed', 'failed', 'hold'].includes(c.status)).length}개 · 씬마다 따로 승인할 수도 있습니다`, k: 'ap' }
     : inProg ? { t: '영상 만드는 중', d: `${inProg}컷 생성·감수 중 · 통과 ${passed}/${cuts.length}` }
     : passed ? { t: '편집실에서 이어 붙이기', d: `통과 ${passed}/${cuts.length}컷`, k: 'ed' }
     : { t: '컷 상태 확인', d: '아래 씬에서 불합격·보류 컷을 확인하세요' };
-  const others = ['wr', 'emo', 'vid', 'prep', 'dir', 'ap', 'ed'].filter(k => k !== next.k).map(k => B[k](false)).join('');
+  const others = ['wr', 'scr', 'dir', 'prep', 'ap', 'ed'].filter(k => k !== next.k).map(k => B[k](false)).join('')
+    + `<span class="quiet" style="font-size:12px;margin-left:4px" title="영상이 생성된 컷이 생기면 켜집니다">생성 후 →</span>` + ['avid', 'avoi', 'aemo'].map(k => B[k]()).join('');
 
   pane.innerHTML = `
   ${stale.length ? `<div class="msg warn"><b>PPL 수정 전에 만든 컷 ${stale.length}개</b> — ${[...new Set(stale.map(c => c.scene_no))].map(s => 'S' + s).join(', ')}에 PPL이 들어갔지만 이 컷들은 그 전에 설계·생성됐습니다(비용 때문에 자동으로 다시 만들지 않음).
@@ -9258,6 +9397,10 @@ async function renderProduction(ep, quietRefresh = false) {
     <div class="row" style="margin-top:10px;gap:6px">${others}
       <span class="quiet" style="margin-left:auto;font-size:12.5px">${G.generation?.video_model === 'kling-4.0' ? 'Kling 4.0' : 'Seedance 2.5'} · 대사 ${G.generation?.dialogue_tool === 'elevenlabs' ? 'ElevenLabs' : 'Higgsfield'} · ${esc(G.generation?.resolution || '480p')} · ${esc(G.generation?.aspect_ratio || '9:16')}
         · 보관 ${hasWin ? '집 PC(OneDrive)' : '<b>집 PC 에이전트 미설치</b>'} · <a href="#settings" id="pSet">바꾸기</a></span></div>
+    ${srTask && (srRes || srTask.status === 'failed' || srBusy) ? `<details class="srbox" ${srRes?.verdict === 'fix' ? 'open' : ''}><summary><b>대본 감수</b> ${srBusy ? '<span class="spin"></span> 대본감수자가 원고·정리본을 대조하는 중'
+      : srTask.status === 'failed' ? pill('실패', 'bad') + ' ' + esc(srTask.error || '') : pill(srRes.verdict === 'pass' ? '통과' : `확인 ${srRes.issues.length}건`, srRes.verdict === 'pass' ? 'good' : 'warn') + ` <span class="quiet">${esc(srRes.summary || '')} · 씬 ${srRes.scenes}개${srRes.cuts ? ` · 컷 ${srRes.cuts}개` : ''} · ${fmt(srTask.finished_at)}</span>`}</summary>
+      ${srRes?.issues?.length ? `<table style="margin-top:6px"><tr><th>씬</th><th>종류</th><th>원문</th><th>지금</th><th>고칠 곳</th></tr>${srRes.issues.map(i => `<tr><td style="white-space:nowrap">${esc(i.scene || '')}</td><td style="white-space:nowrap">${esc(i.type || '')}</td>
+        <td class="quiet">${esc(i.original || '')}</td><td>${esc(i.now || '')}</td><td>${esc([i.who, i.fix].filter(Boolean).join(': '))}</td></tr>`).join('')}</table>` : ''}</details>` : ''}
     ${S.noVoice?.length ? `<div class="msg" style="background:var(--accent-soft)">목소리가 정해지지 않은 인물: <b>${esc(S.noVoice.join(', '))}</b> — <a href="#bible" id="pVoice">바이블에서 한꺼번에 만들기</a></div>` : ''}
     ${online.length ? '' : '<div class="msg err">켜져 있는 에이전트가 없습니다. 버튼을 눌러도 에이전트가 켜질 때까지 기다립니다.</div>'}
   </div>
@@ -9286,7 +9429,7 @@ async function renderProduction(ep, quietRefresh = false) {
   const ca = $('#pCloseAll'); if (ca) ca.onclick = () => pane.querySelectorAll('details.scene').forEach(d => { d.open = false; });
   pane.querySelectorAll('[data-sgo]').forEach(a => a.onclick = ev => { ev.preventDefault();
     const d = pane.querySelector(`[data-scene="${a.dataset.sgo}"]`); if (!d) return; if (d.tagName === 'DETAILS') d.open = true; d.scrollIntoView({ behavior: 'smooth', block: 'start' }); });
-  bindProduction(ep, { confirmed, cuts, tasks: openTasks, rate });
+  bindProduction(ep, { confirmed, cuts, tasks: openTasks, rate, takes });
   bindFailCards(pane, failedNow, () => renderProduction(ep));
 }
 
@@ -9416,9 +9559,10 @@ function cutCard(c, ts, urls, rate) {
         ${c.status === 'generating' ? `<span class="quiet"><span class="spin"></span> ${esc(etaText('generate'))}</span>` : ''}
         <span class="quiet code" title="${esc(codeMeaning(c))}">${esc(c.code || '')} · ${esc(c.resolution || '')}</span>
         ${shown?.score != null ? pill(shown.score + '점', shown.verdict === 'pass' ? 'good' : 'bad') : ''}</div>
-      ${['designed', 'failed', 'hold'].includes(c.status) || c.reviews?.emotion || c.reviews?.video ? `<div class="rvbadges">${['emotion', 'video'].map(m => { const r = c.reviews?.[m]; const nm = m === 'emotion' ? '감정' : '영상';
-        return r ? `<span class="rvb ${r.verdict === 'pass' ? 'ok' : r.verdict === 'fixed' ? 'fx' : 'bad'}" title="${esc((r.issues || []).join(' / '))}">${nm} ${r.verdict === 'pass' ? '✓' : r.verdict === 'fixed' ? '🔧 고침' : '⚠ 확인'}</span>` : `<span class="rvb">${nm} 감수 전</span>`; }).join('')}
-        ${['emotion', 'video'].some(m => (c.reviews?.[m]?.issues || []).length) ? `<details><summary class="quiet">감수 내용</summary>${['emotion', 'video'].filter(m => (c.reviews?.[m]?.issues || []).length).map(m => `<div class="quiet">${m === 'emotion' ? '감정' : '영상'}: ${esc(c.reviews[m].issues.join(' / '))}</div>`).join('')}</details>` : ''}</div>` : ''}
+      ${['video', 'voice', 'emotion'].some(m => c.reviews?.['after_' + m]) ? `<div class="rvbadges">${[['video', '영상'], ['voice', '음성'], ['emotion', '감정']].map(([m, nm]) => { const r = c.reviews?.['after_' + m];
+        return r ? `<span class="rvb ${r.verdict === 'pass' ? 'ok' : 'bad'}" title="${esc(r.summary || '')}">${nm} ${r.verdict === 'pass' ? '✓' : '⚠'}${r.score != null ? ' ' + r.score + '점' : ''}</span>` : ''; }).join('')}
+        ${['video', 'voice', 'emotion'].some(m => (c.reviews?.['after_' + m]?.issues || []).length) ? `<details><summary class="quiet">감수 내용</summary>${[['video', '영상'], ['voice', '음성'], ['emotion', '감정']].filter(([m]) => c.reviews?.['after_' + m]).map(([m, nm]) => { const r = c.reviews['after_' + m];
+          return `<div class="quiet"><b>${nm}</b> ${esc(r.summary || '')}${(r.issues || []).length ? `<ul>${r.issues.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</div>`; }).join('')}</details>` : ''}</div>` : ''}
       <div class="sum">${esc(c.summary || '')}</div>
       ${c.dialogue && !(c.voice_lines || []).length && !parseDlg(c.dialogue).length ? `<div class="dlg">${esc(c.dialogue)}</div>` : ''}
       ${beats.length ? `<div class="beats">${beats.map(b => `<span title="${esc(b.who || '')}"><i>${esc(b.t)}초</i>${esc(b.face || '')}</span>`).join('')}</div>` : ''}
@@ -9442,6 +9586,7 @@ function cutCard(c, ts, urls, rate) {
         ${canApprove ? `<button class="btn small primary" data-approve="${c.id}">${ts.length ? '🎬 다시 생성' : '🎬 생성'} · ${usdKrw(c.est_usd, rate)}</button>`
           : c.status === 'approved' ? `<button class="btn small" data-unapprove="${c.id}">생성 대기 · 취소</button>`
           : ['generating', 'reviewing'].includes(c.status) ? `<button class="btn small" disabled><span class="spin"></span> ${c.status === 'generating' ? '생성 중' : '감수 중'}</button>` : ''}
+        ${[['video', '영상 감수'], ['voice', '음성 감수'], ['emotion', '감정 감수']].map(([m, l]) => `<button class="btn small" ${u ? `data-after="${m}" data-cut="${c.id}"` : 'disabled title="영상이 생성되면 켜집니다"'}>${l}</button>`).join('')}
         ${['designed', 'failed', 'passed', 'hold'].includes(c.status) ? `<button class="btn small" data-fix="${c.id}" title="감독에게 고칠 점을 적어 보내면 이 컷만 다시 설계합니다">✏️ 보완 요청</button>` : ''}
         <button class="btn small ${(u || poster) && !canApprove ? 'primary' : ''}" ${u || poster ? `data-vplay="${esc(u || '')}" data-vposter="${esc(poster || '')}" data-vtitle="${esc(vidTitle)}"` : 'disabled title="아직 만든 영상이 없습니다"'}>▶ 영상 보기</button>
         ${canApprove ? `<details class="cmore"><summary>⋯</summary><div>
@@ -9479,15 +9624,13 @@ function bindProduction(ep, ctx) {
   const pv = $('#pVoice'); if (pv) pv.onclick = e => { e.preventDefault(); go('bible'); };
   $('#pWr').onclick = guard(async () => {
     if (hasOpen('writers_room')) return toast('작가실이 이미 일하고 있습니다');
-    if (!confirm('작가실이 원고를 장소별 씬으로 나누고(한 씬 30초 이하), 흐름은 그대로 둔 채 감정선을 다듬은 정리본을 만듭니다.\n정리본을 확정하면 컷 설계까지 바로 이어지고, 그다음 여기서 감정 감수 → 영상 감수 → 제작(생성 승인) 순서로 진행합니다.\n(Claude 비용, 한 화에 수백 원 수준)')) return;
+    if (!confirm('작가실이 원고를 장소별 씬으로 나누고(한 씬 30초 이하), 흐름은 그대로 둔 채 감정선을 다듬은 정리본을 만듭니다.\n정리본을 확정하면 컷 설계까지 바로 이어집니다. 옆의 \'대본 감수\'로 원고와 정리본이 씬 순서대로 빠짐없이 맞는지 확인한 뒤 제작(생성)하세요.\n(Claude 비용, 한 화에 수백 원 수준)')) return;
     await addTask({ kind: 'writers_room', payload: {} }); toast('작가실에 맡겼습니다'); again();
   });
-  const runReview = mode => guard(async () => {
-    if (hasOpen('cut_review')) return toast('감수자가 이미 감수하고 있습니다');
-    const n = ctx.cuts.filter(c => ['designed', 'failed', 'hold'].includes(c.status)).length;
-    if (!n) return toast('감수할 컷이 없습니다(컷 설계 전이거나 모두 생성됨)');
-    if (!confirm(`${mode === 'emotion' ? '감정감수자' : '영상감수자'}가 컷 ${n}개를 감수합니다. 고칠 것은 프롬프트를 바로 고칩니다(Claude 비용, 수백 원).`)) return;
-    await addTask({ kind: 'cut_review', payload: { mode } }); toast('감수를 맡겼습니다'); again();
+  const ps = $('#pScr'); if (ps) ps.onclick = guard(async () => {
+    if (ctx.tasks.some(t => t.kind === 'cut_review' && t.payload?.mode === 'script')) return toast('대본감수자가 이미 감수하고 있습니다');
+    if (!confirm('대본감수자가 대표 원고 → 작가실 정리본(→ 컷 설계)이 씬 순서대로 빠짐없이 옮겨졌는지 대조합니다.\n씬 번호·순서, 빠진 씬·대사, 장소별 씬 구분, 컷이 대사를 모두 담았는지 봅니다(Claude 비용, 수백 원).')) return;
+    await addTask({ kind: 'cut_review', payload: { mode: 'script' } }); toast('대본 감수를 맡겼습니다'); again();
   });
   const pp1 = $('#pPrep'); if (pp1) pp1.onclick = guard(async () => {
     const todo = ctx.cuts.filter(c => ['designed', 'failed', 'hold'].includes(c.status) && ['none', 'failed', 'fix'].includes(c.prep_status));
@@ -9497,8 +9640,21 @@ function bindProduction(ep, ctx) {
     for (const sc of scenes) await addTask({ kind: 'prep_cut', scene_no: sc, payload: {} });
     toast('사진·목소리 준비를 맡겼습니다'); again();
   });
-  const pe1 = $('#pEmo'); if (pe1) pe1.onclick = runReview('emotion');
-  const pv1 = $('#pVid'); if (pv1) pv1.onclick = runReview('video');
+  // 생성된 영상 감수: 영상(화면)·음성(대사·목소리)·감정. 컷 상태는 바꾸지 않고 결과만 남긴다
+  const FOC = { video: '영상', voice: '음성', emotion: '감정' };
+  const takeOf = c => c.best_take_id || ctx.takes.filter(t => t.cut_id === c.id && (t.files?.preview || t.remote_url)).at(-1)?.id;
+  const runAfter = async (list, mode) => {
+    const todo = list.map(c => [c, takeOf(c)]).filter(([, tk]) => tk);
+    if (!todo.length) return toast('생성된 영상이 있는 컷이 없습니다');
+    const busy = new Set(ctx.tasks.filter(t => t.kind === 'video_review' && t.payload?.mode === mode).map(t => t.cut_id));
+    const go1 = todo.filter(([c]) => !busy.has(c.id));
+    if (!go1.length) return toast('이미 감수하고 있습니다');
+    if (go1.length > 1 && !confirm(`${FOC[mode]} 감수를 컷 ${go1.length}개에 맡깁니다(컷마다 Claude 비용 수십~백 원${mode !== 'video' ? ', 받아쓰기 소액' : ''}).`)) return;
+    for (const [c, tk] of go1) await addTask({ kind: 'video_review', scene_no: c.scene_no, cut_id: c.id, take_id: tk, payload: { mode } });
+    toast(`${FOC[mode]} 감수를 맡겼습니다`); again();
+  };
+  [['pAVid', 'video'], ['pAVoi', 'voice'], ['pAEmo', 'emotion']].forEach(([id, m]) => { const b = $('#' + id); if (b) b.onclick = guard(() => runAfter(ctx.cuts.filter(c => takeOf(c)), m)); });
+  pane.querySelectorAll('[data-after]').forEach(b => b.onclick = guard(() => runAfter(ctx.cuts.filter(c => c.id === b.dataset.cut), b.dataset.after)));
   $('#pDir').onclick = guard(async () => {
     if (hasOpen('director')) return toast('감독이 이미 컷을 설계하고 있습니다');
     if (ctx.cuts.length && !confirm('승인 전인 컷은 새로 설계합니다. 이미 승인·생성된 컷은 그대로 둡니다. 진행할까요?')) return;
@@ -9507,8 +9663,6 @@ function bindProduction(ep, ctx) {
   const approve = async list => {
     const cost = list.reduce((s, c) => s + Number(c.est_usd || 0), 0);
     if (!list.length) return;
-    const noRv = list.filter(c => !c.reviews?.emotion || !c.reviews?.video).length;
-    if (noRv && !confirm(`${noRv}개 컷은 감정·영상 감수를 아직 거치지 않았습니다. 감수 후 제작을 권합니다.\n그래도 생성할까요?`)) return;
     const notReady = list.filter(c => c.prep_status !== 'ready').length;
     if (notReady && !confirm(`${notReady}개 컷은 사진·목소리 확인이 끝나지 않았습니다(준비 전·감수 지적·실패).\n그래도 생성할까요? 사진이 없으면 바이블 사진을 참고로만 만듭니다.`)) return;
     if (!confirm(`컷 ${list.length}개 영상을 생성합니다.\n예상 비용 ${usdKrw(cost, ctx.rate)} (Higgsfield 잔액에서 빠집니다)\n생성 → 영상 감수 → 씬 폴더 보관까지 자동으로 이어집니다.`)) return;
@@ -9548,7 +9702,8 @@ function bindProduction(ep, ctx) {
   }));
   pane.querySelectorAll('[data-fix]').forEach(b => b.onclick = guard(async () => {
     const c = ctx.cuts.find(x => x.id === b.dataset.fix);
-    const text = prompt(`${c.code} — 감독에게 고칠 점을 적어 주세요 (대사는 바뀌지 않습니다)\n예: 린 표정을 더 크게, 카메라를 천천히 다가가게`, c.fix_request || '');
+    const auto = ['video', 'voice', 'emotion'].map(m => c.reviews?.['after_' + m]).filter(r => r && r.verdict !== 'pass' && r.fix).map(r => r.fix).join(' / ');
+    const text = prompt(`${c.code} — 감독에게 고칠 점을 적어 주세요 (대사는 바뀌지 않습니다)\n예: 린 표정을 더 크게, 카메라를 천천히 다가가게${auto ? '\n(영상·음성·감정 감수 의견을 미리 넣어 두었습니다)' : ''}`, c.fix_request || auto || '');
     if (text == null) return;
     await q(S.sb.from('production_cuts').update({ fix_request: text.trim() || '영상 감수 의견대로 고쳐 주세요', status: c.status === 'passed' ? 'designed' : c.status }).eq('id', c.id));
     await addTask({ kind: 'director', scene_no: c.scene_no, cut_id: c.id, payload: { cut_id: c.id } });
@@ -10821,12 +10976,13 @@ const HELP = {
 <li><b>씬 보관</b> — 집 PC의 OneDrive 씬 폴더에 저장.<span class="ex">예: NYX › 한국 갔더니 아이돌 › EP01_… › S02_태국 오디션장</span></li>
 <li><b>가편집 자동</b> — 한 화 모든 컷이 통과하면 가편집 미리보기가 자동으로 만들어집니다 → 편집 탭.<span class="ex">예: 알림 "가편집본 자동 생성 (24컷)"</span></li>
 </ol>
-<h4>제작 순서 (작가실 → 감수 → 제작)</h4>
+<h4>제작 순서 (작가실 → 대본 감수 → 제작 → 영상·음성·감정 감수)</h4>
 <ol>
-<li><b>작가실 정리 실행</b> — 원고를 <b>장소별 씬</b>(한 씬 30초 이하)으로 나누고 감정선을 다듬은 정리본. 대본 탭(또는 지시 탭)에서 <b>확정</b>하면 컷 설계가 바로 이어집니다(작가실이 컷까지 가져옴).</li>
-<li><b>감정 감수</b> — 감정감수자가 대사가 대본과 같은지, 목소리·숨·현장음이 감정선을 따라가는지 봅니다. 고칠 것은 프롬프트를 바로 고칩니다.</li>
-<li><b>영상 감수</b> — 영상감수자가 한 컷이 한 장면·한 동작인지, 표정 변화·카메라·인물/장소 일관성, 글자·거절될 표현이 없는지 봅니다. 고칠 것은 바로 고칩니다.</li>
-<li><b>제작(영상 생성 승인)</b> — 컷 카드마다 <span class="ex" style="display:inline">감정 ✓ · 영상 🔧 고침</span> 표시가 있습니다. 감수 전 컷을 승인하면 한 번 더 묻습니다.</li>
+<li><b>작가실 정리 실행</b> — 원고를 <b>장소별 씬</b>(한 씬 30초 이하)으로 나누고 감정선을 다듬은 정리본. 대본 탭(또는 지시 탭)에서 <b>확정</b>하면 컷 설계가 바로 이어집니다.</li>
+<li><b>대본 감수</b> (작가실 정리 실행 옆) — 대본감수자가 원고 → 정리본 → 컷 설계가 씬 순서대로 빠짐없이 옮겨졌는지 봅니다: 씬 번호·순서, 빠진 씬·대사, 장소별 구분, 컷이 대사를 모두 담았는지. 결과는 버튼 아래 표로 나옵니다.</li>
+<li><b>🎬 생성</b> — 컷마다 또는 전체 생성 승인.</li>
+<li><b>영상 감수 · 음성 감수 · 감정 감수</b> — 영상이 생성된 컷에서만 켜집니다(컷 카드의 생성과 보완 요청 사이, 맨 위에는 전체용). 영상=화면 일관성·표정·동작, 음성=대사가 대본과 같은지·목소리 일관성, 감정=표정·목소리·동작이 감정선을 따라가는지.</li>
+<li><b>✏️ 보완 요청</b> — 감수 의견이 미리 채워진 채로 감독에게 보냅니다. <b>▶ 영상 보기</b>는 크게 팝업으로 봅니다.</li>
 </ol>
 <h4>맨 위: 제작 현황 · 제작할 화 고르기</h4>
 <ul>

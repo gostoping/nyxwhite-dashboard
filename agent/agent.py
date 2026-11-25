@@ -2899,7 +2899,7 @@ def review_take(take_id, local_mp4=None):
                         + "\n컷 설계 때 승인된 대사 미리 듣기(목표): " + json.dumps(sound["planned"], ensure_ascii=False)})
     content.append({"type": "text", "text": "[컷 설계]\n" + json.dumps({k: cut.get(k) for k in (
         'code', 'seconds', 'summary', 'dialogue', 'emotion', 'expression_beats', 'camera', 'reference_names', 'prompt')}, ensure_ascii=False)})
-    system = (guide(ctx, "영상감수자", "감정감수자", "최종감수자") or "너는 영상감수자다.") + f"""
+    system = (guide(ctx, "영상감수자", "감정감수자") or "너는 영상감수자다.") + f"""
 
 [시리즈 바이블]
 {bible_text(ctx)}
@@ -3007,6 +3007,9 @@ def auto_rough_cut(ep):
 
 @task("video_review")
 def t_video_review(t):
+    mode = (t.get("payload") or {}).get("mode")
+    if mode in FOCUS:   # 대표가 컷에서 누른 영상·음성·감정 감수(컷 상태는 바꾸지 않음)
+        return review_take_focus(t["take_id"], mode)
     try:
         v, s = review_take(t["take_id"])
     except Exception as e:
@@ -3943,12 +3946,145 @@ VIDEO_REVIEW_RULES = """[영상감수자 — 영상을 만들기 전에 컷 설�
 6) 프롬프트가 영어로 명확한가(대사는 한국어 원문 그대로 따옴표)."""
 
 
+def script_review(t):
+    """대본감수자: 원고 → 작가실 정리본(→ 컷 설계)이 씬 순서대로 빠짐없이 옮겨졌는지. 결과는 JSON으로 남겨 제작 탭이 보여 준다."""
+    ep = t["episode_id"]
+    ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep)
+    vers = rpc("agent_script_versions", p_token=TOKEN, p_episode=ep) or []
+    orig = next((v for v in vers if (v.get("note") or "").startswith("원고") or v.get("version_no") is None), vers[0] if vers else None)
+    conf = next((v for v in reversed(vers) if v.get("status") == "confirmed"), None)
+    draft = conf or next((v for v in reversed(vers) if v is not orig and v.get("status") in ("draft", "proposed", "review")), None)
+    if not orig or not draft or orig is draft:
+        raise RuntimeError("대본 감수할 정리본이 없습니다. 먼저 '작가실 정리 실행'으로 정리본을 만들어 주세요")
+    # ① 기계 점검: 씬 번호가 1부터 빠짐·겹침 없이 이어지는가
+    nos = [n for n, _, _ in split_scenes(draft["content"]) if n]
+    mech = []
+    if not nos:
+        mech.append("정리본에 씬 머리(S#번호)가 없습니다")
+    else:
+        dup = sorted({n for n in nos if nos.count(n) > 1})
+        gap = [n for n in range(1, max(nos) + 1) if n not in nos]
+        if dup:
+            mech.append("겹치는 씬 번호: " + ", ".join(f"S#{n}" for n in dup))
+        if gap:
+            mech.append("빠진 씬 번호: " + ", ".join(f"S#{n}" for n in gap))
+        if nos != sorted(nos):
+            mech.append("씬 번호가 순서대로가 아닙니다: " + " → ".join(f"S#{n}" for n in nos[:30]))
+    cuts = rpc("agent_list_cuts", p_token=TOKEN, p_episode=ep) or []
+    cut_view = [{k: c.get(k) for k in ("scene_no", "cut_no", "dialogue", "summary")} for c in cuts if c.get("status") != "cancelled"]
+    if cut_view:
+        no_cut = [n for n in nos if not any(int(c["scene_no"] or 0) == n for c in cut_view)]
+        if no_cut:
+            mech.append("컷이 없는 씬: " + ", ".join(f"S#{n}" for n in no_cut))
+    model = setting(ctx, "generation", "claude_reviewer", "claude-sonnet-5-5")
+    system = (guide(ctx, "대본감수자") or "너는 대본감수자다. 원고 → 작가실 정리본 → 컷 설계가 씬 순서대로 빠짐없이 옮겨졌는지 감수한다.") + """
+
+[답 형식] 문제만 적는다. 감정선 보강으로 늘어난 지문·숨은 문제가 아니다. 대사는 글자 그대로여야 한다.
+<json>{"verdict": "pass|fix", "summary": "대표용 한두 줄",
+ "issues": [{"scene": "S#3", "type": "순서|누락|대사 변경|장소 구분|컷 누락|기타", "original": "원고(또는 정리본) 원문 짧게", "now": "지금 상태", "fix": "고칠 곳과 방법", "who": "작가실|감독|대표"}]}</json>"""
+    user = ("[대표 원고]\n" + orig["content"][:40000] + "\n\n[작가실 정리본" + (" — 확정" if draft is conf else " — 확정 전") + "]\n" + draft["content"][:50000]
+            + ("\n\n[컷 설계(씬·컷·대사)]\n" + json.dumps(cut_view, ensure_ascii=False)[:30000] if cut_view else "")
+            + ("\n\n[기계 점검에서 나온 것]\n" + "\n".join(mech) if mech else ""))
+    progress(f"대본감수자가 원고·정리본{'·컷 설계' if cut_view else ''}를 씬 순서대로 대조하는 중")
+    text, _ = claude(model, system, user, max_tokens=8000, stage="prompt_review", episode_id=ep, note="대본감수자: 원고·정리본 대조")
+    r = safe_json(text) or {}
+    issues = [i for i in (r.get("issues") or []) if isinstance(i, dict)][:40]
+    for m in mech:
+        issues.insert(0, {"scene": "", "type": "순서" if "번호" in m else "컷 누락", "original": "", "now": m, "fix": "", "who": "작가실" if "번호" in m or "머리" in m else "감독"})
+    verdict = "pass" if not issues and r.get("verdict") != "fix" else "fix"
+    out = {"verdict": verdict, "summary": r.get("summary") or ("문제 없음" if verdict == "pass" else f"확인할 것 {len(issues)}건"),
+           "issues": issues, "scenes": len(nos), "cuts": len(cut_view), "draft_version": draft.get("version_no"), "confirmed": draft is conf,
+           "at": datetime.now().isoformat(timespec="seconds")}
+    notify(f"{(ctx.get('episode') or {}).get('number')}화 대본 감수 {'통과' if verdict == 'pass' else f'확인 {len(issues)}건'}", out["summary"][:300],
+           "info" if verdict == "pass" else "warning")
+    return json.dumps(out, ensure_ascii=False)
+
+
+FOCUS = {
+    "video": ("영상감수자", "화면", "얼굴·의상·소품·배경이 바이블·앞뒤 컷과 같은가, 2~3초마다 표정 변화, 손짓·동작의 자연스러움(손가락·관절 왜곡), 움직임·카메라 속도, 깜빡임·AI 티, 화면 글자, 설계(프롬프트)대로인가"),
+    "voice": ("영상감수자", "음성", "들린 대사가 대본과 글자 그대로인가(빠진 말·바뀐 말), 화자가 맞는가, 같은 인물 목소리(높이·음색·나이)가 목표 미리 듣기·다른 컷과 같은가, 잡음·끊김·배경음악 섞임, 입모양과 대사 타이밍"),
+    "emotion": ("감정감수자", "감정", "표정·목소리 크기와 높낮이·동작이 대사의 감정선을 순서대로 따라가는가, 감정 정점에서 표정과 목소리가 함께 가장 큰가, 앞뒤 컷과 감정 온도가 이어지는가, 연기가 과하거나 밋밋하지 않은가"),
+}
+
+
+def review_take_focus(take_id, mode):
+    """생성된 영상을 한 가지 관점(영상·음성·감정)으로만 다시 감수한다. 컷 상태는 바꾸지 않고 결과만 남긴다(대표가 보고 '보완 요청')."""
+    who, label, what = FOCUS[mode]
+    take = rpc("agent_get_take", p_token=TOKEN, p_id=take_id)
+    cut = take["cut"]
+    ep = cut["episode_id"]
+    ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep, p_version=cut.get("script_version_id"))
+    model = setting(ctx, "generation", "claude_reviewer", "claude-sonnet-5-5")
+    src = os.path.join(HOME, "work", f"{take_id}_{mode}.mp4")
+    prev = (take.get("files") or {}).get("preview")
+    if prev:
+        fetch_to(storage_signed_url("takes", prev, 900), src)
+    elif take.get("remote_url"):
+        fetch_to(take["remote_url"], src)
+    else:
+        raise RuntimeError("감수할 영상 파일이 없습니다")
+    content = []
+    try:
+        if mode in ("video", "emotion"):
+            progress(f"{cut['code']} {who}가 {label} 감수: 장면을 1초 간격으로 보는 중")
+            fdir = os.path.join(HOME, "work", f"ff_{take_id}_{mode}")
+            os.makedirs(fdir, exist_ok=True)
+            ff("-i", src, "-vf", "fps=1,scale=448:-2", "-frames:v", "16", "-q:v", "4", os.path.join(fdir, "f_%02d.jpg"))
+            for i, fp in enumerate(sorted(glob.glob(os.path.join(fdir, "f_*.jpg")))):
+                with open(fp, "rb") as f:
+                    content += [{"type": "text", "text": f"{i}초"}, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.b64encode(f.read()).decode()}}]
+            shutil.rmtree(fdir, ignore_errors=True)
+        if mode in ("voice", "emotion"):
+            if not has_audio(src):
+                if mode == "voice":
+                    raise RuntimeError("이 영상에는 소리가 없습니다(음성 감수 불가)")
+            else:
+                progress(f"{cut['code']} {who}가 {label} 감수: 소리 받아쓰기·크기·높낮이 분석 중")
+                wav = os.path.join(HOME, "work", f"fa_{take_id}_{mode}.wav")
+                ff("-i", src, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav)
+                heard, words = "", []
+                try:
+                    heard, words = stt_words(wav, setting(ctx, "generation", "stt_model", "scribe_v1"))
+                except Exception as ex:
+                    log(f"받아쓰기 실패: {ex}")
+                content.append({"type": "text", "text": "[영상 소리 분석]\n들린 대사(받아쓰기): " + (heard or "(실패)") + "\n단어별 시간: " + json.dumps(words[:120], ensure_ascii=False)
+                                + "\n1초마다 크기(dBFS)·높낮이(Hz): " + json.dumps(curve_summary(audio_curve(wav)), ensure_ascii=False)
+                                + "\n목표 대사 미리 듣기: " + json.dumps([{k: ln.get(k) for k in ("speaker", "text", "direction", "tags", "analysis")} for ln in (cut.get("voice_lines") or [])], ensure_ascii=False)})
+                os.remove(wav)
+    finally:
+        try:
+            os.remove(src)
+        except OSError:
+            pass
+    content.append({"type": "text", "text": "[컷 설계]\n" + json.dumps({k: cut.get(k) for k in (
+        "code", "seconds", "summary", "dialogue", "emotion", "expression_beats", "camera", "reference_names", "prompt")}, ensure_ascii=False)})
+    system = (guide(ctx, who) or f"너는 {who}다.") + f"""
+
+[시리즈 바이블]
+{bible_text(ctx)}
+
+[이번 감수: {label}만 본다] {what}
+다른 관점은 판단하지 않는다. 0~100점, 문제는 몇 초·무엇이·어떻게 달라야 하는지 감독이 프롬프트에 바로 옮길 수 있게.
+<json>{{"score": 0, "verdict": "pass|fix", "summary": "대표용 한두 줄", "issues": [{{"t": "3초", "problem": "", "fix": ""}}], "fix_for_director": "보완 요청에 넣을 한 문단"}}</json>"""
+    text, _ = claude(model, system, content, max_tokens=3000, stage="video_review", episode_id=ep, scene_no=cut.get("scene_no"),
+                     cut_code=cut.get("code"), note=f"{label} 감수(대표 요청)")
+    rv = safe_json(text) or {}
+    res = {"verdict": "pass" if rv.get("verdict") == "pass" else "fix", "score": num(rv.get("score")), "summary": str(rv.get("summary") or "")[:300],
+           "issues": [f"{i.get('t') or ''} {i.get('problem') or ''}{' → ' + i['fix'] if i.get('fix') else ''}".strip() for i in (rv.get("issues") or []) if isinstance(i, dict)][:8],
+           "fix": str(rv.get("fix_for_director") or "")[:600] or None, "take_id": take_id, "at": datetime.now().isoformat(timespec="seconds")}
+    rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"reviews": {"after_" + mode: res}})
+    notify(f"{cut['code']} {label} 감수 {'통과' if res['verdict'] == 'pass' else '확인 필요'}" + (f" ({res['score']}점)" if res["score"] is not None else ""), res["summary"][:300])
+    return f"{label} 감수 {res['verdict']} ({res['score']}점)"
+
+
 @task("cut_review")
 def t_cut_review(t):
     """작가실이 가져온 컷 설계를 제작 전에 감수: mode emotion(감정감수자: 대사·소리·감정선) | video(영상감수자: 화면·동작·일관성).
     고칠 수 있는 것은 감수자가 프롬프트를 직접 고치고(대표 승인 없이 설계 단계만), 결과를 컷마다 남긴다."""
     ep = t["episode_id"]
     p = t.get("payload") or {}
+    if p.get("mode") == "script":
+        return script_review(t)
     mode = p.get("mode") if p.get("mode") in ("emotion", "video") else "emotion"
     who = "감정감수자" if mode == "emotion" else "영상감수자"
     ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep)
