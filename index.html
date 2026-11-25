@@ -3620,6 +3620,8 @@ def _voice_design(t):
     d = rpc("agent_get_voice_design", p_token=TOKEN, p_id=did)
     if not d:
         raise RuntimeError("목소리 디자인 요청을 찾지 못했습니다")
+    if d.get("sample_path"):
+        return _voice_clone(d)
     progress(f"{d['entry_name']} 목소리 후보를 만드는 중")
     body = {"voice_description": d["description"].split("\n[노래]")[0][:1000]}
     sample = (d.get("sample_text") or "").strip()
@@ -3647,8 +3649,61 @@ def _voice_design(t):
         raise RuntimeError("후보가 만들어지지 않았습니다")
     rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "ready", "previews": previews})
     log_cost("audio", "elevenlabs", "voice-design", {"calls": 1}, note=f"목소리 디자인: {d['entry_name']}", outcome="success")
+    if d.get("auto"):   # 사진처럼: 대표가 고르기 전에 추천 후보(1번)를 먼저 바이블에 넣어 둔다 → 대사 미리 듣기가 바로 이 목소리로 나온다
+        d = dict(d, previews=previews, chosen_generated_id=previews[0]["generated_voice_id"])
+        rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "saving", "chosen_generated_id": d["chosen_generated_id"]})
+        vid = _voice_save_design(d)
+        r = rpc("agent_voice_link", p_token=TOKEN, p_design=did)
+        notify(f"{d['entry_name']} 추천 목소리 적용", f"후보 {len(previews)}개 중 1번을 먼저 넣었습니다({'바이블 적용' if r == 'linked' else '대표가 정한 목소리는 그대로 둠'}). 바이블 → 목소리에서 다른 후보로 바꿀 수 있습니다")
+        return f"{d['entry_name']} 추천 목소리 적용 ({vid})"
     notify(f"{d['entry_name']} 목소리 후보 {len(previews)}개 도착", "바이블 탭에서 들어 보고 골라 주세요")
     return f"{d['entry_name']} 후보 {len(previews)}개"
+
+
+def _voice_clone(d):
+    """대표가 올린 목소리 파일 → ElevenLabs 즉시 복제(IVC) → 시험 대사로 미리 듣기 → 바이블에 적용."""
+    did = d["id"]
+    progress(f"{d['entry_name']} 올린 목소리 파일로 ElevenLabs 목소리를 만드는 중")
+    ext = (d["sample_path"].rsplit(".", 1)[-1] or "mp3").lower()[:5]
+    local = os.path.join(HOME, "work", f"vc_{did}.{ext}")
+    fetch_to(storage_signed_url("takes", d["sample_path"], 600), local)
+    with open(local, "rb") as f:
+        data = f.read()
+    os.remove(local)
+    boundary = "----nyx" + uuid.uuid4().hex
+    field = lambda k, v: f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+    ctype = {"mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4", "ogg": "audio/ogg", "webm": "audio/webm"}.get(ext, "application/octet-stream")
+    body = field("name", f"{d['entry_name']} · {d.get('series_title') or 'NYX'}"[:100]) + field("remove_background_noise", "true") \
+        + field("description", (d.get("description") or "")[:500]) \
+        + f'--{boundary}\r\nContent-Disposition: form-data; name="files"; filename="sample.{ext}"\r\nContent-Type: {ctype}\r\n\r\n'.encode() + data + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request("https://api.elevenlabs.io/v1/voices/add", data=body, method="POST",
+                                 headers={"xi-api-key": el_key(), "Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            vid = json.loads(r.read()).get("voice_id")
+    except urllib.error.HTTPError as e:
+        msg = e.read()[:300].decode("utf-8", "replace")
+        hint = " (ElevenLabs 요금제에서 목소리 복제가 막혀 있거나, 파일이 너무 짧거나(30초 이상 권장) 형식이 맞지 않을 수 있습니다)"
+        rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": f"ElevenLabs {e.code}: {msg}{hint}"[:500]})
+        raise RuntimeError(f"ElevenLabs 목소리 복제 실패 {e.code}: {msg}{hint}") from None
+    if not vid:
+        rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": "ElevenLabs가 목소리 ID를 주지 않았습니다"})
+        raise RuntimeError("ElevenLabs가 목소리 ID를 주지 않았습니다")
+    upd = {"status": "saved", "voice_id": vid}
+    try:   # 저장한 목소리로 시험 대사를 읽혀 바로 들어 볼 수 있게
+        audio = tts_line(vid, (d.get("sample_text") or "안녕하세요. 오늘부터 이 목소리로 연기합니다.")[:400], "", "eleven_v3")
+        lp = os.path.join(HOME, "work", f"vcp_{did}.mp3")
+        with open(lp, "wb") as f:
+            f.write(audio)
+        upd["preview_path"] = storage_upload(f"voices/{did}/clone_{uuid.uuid4().hex[:6]}.mp3", lp, "audio/mpeg")
+        os.remove(lp)
+    except Exception as ex:
+        log(f"복제 목소리 미리 듣기 실패: {ex}")
+    rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p=upd)
+    rpc("agent_voice_link", p_token=TOKEN, p_design=did)
+    log_cost("audio", "elevenlabs", "voice-clone", {"calls": 1}, note=f"목소리 복제: {d['entry_name']}", outcome="success")
+    notify(f"{d['entry_name']} 목소리 반영", "올린 목소리 파일로 만든 목소리를 바이블에 넣었습니다. 대사 미리 듣기가 이 목소리로 바뀝니다")
+    return f"{d['entry_name']} 올린 목소리 반영 ({vid})"
 
 
 @task("bible_extract")
@@ -4473,10 +4528,10 @@ def t_voice_cast(t):
         if len(sample) < 100:
             sample = (sample + " " + "오늘은 정말 긴 하루였어요. 그래도 끝까지 해낼 거예요. 지켜봐 주세요.")[:300]
         desc = v["voice_description"] + (f"\n[노래] {v['singing_hint']}" if v.get("singing_hint") else "")
-        did = rpc("agent_add_voice_design", p_token=TOKEN, p_entry=v["entry_id"], p_description=desc[:1000], p_sample=sample)
+        did = rpc("agent_add_voice_design2", p_token=TOKEN, p_entry=v["entry_id"], p_description=desc[:1000], p_sample=sample, p_auto=bool(p.get("auto")))
         rpc("agent_add_task", p_token=TOKEN, p={"kind": "voice_design", "payload": {"design_id": did}})
         made.append(v.get("name") or "")
-    notify(f"「{title}」 목소리 후보 준비 시작", f"{', '.join(made)} — 몇 분 뒤 바이블 탭에서 인물별 후보 3개를 듣고 골라 주세요")
+    notify(f"「{title}」 목소리 후보 준비 시작", f"{', '.join(made)} — " + ("추천 목소리(후보 1번)를 바로 바이블에 넣습니다. 바이블 → 목소리에서 다른 후보로 바꿀 수 있습니다" if p.get("auto") else "몇 분 뒤 바이블 탭에서 인물별 후보 3개를 듣고 골라 주세요"))
     return f"인물 {len(made)}명 목소리 설계 → 후보 만들기 시작: {', '.join(made)}"
 
 
@@ -4488,6 +4543,15 @@ def t_voice_save(t):
         if d:
             rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": "고른 목소리가 없습니다"})
         raise RuntimeError("고른 목소리가 없습니다")
+    vid = _voice_save_design(d)
+    if d.get("auto"):   # 추천 목소리를 대표가 다른 후보로 바꾼 것 → 바로 바이블에 반영하고 생성 전 컷의 대사 미리 듣기도 새 목소리로
+        rpc("agent_voice_link", p_token=TOKEN, p_design=did, p_force=True)
+        return f"{d['entry_name']} 목소리를 다른 후보로 바꿔 바이블에 반영 ({vid})"
+    return f"{d['entry_name']} 목소리 저장 ({vid})"
+
+
+def _voice_save_design(d):
+    did = d["id"]
     progress(f"{d['entry_name']} 목소리를 ElevenLabs에 저장하는 중")
     desc = d["description"].split("\n[노래]")[0]
     if len(desc) < 20:
@@ -4503,7 +4567,7 @@ def t_voice_save(t):
         rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
         raise
     rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "saved", "voice_id": data["voice_id"]})
-    return f"{d['entry_name']} 목소리 저장 ({data['voice_id']})"
+    return data["voice_id"]
 
 
 # ---------------- 편집실: 타임라인 조립(ffmpeg) · 말로 편집(Claude)
@@ -7006,7 +7070,10 @@ async function viewBible(main) {
           <label class="btn small only-up" style="margin:0" title="외부에서 구한 사진을 기준 사진으로 넣고 바로 적용합니다. 코디네이터가 사진을 보고 묘사·영어 프롬프트를 자동으로 씁니다">사진 올리기<input type="file" accept="image/*" multiple hidden data-pup="${esc(e.id)}"></label>
           ${e.category === 'character' && (c?.image_paths || []).length ? `<button class="btn small only-up" data-pd="${esc(e.id)}" title="올린 사진으로 Soul ID를 학습해 같은 얼굴의 기준 사진을 만듭니다">${c?.soul_id ? '얼굴 다시 고정' : '이 사진으로 얼굴 고정'}</button>` : ''}</div></div>` : ''}
         ${['character', 'voice'].includes(e.category) ? `<div class="brow"><span class="blbl">목소리</span><div class="bbtns">
-          <button class="btn small" data-vd="${esc(e.id)}">${c?.voice_id ? '목소리 다시 디자인' : '목소리 디자인'}</button></div></div>` : ''}
+          ${c?.voice_id ? `<button class="btn small" data-vlisten="${esc(e.id)}">🔊 지금 목소리 듣기·바꾸기</button>`
+            : e.same_as ? `<span class="quiet">동일인의 목소리를 그대로 씁니다</span>` : `<span class="quiet">추천 목소리를 자동으로 만들어 넣습니다(후보 1번 먼저 적용)</span>`}
+          <button class="btn small" data-vd="${esc(e.id)}">${c?.voice_id ? '목소리 다시 디자인' : '목소리 디자인'}</button>
+          <label class="btn small" style="margin:0" title="녹음 파일(30초~2분, 잡음 적게)을 올리면 ElevenLabs가 그 목소리로 만들어 바로 바이블에 넣습니다. 사용 권리가 있는 목소리만 올려 주세요">목소리 파일 올리기<input type="file" accept="audio/*,.m4a,.mp3,.wav" data-vup="${esc(e.id)}" hidden></label></div></div>` : ''}
       </div>
       <div id="be-${esc(e.id)}"></div>
       <div id="pd-${esc(e.id)}"></div>
@@ -7272,6 +7339,24 @@ async function viewBible(main) {
     if (locked(e) && new Date(latest.created_at) < lockAt(e)) return;
     openPhotoDesign(e, cur(e.id), false);
   });
+  main.querySelectorAll('[data-vlisten]').forEach(b => b.onclick = () => {
+    const e = entries.find(x => x.id === b.dataset.vlisten); openVoiceDesign(e, cur(e.id), false, true);
+  });
+  main.querySelectorAll('[data-vup]').forEach(inp => inp.onchange = guard(async () => {
+    const f = inp.files[0]; if (!f) return; inp.value = '';
+    const e = entries.find(x => x.id === inp.dataset.vup);
+    if (f.size > 20 * 1024 * 1024) return toast('20MB 이하 파일로 올려 주세요');
+    if (!confirm(`${e.name} 목소리를 이 파일(${f.name})로 만듭니다.\n본인 목소리이거나 사용 권리가 있는 녹음만 올려 주세요. ElevenLabs가 바로 목소리를 만들고 바이블에 넣습니다.`)) return;
+    const ext = (f.name.split('.').pop() || 'mp3').toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp3';
+    const path = `voices/upload/${e.id}/${Date.now()}.${ext}`;
+    toast('목소리 파일 올리는 중…');
+    const { error } = await S.sb.storage.from('takes').upload(path, f, { contentType: f.type || 'audio/mpeg' }); if (error) throw error;
+    const c0 = cur(e.id);
+    const r = await q(S.sb.from('voice_designs').insert({ entry_id: e.id, description: [e.summary, c0?.description].filter(Boolean).join(' / ').slice(0, 900) || e.name,
+      sample_text: vdSample(e.name), sample_path: path }).select('id').single());
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'voice_design', payload: { design_id: r.id } }));
+    toast('ElevenLabs가 목소리를 만들고 있습니다'); openVoiceDesign(e, c0, false);
+  }));
   main.querySelectorAll('[data-vd]').forEach(b => b.onclick = () => {
     const e = entries.find(x => x.id === b.dataset.vd); openVoiceDesign(e, cur(e.id), true);
   });
@@ -7446,11 +7531,11 @@ async function openPhotoDesign(entry, cur, fresh) {
 
 // 목소리 디자인: 설명 → ElevenLabs 후보 3개 → 듣고 고르기 → 바이블 새 버전으로 적용
 const vdSample = full => { const name = full.replace(/\s*\(.*?\)\s*/g, '').trim(); return `안녕하세요, 저는 ${name}예요. 오늘 처음으로 무대에 서는 날이라 너무 떨려요. 그래도 여기까지 온 이유를 잊지 않을 거예요. 끝까지 해 볼게요. 지켜봐 주세요!`; };
-async function openVoiceDesign(entry, cur, fresh) {
+async function openVoiceDesign(entry, cur, fresh, listen) {
   const box = document.getElementById('vd-' + entry.id); if (!box) return;
   S.vdTimer = S.vdTimer || {}; clearTimeout(S.vdTimer[entry.id]);
   const [d] = await q(S.sb.from('voice_designs').select('*').eq('entry_id', entry.id).order('created_at', { ascending: false }).limit(1));
-  const showForm = fresh || !d || d.status === 'linked';
+  const showForm = fresh || !d || (d.status === 'linked' && !listen);
   if (showForm) {
     const desc = d?.description || [entry.summary, cur?.description].filter(Boolean).join(' / ');
     box.innerHTML = `<div class="vdbox"><b>목소리 디자인</b>
@@ -7459,6 +7544,7 @@ async function openVoiceDesign(entry, cur, fresh) {
       <textarea id="vdDesc-${entry.id}" style="min-height:80px;font-family:inherit">${esc(desc)}</textarea>
       <label>들어 볼 대사 (100자 이상, 한국어)</label>
       <textarea id="vdText-${entry.id}" style="min-height:70px;font-family:inherit">${esc(d?.sample_text || vdSample(entry.name))}</textarea>
+      <p class="quiet" style="margin:6px 0 0">녹음 파일이 있으면 카드의 <b>목소리 파일 올리기</b>로 바로 넣을 수도 있습니다.</p>
       <div class="row" style="margin-top:8px"><button class="btn primary small" id="vdGo-${entry.id}">후보 3개 만들기</button>
         <span class="quiet">ElevenLabs 크레딧 약간 사용 · 1분 안팎</span>
         ${d && !fresh ? '' : `<button class="btn small" id="vdX-${entry.id}" style="margin-left:auto">닫기</button>`}</div></div>`;
@@ -7475,20 +7561,26 @@ async function openVoiceDesign(entry, cur, fresh) {
     return;
   }
   let urls = {};
-  if (d.previews?.length) {
-    const { data } = await S.sb.storage.from('takes').createSignedUrls(d.previews.map(p => p.path), 3600);
+  const aud = [...(d.previews || []).map(p => p.path), d.preview_path].filter(Boolean);
+  if (aud.length) {
+    const { data } = await S.sb.storage.from('takes').createSignedUrls(aud, 3600);
     (data || []).forEach(x => { if (x.signedUrl) urls[x.path] = x.signedUrl; });
   }
   const busy = ['queued', 'saving'].includes(d.status);
-  box.innerHTML = `<div class="vdbox"><div class="row"><b>목소리 디자인</b>${pill({ queued: '후보 만드는 중', ready: '골라 주세요', saving: '저장 중', saved: '저장됨 · 적용 대기', failed: '실패' }[d.status] || d.status,
-      d.status === 'failed' ? 'bad' : d.status === 'ready' || d.status === 'saved' ? 'accent' : 'warn')}
+  const upl = !!d.sample_path, linked = d.status === 'linked';
+  box.innerHTML = `<div class="vdbox"><div class="row"><b>목소리 ${upl ? '(올린 파일)' : '디자인'}</b>${pill({ queued: upl ? 'ElevenLabs가 만드는 중' : '후보 만드는 중', ready: '골라 주세요', saving: '저장 중', saved: '저장됨 · 적용 대기', failed: '실패',
+      linked: upl ? '올린 목소리 적용됨' : d.auto ? '추천 목소리 적용됨' : '바이블 적용됨' }[d.status] || d.status,
+      d.status === 'failed' ? 'bad' : linked ? 'good' : d.status === 'ready' || d.status === 'saved' ? 'accent' : 'warn')}
       <button class="btn small" id="vdNew-${entry.id}" style="margin-left:auto">새로 만들기</button></div>
     <div class="quiet" style="margin:4px 0">${esc(d.description)}</div>
     ${busy ? '<p><span class="spin"></span>ElevenLabs에서 작업 중입니다. 잠시 뒤 자동으로 새로 고칩니다.</p>' : ''}
     ${d.status === 'failed' ? `<div class="msg err">${esc(d.error || '실패')}</div>` : ''}
-    ${d.status === 'ready' ? (d.previews || []).map((p, i) => `<div class="vdp"><b>후보 ${i + 1}</b>
+    ${d.preview_path && urls[d.preview_path] ? `<div class="vdp"><b>이 목소리로 읽은 시험 대사</b><audio controls preload="none" src="${esc(urls[d.preview_path])}"></audio></div>` : ''}
+    ${linked && d.auto && !upl ? '<p class="quiet" style="margin:6px 0 0">코디네이터가 후보 1번을 먼저 넣었습니다. 들어 보고 다른 후보가 낫다면 바꾸세요(바꾸면 생성 전 컷의 대사 미리 듣기도 새 목소리로 다시 만듭니다).</p>' : ''}
+    ${d.status === 'ready' || linked && !upl ? (d.previews || []).map((p, i) => { const on = linked && p.generated_voice_id === d.chosen_generated_id;
+      return `<div class="vdp"><b>후보 ${i + 1}</b>${on ? pill('지금 쓰는 목소리', 'good') : ''}
       <audio controls preload="none" src="${esc(urls[p.path] || '')}"></audio>
-      <button class="btn small primary" data-pick="${esc(p.generated_voice_id)}">이 목소리로 정하기</button></div>`).join('') : ''}
+      ${on ? '' : `<button class="btn small ${linked ? '' : 'primary'}" data-pick="${esc(p.generated_voice_id)}">${linked ? '이 후보로 바꾸기' : '이 목소리로 정하기'}</button>`}</div>`; }).join('') : ''}
     ${d.status === 'saved' ? `<p>ElevenLabs에 저장됐습니다 (<code>${esc(d.voice_id)}</code>). 바이블에 적용하면 감독·목소리 고정 작업이 이 목소리를 씁니다.</p>
       <button class="btn small primary" id="vdLink-${entry.id}">바이블에 적용</button>` : ''}</div>`;
   document.getElementById('vdNew-' + entry.id).onclick = () => openVoiceDesign(entry, cur, true);

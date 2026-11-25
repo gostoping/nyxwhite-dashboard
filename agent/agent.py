@@ -3255,6 +3255,8 @@ def _voice_design(t):
     d = rpc("agent_get_voice_design", p_token=TOKEN, p_id=did)
     if not d:
         raise RuntimeError("목소리 디자인 요청을 찾지 못했습니다")
+    if d.get("sample_path"):
+        return _voice_clone(d)
     progress(f"{d['entry_name']} 목소리 후보를 만드는 중")
     body = {"voice_description": d["description"].split("\n[노래]")[0][:1000]}
     sample = (d.get("sample_text") or "").strip()
@@ -3282,8 +3284,61 @@ def _voice_design(t):
         raise RuntimeError("후보가 만들어지지 않았습니다")
     rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "ready", "previews": previews})
     log_cost("audio", "elevenlabs", "voice-design", {"calls": 1}, note=f"목소리 디자인: {d['entry_name']}", outcome="success")
+    if d.get("auto"):   # 사진처럼: 대표가 고르기 전에 추천 후보(1번)를 먼저 바이블에 넣어 둔다 → 대사 미리 듣기가 바로 이 목소리로 나온다
+        d = dict(d, previews=previews, chosen_generated_id=previews[0]["generated_voice_id"])
+        rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "saving", "chosen_generated_id": d["chosen_generated_id"]})
+        vid = _voice_save_design(d)
+        r = rpc("agent_voice_link", p_token=TOKEN, p_design=did)
+        notify(f"{d['entry_name']} 추천 목소리 적용", f"후보 {len(previews)}개 중 1번을 먼저 넣었습니다({'바이블 적용' if r == 'linked' else '대표가 정한 목소리는 그대로 둠'}). 바이블 → 목소리에서 다른 후보로 바꿀 수 있습니다")
+        return f"{d['entry_name']} 추천 목소리 적용 ({vid})"
     notify(f"{d['entry_name']} 목소리 후보 {len(previews)}개 도착", "바이블 탭에서 들어 보고 골라 주세요")
     return f"{d['entry_name']} 후보 {len(previews)}개"
+
+
+def _voice_clone(d):
+    """대표가 올린 목소리 파일 → ElevenLabs 즉시 복제(IVC) → 시험 대사로 미리 듣기 → 바이블에 적용."""
+    did = d["id"]
+    progress(f"{d['entry_name']} 올린 목소리 파일로 ElevenLabs 목소리를 만드는 중")
+    ext = (d["sample_path"].rsplit(".", 1)[-1] or "mp3").lower()[:5]
+    local = os.path.join(HOME, "work", f"vc_{did}.{ext}")
+    fetch_to(storage_signed_url("takes", d["sample_path"], 600), local)
+    with open(local, "rb") as f:
+        data = f.read()
+    os.remove(local)
+    boundary = "----nyx" + uuid.uuid4().hex
+    field = lambda k, v: f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+    ctype = {"mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4", "ogg": "audio/ogg", "webm": "audio/webm"}.get(ext, "application/octet-stream")
+    body = field("name", f"{d['entry_name']} · {d.get('series_title') or 'NYX'}"[:100]) + field("remove_background_noise", "true") \
+        + field("description", (d.get("description") or "")[:500]) \
+        + f'--{boundary}\r\nContent-Disposition: form-data; name="files"; filename="sample.{ext}"\r\nContent-Type: {ctype}\r\n\r\n'.encode() + data + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request("https://api.elevenlabs.io/v1/voices/add", data=body, method="POST",
+                                 headers={"xi-api-key": el_key(), "Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            vid = json.loads(r.read()).get("voice_id")
+    except urllib.error.HTTPError as e:
+        msg = e.read()[:300].decode("utf-8", "replace")
+        hint = " (ElevenLabs 요금제에서 목소리 복제가 막혀 있거나, 파일이 너무 짧거나(30초 이상 권장) 형식이 맞지 않을 수 있습니다)"
+        rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": f"ElevenLabs {e.code}: {msg}{hint}"[:500]})
+        raise RuntimeError(f"ElevenLabs 목소리 복제 실패 {e.code}: {msg}{hint}") from None
+    if not vid:
+        rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": "ElevenLabs가 목소리 ID를 주지 않았습니다"})
+        raise RuntimeError("ElevenLabs가 목소리 ID를 주지 않았습니다")
+    upd = {"status": "saved", "voice_id": vid}
+    try:   # 저장한 목소리로 시험 대사를 읽혀 바로 들어 볼 수 있게
+        audio = tts_line(vid, (d.get("sample_text") or "안녕하세요. 오늘부터 이 목소리로 연기합니다.")[:400], "", "eleven_v3")
+        lp = os.path.join(HOME, "work", f"vcp_{did}.mp3")
+        with open(lp, "wb") as f:
+            f.write(audio)
+        upd["preview_path"] = storage_upload(f"voices/{did}/clone_{uuid.uuid4().hex[:6]}.mp3", lp, "audio/mpeg")
+        os.remove(lp)
+    except Exception as ex:
+        log(f"복제 목소리 미리 듣기 실패: {ex}")
+    rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p=upd)
+    rpc("agent_voice_link", p_token=TOKEN, p_design=did)
+    log_cost("audio", "elevenlabs", "voice-clone", {"calls": 1}, note=f"목소리 복제: {d['entry_name']}", outcome="success")
+    notify(f"{d['entry_name']} 목소리 반영", "올린 목소리 파일로 만든 목소리를 바이블에 넣었습니다. 대사 미리 듣기가 이 목소리로 바뀝니다")
+    return f"{d['entry_name']} 올린 목소리 반영 ({vid})"
 
 
 @task("bible_extract")
@@ -4108,10 +4163,10 @@ def t_voice_cast(t):
         if len(sample) < 100:
             sample = (sample + " " + "오늘은 정말 긴 하루였어요. 그래도 끝까지 해낼 거예요. 지켜봐 주세요.")[:300]
         desc = v["voice_description"] + (f"\n[노래] {v['singing_hint']}" if v.get("singing_hint") else "")
-        did = rpc("agent_add_voice_design", p_token=TOKEN, p_entry=v["entry_id"], p_description=desc[:1000], p_sample=sample)
+        did = rpc("agent_add_voice_design2", p_token=TOKEN, p_entry=v["entry_id"], p_description=desc[:1000], p_sample=sample, p_auto=bool(p.get("auto")))
         rpc("agent_add_task", p_token=TOKEN, p={"kind": "voice_design", "payload": {"design_id": did}})
         made.append(v.get("name") or "")
-    notify(f"「{title}」 목소리 후보 준비 시작", f"{', '.join(made)} — 몇 분 뒤 바이블 탭에서 인물별 후보 3개를 듣고 골라 주세요")
+    notify(f"「{title}」 목소리 후보 준비 시작", f"{', '.join(made)} — " + ("추천 목소리(후보 1번)를 바로 바이블에 넣습니다. 바이블 → 목소리에서 다른 후보로 바꿀 수 있습니다" if p.get("auto") else "몇 분 뒤 바이블 탭에서 인물별 후보 3개를 듣고 골라 주세요"))
     return f"인물 {len(made)}명 목소리 설계 → 후보 만들기 시작: {', '.join(made)}"
 
 
@@ -4123,6 +4178,15 @@ def t_voice_save(t):
         if d:
             rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": "고른 목소리가 없습니다"})
         raise RuntimeError("고른 목소리가 없습니다")
+    vid = _voice_save_design(d)
+    if d.get("auto"):   # 추천 목소리를 대표가 다른 후보로 바꾼 것 → 바로 바이블에 반영하고 생성 전 컷의 대사 미리 듣기도 새 목소리로
+        rpc("agent_voice_link", p_token=TOKEN, p_design=did, p_force=True)
+        return f"{d['entry_name']} 목소리를 다른 후보로 바꿔 바이블에 반영 ({vid})"
+    return f"{d['entry_name']} 목소리 저장 ({vid})"
+
+
+def _voice_save_design(d):
+    did = d["id"]
     progress(f"{d['entry_name']} 목소리를 ElevenLabs에 저장하는 중")
     desc = d["description"].split("\n[노래]")[0]
     if len(desc) < 20:
@@ -4138,7 +4202,7 @@ def t_voice_save(t):
         rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "failed", "error": str(e)[:500]})
         raise
     rpc("agent_update_voice_design", p_token=TOKEN, p_id=did, p={"status": "saved", "voice_id": data["voice_id"]})
-    return f"{d['entry_name']} 목소리 저장 ({data['voice_id']})"
+    return data["voice_id"]
 
 
 # ---------------- 편집실: 타임라인 조립(ffmpeg) · 말로 편집(Claude)
