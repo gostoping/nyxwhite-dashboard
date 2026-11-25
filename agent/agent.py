@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.29.0"
+VERSION = "1.29.1"
 
 import base64
 import glob
@@ -996,6 +996,7 @@ def director_system(ctx):
 - 화면 비율 {asp}. 자막·글자를 화면에 넣지 않는다(화면 글자가 대본에 있으면 summary에만 적는다).
 - reference_names에는 이 컷 화면에 나오는 바이블 항목 이름을 바이블 표기 그대로(괄호·수식어 붙이지 말 것): 인물 최대 3, 장소 또는 배경 최대 1, PPL·중요 소품 최대 1. 사진이 없는 항목도 넣는다(제작 때 임시 기준 사진을 만들어 고정한다).
 - voice_lines: 대사 한 줄마다 화자·대사·감정 지시. tags는 ElevenLabs v3 영어 감정 태그(예: [nervous] [whispers] [excited] [sighs] [crying] [laughs])로, direction은 한국어로 크기·높낮이·속도 변화를 적는다.
+  direction에는 끝음 처리도 적는다(예: "끝음이 살짝 내려가며 흐려짐", "끝에 짧은 숨"). 모든 목소리는 젊고 나긋한 사람 목소리가 기본이고, 끝음이 뚝 끊기거나 기계적이면 안 된다.
 - frame_first: 모든 컷. 첫 0.5초의 정지 장면(얼굴·의상·배경 고정의 기준). use_end_frame은 컷 안에서 자세·위치·감정이 크게 바뀌어 끝 상태가 중요할 때만 true(일어서기·문 나가기·웃다가 울기 등). 대부분 false.
 - continue_prev: 같은 씬에서 앞 컷과 동작이 바로 이어지면 true(앞 컷 마지막 장면에서 시작).
 
@@ -3301,6 +3302,8 @@ def _voice_design(t):
 # 대표 지시(기본 목소리): 모든 인물은 젊고, 사람 같은(AI 티 없는), 나긋하고 부드러운 목소리가 기본. 그 위에 인물마다 감정선만 얹는다.
 VOICE_BASE = ("Young adult voice in their early-to-mid 20s, light and youthful timbre, soft and gentle, warm and calm, "
               "natural conversational Korean delivery like a real person talking, relaxed breathing, subtle natural pauses, "
+              "human sentence endings: the last syllable softly trails off with a natural Korean falling intonation (gentle rise only for questions), "
+              "a little breath or softness at the end, never clipped, abrupt, flat or sing-song robotic endings, "
               "not deep, not husky, not raspy, not mature, not middle-aged, not an announcer or narrator, not robotic or synthetic, "
               "clean close-mic studio recording.")
 _OLD_WORDS = re.compile(r"\b(deep(er|ly)?|husky|raspy|gravell?y|gruff|mature|middle[- ]aged|elderly|old(er)?|aged|baritone|bass|booming|"
@@ -4051,7 +4054,7 @@ def script_review(t):
 
 FOCUS = {
     "video": ("영상감수자", "화면", "얼굴·의상·소품·배경이 바이블·앞뒤 컷과 같은가, 2~3초마다 표정 변화, 손짓·동작의 자연스러움(손가락·관절 왜곡), 움직임·카메라 속도, 깜빡임·AI 티, 화면 글자, 설계(프롬프트)대로인가"),
-    "voice": ("영상감수자", "음성", "들린 대사가 대본과 글자 그대로인가(빠진 말·바뀐 말), 화자가 맞는가, 같은 인물 목소리(높이·음색·나이)가 목표 미리 듣기·다른 컷과 같은가, 잡음·끊김·배경음악 섞임, 입모양과 대사 타이밍"),
+    "voice": ("영상감수자", "음성", "들린 대사가 대본과 글자 그대로인가(빠진 말·바뀐 말), 화자가 맞는가, 같은 인물 목소리(높이·음색·나이)가 목표 미리 듣기·다른 컷과 같은가, 젊고 나긋한 사람 목소리인가(AI 티·중후함), 문장 끝음이 사람답게 자연스럽게 내려가며 흐려지는가(뚝 끊김·기계적 끝음), 잡음·끊김·배경음악 섞임, 입모양과 대사 타이밍"),
     "emotion": ("감정감수자", "감정", "표정·목소리 크기와 높낮이·동작이 대사의 감정선을 순서대로 따라가는가, 감정 정점에서 표정과 목소리가 함께 가장 큰가, 앞뒤 컷과 감정 온도가 이어지는가, 연기가 과하거나 밋밋하지 않은가"),
 }
 
@@ -4383,6 +4386,7 @@ def t_voice_cast(t):
     progress(f"작가실이 「{title}」 인물 {len(chars)}명의 목소리를 설계하는 중")
     system = """너는 드라마 캐스팅 디렉터 겸 음성 감독이다. 대본과 인물 설정을 읽고 인물마다 ElevenLabs 목소리 디자인용 설명을 쓴다.
 - 대표 기본값(반드시): 모든 인물은 20대 초중반의 젊은 목소리, 사람처럼 자연스럽고(AI 티 없음) 나긋하고 부드러운 목소리다.
+  특히 문장 끝음 처리를 사람답게: 마지막 음절이 자연스럽게 내려가며 살짝 흐려지거나 숨이 섞인다(질문만 살짝 올림). 뚝 끊기거나 평평하거나 기계적인 끝음 금지.
   설정상 나이가 많아 보여도 중후·굵은·허스키·걸걸한 목소리로 쓰지 않는다(deep, husky, raspy, mature, middle-aged, narrator 같은 말 금지).
 - voice_description: 영어 200~500자. 기본값 위에 이 인물만의 것: 성별, 높낮이(조금 높게/조금 낮게), 밝기, 말 속도, 그리고 이 인물의 감정선
   (대본에서 이 인물이 주로 지나가는 감정, 예: 떨리지만 다짐하는, 장난스럽다가 진지해지는)과 감정 표현 습관. 녹음 품질 "clean close-mic studio recording".
