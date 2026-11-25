@@ -10389,7 +10389,7 @@ async function viewEdit(main) {
   <div class="row" style="margin-bottom:10px">
     <h2 style="margin:0 12px 0 0">편집실</h2>
     <select id="eSer" style="width:auto">${series.map(s => `<option value="${esc(s.id)}" ${s.id === S.seriesId ? 'selected' : ''}>${esc(s.title)}</option>`).join('')}</select>
-    <div class="epchips">${episodes.map(e => `<button class="chip ${e.id === S.episodeId ? 'on' : ''}" data-eep="${esc(e.id)}">${e.number}화</button>`).join('')}</div>
+    <span class="quiet" style="margin-left:6px">편집할 화</span><div class="epchips">${episodes.map(e => `<button class="chip ${e.id === S.episodeId ? 'on' : ''}" data-eep="${esc(e.id)}" title="${esc(e.title || '')}">${e.number}화</button>`).join('')}</div>
     <span id="eSave" class="quiet" style="margin-left:auto"></span>
     <button class="btn small" id="eUndo" title="되돌리기 (⌘Z)">↶</button><button class="btn small" id="eRedo" title="다시 하기 (⇧⌘Z)">↷</button>
   </div>
@@ -10411,6 +10411,13 @@ async function edLoad() {
   const takes = cuts.length ? await q(S.sb.from('production_takes').select('id,cut_id,take_no,status,verdict,score,seconds,files').in('cut_id', cuts.map(c => c.id)).order('take_no')) : [];
   ED.takes = Object.fromEntries(takes.map(t => [t.id, t]));
   ED.proj = proj; ED.tl = proj?.timeline || { clips: [], music: [], subs: [], settings: {} };
+  // 다른 화에서 가져온 컷(모든 화 이어 붙이기 등)도 보이게
+  const other = [...new Set((ED.tl.clips || []).map(c => c.cut_id).filter(id => id && !cuts.some(x => x.id === id)))];
+  if (other.length) {
+    const oc = await q(S.sb.from('production_cuts').select('id,episode_id,code,scene_no,cut_no,seconds,status,best_take_id,dialogue,summary,scene_heading').in('id', other));
+    const ot = await q(S.sb.from('production_takes').select('id,cut_id,take_no,status,verdict,score,seconds,files').in('cut_id', other));
+    ED.cuts.push(...oc); ot.forEach(t => { ED.takes[t.id] = t; });
+  }
   ['clips', 'music', 'subs'].forEach(k => ED.tl[k] = ED.tl[k] || []); ED.tl.settings = ED.tl.settings || {};
   ED.hist = []; ED.fut = []; ED.sel = null; ED.t = 0;
   await edSign();
@@ -10430,7 +10437,8 @@ async function edSign() {
 
 const cutOf = clip => ED.cuts.find(c => c.id === clip.cut_id) || {};
 const takeOf = clip => ED.takes[clip.take_id] || {};
-const clipCode = clip => (cutOf(clip).code || '').replace(/^E\d+-/, '').replace('-', ' ') || '컷';
+const clipCode = clip => { const c = cutOf(clip); const other = c.episode_id && c.episode_id !== ED.ep?.id;   // 다른 화에서 가져온 컷은 화 번호까지
+  return (other ? (c.code || '').replace(/-/g, ' ') : (c.code || '').replace(/^E\d+-/, '').replace('-', ' ')) || '컷'; };
 
 // ---------------- 변경·저장·되돌리기
 function edChange(fn, { keepSel = true } = {}) {
@@ -10483,6 +10491,47 @@ function edBuild(onlyPassed = true) {
   }
   return { clips, subs };
 }
+// 영상 가져오기: 이 화 / 화 골라서 / 이 시리즈 모든 화 — 만들어진 영상(채택한 테이크)을 화·씬·컷 순서대로
+async function edImport() {
+  const eps = await q(S.sb.from('episodes').select('id,number,title').eq('series_id', S.seriesId).order('number'));
+  const scope = await askChoice('만들어진 영상 가져오기', '어느 화의 영상을 타임라인으로 가져올까요? 화·씬·컷 순서대로 놓고 대사로 자막을 만듭니다.', [
+    { value: 'ep', label: `이 화(${ED.ep.number}화)만`, primary: true },
+    { value: 'pick', label: '화 골라서', desc: '예: 1,2,3 또는 1-5' },
+    { value: 'all', label: `이 시리즈 모든 화(${eps.length}개 화)`, desc: '전체를 한 편으로 이어 볼 때' }]);
+  if (!scope) return;
+  let pick = scope === 'ep' ? [ED.ep] : eps;
+  if (scope === 'pick') {
+    const s = prompt('가져올 화 번호 (예: 1,2,3 또는 1-5)', String(ED.ep.number)); if (!s) return;
+    const nums = new Set(); s.split(/[,\s]+/).forEach(x => { const m = x.match(/^(\d+)(?:-(\d+))?$/); if (m) { for (let n = +m[1]; n <= +(m[2] || m[1]); n++) nums.add(n); } });
+    pick = eps.filter(e => nums.has(e.number)); if (!pick.length) return toast('그 번호의 화가 없습니다');
+  }
+  const ids = pick.map(e => e.id);
+  const cuts = await q(S.sb.from('production_cuts').select('id,episode_id,code,scene_no,cut_no,seconds,status,best_take_id,dialogue,summary,scene_heading').in('episode_id', ids).order('scene_no').order('cut_no'));
+  const takes = cuts.length ? await q(S.sb.from('production_takes').select('id,cut_id,take_no,status,verdict,score,seconds,files').in('cut_id', cuts.map(c => c.id)).order('take_no')) : [];
+  const epNo = Object.fromEntries(pick.map(e => [e.id, e.number]));
+  cuts.sort((a, b) => (epNo[a.episode_id] - epNo[b.episode_id]) || (a.scene_no - b.scene_no) || (a.cut_no - b.cut_no));
+  cuts.forEach(c => { if (!ED.cuts.some(x => x.id === c.id)) ED.cuts.push(c); });
+  takes.forEach(t => { ED.takes[t.id] = t; });
+  const clips = [], subs = [];
+  for (const c of cuts) {
+    const tk = ED.takes[c.best_take_id] || takes.filter(t => t.cut_id === c.id && ['completed', 'stored'].includes(t.status) && t.files?.preview).at(-1);
+    if (!tk) continue;
+    const len = +tk.seconds || +c.seconds || 5, id = rid('c');
+    clips.push({ id, cut_id: c.id, take_id: tk.id, in: 0, out: len, src_len: len, gap: 0, voice_offset: 0, voice_gain: 1 });
+    subs.push(...subsFromDialogue(id, c.dialogue, len));
+  }
+  if (!clips.length) return toast('가져올 만들어진 영상이 없습니다');
+  let how = 'replace';
+  if (ED.tl.clips.length) {
+    how = await askChoice('타임라인에 어떻게 넣을까요?', `가져올 영상 ${clips.length}컷 (${pick.map(e => e.number + '화').join(', ')})`, [
+      { value: 'append', label: '지금 타임라인 뒤에 붙이기', primary: true },
+      { value: 'replace', label: '새로 바꾸기', desc: '지금 타임라인을 지우고 이것으로(되돌리기 가능)' }]);
+    if (!how) return;
+  }
+  await edSign();
+  edChange(tl => { if (how === 'append') { tl.clips.push(...clips); tl.subs.push(...subs); } else { tl.clips = clips; tl.subs = subs; } }, { keepSel: false });
+  toast(`영상 ${clips.length}컷을 가져왔습니다`);
+}
 function edMissing() {
   const inTl = new Set(ED.tl.clips.map(c => c.cut_id));
   return ED.cuts.filter(c => c.best_take_id && ED.takes[c.best_take_id] && !inTl.has(c.id));
@@ -10511,19 +10560,17 @@ function edRender() {
   if (!ED.tl.clips.length) {
     pane.innerHTML = `<div class="card ed-empty">
       <h3 style="margin-top:0">${ED.ep.number}화 편집 시작</h3>
-      <p>제작 탭에서 통과한 컷을 순서대로 타임라인에 올리고, 대사로 자막을 자동으로 만듭니다.</p>
-      <p class="quiet">컷 ${ED.cuts.length}개 중 통과 ${passed}개 · 영상이 있는 컷 ${new Set(Object.values(ED.takes).filter(t => ['completed', 'stored'].includes(t.status)).map(t => t.cut_id)).size}개</p>
-      <div class="row"><button class="btn primary" id="eBuild" ${passed ? '' : 'disabled'}>통과한 컷으로 타임라인 만들기</button>
-        <button class="btn" id="eBuildAll">통과 안 된 컷도 넣어서 만들기 (가편집 확인용)</button></div></div>`;
-    $('#eBuild').onclick = () => { const b = edBuild(true); edChange(tl => { tl.clips = b.clips; tl.subs = b.subs; }); };
-    $('#eBuildAll').onclick = () => { const b = edBuild(false); if (!b.clips.length) return toast('아직 생성된 영상이 없습니다'); edChange(tl => { tl.clips = b.clips; tl.subs = b.subs; }); };
+      <p>만들어진 영상을 타임라인으로 가져오면 순서대로 놓고, 대사로 자막을 자동으로 만듭니다.</p>
+      <p class="quiet">이 화: 컷 ${ED.cuts.length}개 중 영상이 만들어진 컷 ${passed}개 · 다른 화 영상도 함께 가져올 수 있습니다(위에서 편집할 화를 고르세요)</p>
+      <div class="row"><button class="btn primary" id="eImport">만들어진 영상 타임라인으로 가져오기</button></div></div>`;
+    $('#eImport').onclick = guard(() => edImport());
     return;
   }
   const miss = edMissing();
   const fit = Math.max(6, Math.min(140, ((pane.clientWidth || 1000) - 90) / Math.max(10, L.total)));
   if (!ED.ppsSet) ED.pps = fit;
   pane.innerHTML = `
-  ${miss.length ? `<div class="msg" style="background:var(--accent-soft)">타임라인에 없는 통과 컷 ${miss.length}개: ${esc(miss.map(c => c.code).join(', '))} <button class="btn small" id="eIns">제자리에 넣기</button></div>` : ''}
+  ${miss.length ? `<div class="msg" style="background:var(--accent-soft)">타임라인에 없는 만들어진 컷 ${miss.length}개: ${esc(miss.map(c => c.code).join(', '))} <button class="btn small" id="eIns">제자리에 넣기</button></div>` : ''}
   <div class="ed-top">
     <div class="ed-player card">
       <div class="ed-screen"><video id="eVid" playsinline preload="auto"></video><div id="eBlack" class="ed-black" hidden>정적</div><div id="eSub" class="ed-sub"></div></div>
@@ -10547,7 +10594,7 @@ function edRender() {
       <label class="btn small" style="margin:0">+ 음악 <input type="file" id="eMusic" accept="audio/*" hidden></label>
       <button class="btn small" id="eTone" title="바이블의 배경음악 항목 중 이 화에 맞는 톤을 보여 주고 Suno용 프롬프트를 복사합니다">🎵 이 화 음악 톤</button>
       <button class="btn small" id="eReSub">자막 대사로 다시 만들기</button>
-      <button class="btn small" id="eRebuild">처음부터 다시 구성</button>
+      <button class="btn small" id="eRebuild" title="이 화·다른 화·모든 화의 만들어진 영상을 타임라인 뒤에 붙이거나 새로 바꿉니다">영상 가져오기</button>
       <span class="sep"></span>
       <span class="quiet" id="eSum">${L.clips.length}컷 · ${fmtT(L.total)}</span>
     </div>
@@ -10757,8 +10804,7 @@ function edBind() {
       navigator.clipboard.writeText(t).then(() => toast('복사했습니다. Suno에 붙여 넣으세요'), () => toast(t));
     });
   });
-  $('#eRebuild').onclick = () => { if (!confirm('지금 타임라인을 지우고 통과한 컷으로 처음부터 다시 구성할까요? (되돌리기 가능)')) return;
-    const b = edBuild(true); edChange(tl => { tl.clips = b.clips; tl.subs = b.subs; }, { keepSel: false }); };
+  $('#eRebuild').onclick = guard(() => edImport());
   $('#eMusic').onchange = guard(async e => {
     const f = e.target.files[0]; if (!f) return;
     const ext = (f.name.split('.').pop() || 'mp3').toLowerCase().replace(/[^a-z0-9]/g, '');
