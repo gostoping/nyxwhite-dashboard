@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.38.2"
+VERSION = "1.39.0"
 
 import base64
 import glob
@@ -1008,7 +1008,39 @@ CUT_SCHEMA = """{"scene_no": 1, "cut_no": 1, "code": "E01-S01-C01", "scene_headi
  "voice_lines": [{"speaker": "린", "text": "대사 그대로(괄호 지문 빼고)", "tags": "[nervous] [whispers]", "direction": "작게 떨리며 시작 → 끝에서 목소리가 갈라지며 높아짐"}],
  "frame_first": {"prompt": "첫 장면 사진용 영어 프롬프트: 인물 고정 묘사·의상·자세·첫 표정·장소·조명·구도"},
  "use_end_frame": false, "frame_last": {"prompt": "끝 장면이 중요할 때만: 마지막 순간의 자세·표정·위치"},
- "continue_prev": false}"""
+ "continue_prev": false, "sheet": __SHEET__}"""
+SHEET_SCHEMA = """{"purpose": "이 쇼트의 서사적 목적(관객이 반드시 알아야 할 것·이야기에서 하는 역할)",
+   "script_facts": ["대본에 적힌 사실만(대사·행동·장소·시간)"], "director_choices": ["감독이 정한 연출(대본에 없는 것)과 그 이유"],
+   "time_position": "현재|과거 회상|미래 + 직전 사건과의 관계·전환 장치",
+   "characters": [{"name": "바이블 이름 그대로", "look": "외형(얼굴·헤어·메이크업, 이전 컷 대비 변화)", "costume": "의상·소품·손에 든 것과 위치", "expression": "표정·시선(무엇을 보는지)"}],
+   "location": "장소·공간 구조·식별 특징", "time_weather": "시간대·계절·날씨", "background": "엑스트라·차량·배경 움직임",
+   "action": [{"t": "0-2", "do": "보이는 행동(시작→진행→끝)"}], "emotion": "시작 감정 → 끝 감정(보이는 표정·몸짓으로)",
+   "dialogue": [{"t": "2-5", "who": "말하는 인물", "line": "대사 그대로", "how": "말투·몸짓"}],
+   "shot": "EWS|WS|MS|CU|ECU|리액션", "angle": "아이레벨|로우|하이|오버숄더|버드아이", "movement": "고정|돌리 인/아웃|트래킹|팬|틸트|크레인|핸드헬드|드론",
+   "lens_focus": "화각·심도·초점 대상·초점 이동", "color": "색온도·주색/보조색·채도·피부색", "mood_texture": "무드·질감·사실성",
+   "sound": {"amb": "공간음", "foley": "폴리", "sfx": "효과음", "dialogue": "대사 거리감·방향", "music": "없음(편집에서 깖)", "silence": "정적이 필요한 순간"},
+   "editing": "길이·컷 지점·매치컷/J컷/L컷·리듬", "start_frame": "시작 프레임(앞 컷 끝과 이어지는 상태)", "end_frame": "끝 프레임(인물 위치·자세·시선, 다음 컷 연결)",
+   "continuity": "앞뒤 컷과 맞출 것(인물·의상·소품·공간·동작·빛·감정, 화면 방향·180도·시선 일치)",
+   "constraints": "생성 때 반드시 지킬 조건", "quality_check": "생성 후 볼 것(얼굴 변형·손·립싱크·소품·연속성)", "fallback": "생성이 어려우면 대체 쇼트(다른 앵글·리액션·소품 클로즈업)"}"""
+
+VIDEO_GRAMMAR = """[영상 제작 문법 — 모든 컷은 이 기준으로 설계하고, sheet(한국어 쇼트별 제작 지시서)에 빠짐없이 적는다]
+원칙
+1. 대본에서 확인되는 사실(script_facts)과 감독이 설계한 연출(director_choices)을 구분한다. 대본에 없는 것을 사실처럼 쓰지 않는다.
+2. 모든 쇼트에는 명확한 서사적 목적(purpose)이 있다.
+3. 카메라 무빙과 구도는 인물의 감정과 사건의 목적에 맞춰 정한다(이유를 director_choices에).
+4. 프롬프트는 구체적이고 명확한 긍정문. 추상적인 감정어 대신 실제로 보이는 행동·표정을 묘사한다.
+5. 바이블 레퍼런스(인물·장소·소품)의 고정 묘사를 그대로 쓰고, 앞 컷의 끝 상태와 이어지게 한다.
+6. 시간 이동(회상·미래)과 외형 변화에는 시청자가 알아볼 연결 장치(전환·색·소리·소품)를 설계한다.
+7. 생성 전 개연성을 따지고(constraints), 생성 후 볼 검수 기준(quality_check)과 대체 쇼트(fallback)를 정해 둔다.
+설계 항목: 서사(목적·감정과 갈등·시간 위치) / 인물(바이블 ID·외형·의상·소품·표정·시선·행동·대사와 립싱크) /
+환경(장소·시간·날씨·배경 활동) / 촬영(쇼트 크기·앵글·무빙·렌즈와 심도·구도) / 조명(광원 방향·노출과 대비) /
+색채(색온도·팔레트·무드·질감) / 음향(AMB·FOLEY·SFX·DIALOGUE·MUSIC·SILENCE, J컷·L컷) / 편집(길이·컷 지점·리듬) /
+연속성(인물·의상 소품·공간·동작·빛과 시간·감정 — 시작·끝 프레임을 적고 앞 컷 끝과 비교) /
+고급(모션 타이밍 초 단위, 화면 방향 유지, 시선 일치, 180도 규칙, 액션 매치, 초점 이동, 대사 주인 지정, 생성 조건, 대체 쇼트).
+sheet는 대표가 읽는 한국어 지시서다: 항목마다 짧고 구체적으로(한두 줄). 구도·조명·동선·다음 컷 연결은 staging에 적고 sheet에서 되풀이하지 않는다.
+영어 prompt는 아래 [프롬프트 꼼꼼함]의 머리말 순서 그대로 쓰되, sheet와 같은 내용이어야 한다(WHO=CHARACTERS·HANDS, WHERE·WHEN=FRAME·LIGHT, WHAT·EMOTION=ACTION, SOUND=DIALOGUE·현장음, CONTINUITY·END FRAME=CONTINUITY)."""
+
+CUT_SCHEMA = CUT_SCHEMA.replace("__SHEET__", SHEET_SCHEMA)
 
 
 ANATOMY_LINE = ("ANATOMY: Each person has exactly two arms and two hands with five fingers each. No extra or missing limbs, "
@@ -1097,6 +1129,8 @@ def director_system(ctx):
 [감독 교훈 — 지난 감수에서 배운 것, 먼저 적용]
 {lessons_text(ctx, 30, "감독")}
 
+{VIDEO_GRAMMAR}
+
 [컷 설계 규칙]
 - 씬 번호는 대본에 나온 순서대로 1부터. 컷은 4~15초. 대사는 한 글자도 바꾸지 않는다.
 - 표정은 2~3초마다 바뀌도록 expression_beats를 컷 길이 전체에 빈틈없이 적는다.
@@ -1160,6 +1194,8 @@ def review_cuts(ctx, ep, cuts, model, script_text=None):
 4) 같은 인물의 목소리 묘사가 바이블 목소리 항목·지난 컷과 같은가(나이·음색·억양이 바뀌면 안 됨).
 5) 최초 기획 일관성: 인물 얼굴·의상·장소 묘사가 바이블 고정 문장 그대로인가, 이름 표기가 맞는가.
 6) 표정이 2~3초마다 바뀌게 설계됐는가(세부 판단은 영상감수자), 4~15초인가, 프롬프트가 한 장면만 묘사하는가.
+7) 제작 지시서(sheet): 서사적 목적이 있는가, 대본 사실(script_facts)과 감독 연출(director_choices)이 섞이지 않았는가(대본에 없는 걸 사실로 적으면 fix),
+   시작 프레임이 앞 컷 끝 프레임과 이어지는가, 시간 이동·외형 변화에 연결 장치가 있는가, 프롬프트가 sheet와 같은 내용인가.
 
 [답 형식]
 <json>{{"cuts": [{{"scene_no": 1, "cut_no": 1, "verdict": "pass|fix", "issues": ["…"], "fix": "감독이 고칠 것"}}],
@@ -1382,7 +1418,7 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
         if tight:
             user += "\n\n[중요] 지난번 답이 너무 길어 잘렸거나 형식이 깨졌다. 설명 없이 <json>{\"cuts\": [...], \"end_state\": [...]}</json> 하나만. 프롬프트·메모는 짧고 핵심만."
         progress(f"감독이 {epno}화 {label}을(를) 컷으로 나누는 중")
-        text, _ = claude(dmodel, director_system(ctx), user, max_tokens=16000, stage="cut_card", episode_id=ep,
+        text, _ = claude(dmodel, director_system(ctx), user, max_tokens=32000, stage="cut_card", episode_id=ep,
                          note=f"감독 컷 설계 {label}")
         d = safe_json(text)
         cuts = [c for c in (d.get("cuts") or []) if isinstance(c, dict)]
@@ -1429,7 +1465,7 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
         return out_c, out_e, out_f
 
     cuts, end_state, failed = [], [], []
-    groups = scene_groups(todo)
+    groups = scene_groups(todo, max_n=2)   # 컷마다 한국어 제작 지시서가 붙어 답이 길어짐 → 묶음을 작게(동시에 설계)
     progress(f"감독이 {epno}화 씬 묶음 {len(groups)}개를 동시에 설계하는 중")
     for g, r in zip(groups, parallel([(lambda g=g: design_group(g)) for g in groups], workers=min(8, max(1, len(groups))))):
         if isinstance(r, Exception):
@@ -1513,6 +1549,7 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
         except Exception as ex:
             log(f"교훈 기록 실패: {ex}")
     cuts = [{**fixed[(inum(c["scene_no"]), inum(c["cut_no"]))], "scene_no": c["scene_no"], "cut_no": c["cut_no"], "code": c.get("code"),
+             "sheet": fixed[(inum(c["scene_no"]), inum(c["cut_no"]))].get("sheet") or c.get("sheet"),
              **({"scene_plan": c["scene_plan"]} if c.get("scene_plan") else {})}
             if (inum(c["scene_no"]), inum(c["cut_no"])) in fixed else c for c in cuts]   # 고친 컷도 번호·코드는 그대로
     by_scene = {}
@@ -1615,7 +1652,8 @@ def director_revise(t, cut_id):
             f"[이 컷이 맡을 대본 — 대표가 정함]\n{rng}" if rng else "아래 컷 하나를 고쳐서 같은 형식(cuts 배열에 1개)으로 주세요. 대사는 바꾸지 않습니다.")
     user = f"""{head}
 [지금 컷]
-{json.dumps({k: cut.get(k) for k in ('scene_no', 'cut_no', 'code', 'scene_heading', 'seconds', 'summary', 'dialogue', 'emotion', 'expression_beats', 'camera', 'staging', 'reference_names', 'prompt')}, ensure_ascii=False)}
+{json.dumps({k: cut.get(k) for k in ('scene_no', 'cut_no', 'code', 'scene_heading', 'seconds', 'summary', 'dialogue', 'emotion', 'expression_beats', 'camera', 'staging', 'reference_names', 'prompt', 'shot_sheet')}, ensure_ascii=False)}
+(지금 컷의 shot_sheet가 제작 지시서다. 고친 내용은 sheet의 해당 항목과 영어 prompt에 함께 반영하고, sheet 전체를 다시 준다)
 [대표 지시 — 최우선. 아래를 빠짐없이 프롬프트에 반영한다. 바이블·감수 의견과 부딪히면 대표 지시를 따른다]
 {cut.get('fix_request') or '(없음)'}
 [지난 영상 감수 결과(참고, 대표 지시보다 뒤)]
@@ -1647,6 +1685,7 @@ def director_revise(t, cut_id):
     then_gen = bool((t.get("payload") or {}).get("then_generate"))   # 대표가 '보완해서 다시 만들기'로 생성까지 맡긴 것
     rpc("agent_update_cut", p_token=TOKEN, p_id=cut_id, p={
         "status": "approved" if then_gen else "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"), "staging": new.get("staging") if isinstance(new.get("staging"), dict) else None, "camera": new.get("camera") or None, "prompt_ko": new.get("prompt_ko") or None,
+        "shot_sheet": new.get("sheet") if isinstance(new.get("sheet"), dict) else (cut.get("shot_sheet") or None),
         "reference_names": refs, "director_note": new.get("director_note"), "est_usd": est_cut_usd(ctx, secs, refs), "clear_fix": True,
         "voice_lines": new.get("voice_lines") or cut.get("voice_lines") or [], "frame_first": new.get("frame_first") or {"prompt": (cut.get("frame_first") or {}).get("prompt")},
         "frame_last": new.get("frame_last") or {}, "use_end_frame": bool(new.get("use_end_frame")), "continue_prev": bool(new.get("continue_prev")), "prep_status": "none",
