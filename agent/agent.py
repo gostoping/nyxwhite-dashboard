@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.35.0"
+VERSION = "1.36.0"
 
 import base64
 import glob
@@ -1000,12 +1000,40 @@ CUT_SCHEMA = """{"scene_no": 1, "cut_no": 1, "code": "E01-S01-C01", "scene_headi
  "camera": "샷·앵글·움직임", "reference_names": ["린", "연습실"],
  "staging": {"composition": "구도: 샷 크기·카메라 높이·인물 배치(예: 바스트샷, 눈높이, 린 화면 왼쪽 1/3·탄 오른쪽)",
              "lighting": "조명: 빛이 어디서 어떻게(예: 오른쪽 창에서 늦은 오후 햇빛이 비스듬히, 얼굴 왼쪽은 그늘)",
-             "blocking": "연출: 인물 동선·움직임 방향(예: 린이 화면 왼쪽에서 오른쪽으로 걸어 들어와 탄 앞에 멈춤)"},
+             "blocking": "연출: 인물 동선·움직임 방향(예: 린이 화면 왼쪽에서 오른쪽으로 걸어 들어와 탄 앞에 멈춤)",
+             "connect": "다음 컷으로 이어지는 법(예: 린이 문고리를 잡는 동작 중간에 다음 컷으로 — 다음 컷은 같은 동작의 손 클로즈업에서 시작)"},
  "prompt": "Seedance에 보낼 영어 프롬프트(대사는 한국어 원문 그대로 따옴표)", "director_note": "반영한 메모·교훈",
  "voice_lines": [{"speaker": "린", "text": "대사 그대로(괄호 지문 빼고)", "tags": "[nervous] [whispers]", "direction": "작게 떨리며 시작 → 끝에서 목소리가 갈라지며 높아짐"}],
  "frame_first": {"prompt": "첫 장면 사진용 영어 프롬프트: 인물 고정 묘사·의상·자세·첫 표정·장소·조명·구도"},
  "use_end_frame": false, "frame_last": {"prompt": "끝 장면이 중요할 때만: 마지막 순간의 자세·표정·위치"},
  "continue_prev": false}"""
+
+
+ANATOMY_LINE = ("ANATOMY: Each person has exactly two arms and two hands with five fingers each. No extra or missing limbs, "
+                "no duplicated or merged hands, no extra people, natural body proportions.")
+
+
+def attach_scene_plans(cuts, scenes):
+    """감독이 준 씬 연출 계획을 그 씬 첫 컷에 붙여 저장(agent_save_cuts가 scene_packages.plan으로 옮김)."""
+    plans = {inum(s.get("scene_no") or 0): s.get("plan") for s in (scenes or []) if isinstance(s, dict) and isinstance(s.get("plan"), dict)}
+    seen = set()
+    for c in sorted(cuts, key=lambda x: (inum(x.get("scene_no") or 0), inum(x.get("cut_no") or 0))):
+        k = inum(c.get("scene_no") or 0)
+        if k in plans and k not in seen:
+            c["scene_plan"] = plans[k]
+            seen.add(k)
+
+
+def tidy_prompt(prompt):
+    """프롬프트 꼼꼼함 보강: 신체 규칙(손·팔 개수) 줄이 없으면 붙인다. 소리 규칙 문장은 맨 끝에 둔다."""
+    p = (prompt or "").strip()
+    if not p or re.search(r"exactly two (arms|hands)", p, re.I):
+        return p
+    tail = "No background music, no score. Dialogue and natural ambient sound only."
+    if tail in p:
+        p = p.replace(tail, "").rstrip()
+        return f"{p}\n{ANATOMY_LINE}\n{tail}"
+    return f"{p}\n{ANATOMY_LINE}"
 
 
 def director_system(ctx):
@@ -1034,8 +1062,34 @@ def director_system(ctx):
   같은 씬 안에서는 두 인물의 좌우(180도 규칙)·빛이 들어오는 방향·장소의 문·창 위치가 컷마다 같아야 한다. 움직임 방향(왼쪽→오른쪽)도 이어지게.
   샷 크기는 이야기에 맞게 바꾼다(넓게 공간 소개 → 가까이 감정). 프롬프트에도 같은 구도·조명·동선을 영어로 그대로 넣는다.
 
+- 씬 연출 계획(scenes): 설계하는 씬마다 하나. 대표가 대본과 나란히 놓고 "이 씬은 이렇게 가는구나"를 확인하는 칸이다(한국어, 구체적으로).
+  composition 화면 구성(공간 배치·샷 흐름: 넓게 공간 소개 → 가까이 감정), direction 방향(누가 어느 쪽에서 등장·퇴장, 두 인물의 좌우 기준선),
+  flow 흐름(컷과 컷이 어떻게 이어지는지: 동작 이어 붙이기·시선 따라가기·소리 먼저 등 — 짤막하게 끊기지 않게),
+  mood 분위기(빛의 방향·색감·현장음), transition_in 앞 씬에서 넘어오는 법, transition_out 다음 씬으로 넘기는 법.
+
+[자연스러운 연결 — 가장 중요]
+- 같은 씬 안의 컷은 기본으로 이어진다: continue_prev=true(앞 컷 마지막 장면에서 시작)가 기본이고, 장소·시간이 바뀌거나 일부러 끊을 때만 false.
+- 컷을 나누는 자리는 동작의 중간·시선이 옮겨 가는 순간·대사가 끝나고 반응이 시작되는 순간. 동작이 끝나 멈춘 뒤에 자르지 않는다.
+- 컷 첫 0.5초에 앞 컷 마지막 자세·위치·표정을 그대로 적고, 컷 끝 1초에 다음 컷이 이어받을 동작을 시작해 둔다(staging.connect에 적는다).
+- 4~6초짜리 컷을 잘게 늘어놓지 않는다. 대사가 이어지는 대화는 한 컷에 길게(최대 15초) 담고, 반응 컷은 감정이 바뀔 때만.
+
+[프롬프트 꼼꼼함 — 영상이 망가지는 가장 큰 원인]
+영어 프롬프트는 빠짐없이 아래 순서로 적는다(줄마다 머리말 그대로):
+SHOT: 샷 크기·카메라 높이·각도·움직임(한 가지만, 천천히)
+FRAME: 화면에 보이는 사람 수를 숫자로("Exactly 2 people in frame") + 각 인물의 위치(left third / right third / center, 앞·뒤)와 몸·얼굴 방향
+LIGHT: 빛이 들어오는 방향·시간대·색(씬 안에서 같은 방향 유지)
+CHARACTERS: 바이블 고정 묘사(얼굴·머리·의상) — 인물마다
+HANDS: 인물마다 왼손·오른손이 무엇을 하는지·무엇을 들고 있는지(빈손이면 "left hand relaxed at side")
+ACTION 0-3s / 3-6s …: 구간마다 동작 하나씩, 단순하고 느리게. 시작 자세는 앞 컷 끝과 같게
+DIALOGUE: 화자·한국어 원문 따옴표·목소리
+CONTINUITY: 시작 자세(앞 컷에서 이어짐)와 끝 자세(다음 컷이 이어받음)
+ANATOMY: "Each person has exactly two arms and two hands with five fingers each. No extra or missing limbs, no duplicated or merged hands, no extra people, natural body proportions."
+- 손이 복잡하게 얽히는 동작(손깍지, 여러 물건 동시에 다루기, 빠른 손동작), 3명 넘게 한 화면, 빠른 카메라 움직임은 피한다. 꼭 필요하면 손 클로즈업 컷을 따로.
+- 프롬프트 끝에는 소리 규칙 문장을 붙인다.
+
 [답 형식]
-<json>{{"cuts": [{CUT_SCHEMA}]}}</json>"""
+<json>{{"cuts": [{CUT_SCHEMA}],
+ "scenes": [{{"scene_no": 1, "plan": {{"composition": "", "direction": "", "flow": "", "mood": "", "transition_in": "", "transition_out": ""}}}}]}}</json>"""
 
 
 def review_cuts(ctx, ep, cuts, model, script_text=None):
@@ -1283,6 +1337,7 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
         cuts = [c for c in (d.get("cuts") or []) if isinstance(c, dict)]
         if nos != [0]:
             cuts = [c for c in cuts if inum(c.get("scene_no") or 0) in nos]
+        attach_scene_plans(cuts, d.get("scenes"))
         if cuts:
             return cuts, d.get("end_state") or [], None
         if CURRENT.get("last_stop") == "max_tokens":
@@ -1406,7 +1461,8 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
             rpc("agent_add_lesson", p_token=TOKEN, p_lesson={**l, "series_id": (ctx.get("series") or {}).get("id"), "sources": ["감정감수자"]})
         except Exception as ex:
             log(f"교훈 기록 실패: {ex}")
-    cuts = [{**fixed[(inum(c["scene_no"]), inum(c["cut_no"]))], "scene_no": c["scene_no"], "cut_no": c["cut_no"], "code": c.get("code")}
+    cuts = [{**fixed[(inum(c["scene_no"]), inum(c["cut_no"]))], "scene_no": c["scene_no"], "cut_no": c["cut_no"], "code": c.get("code"),
+             **({"scene_plan": c["scene_plan"]} if c.get("scene_plan") else {})}
             if (inum(c["scene_no"]), inum(c["cut_no"])) in fixed else c for c in cuts]   # 고친 컷도 번호·코드는 그대로
     by_scene = {}
     for c in cuts:
@@ -1415,6 +1471,7 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
         c["review"] = {"verdict": "revised" if r.get("verdict") == "fix" else (r.get("verdict") or ("pass" if verdicts else "skipped")),
                        "issues": r.get("issues") or [], "fix": r.get("fix")}
         c["reference_names"] = has_images(ctx, c.get("reference_names"))
+        c["prompt"] = tidy_prompt(c.get("prompt"))
         c["seconds"] = max(4, min(15, inum(c.get("seconds"), 10) or 10))
         c["resolution"] = setting(ctx, "generation", "resolution", "480p")
         c["est_usd"] = est_cut_usd(ctx, c["seconds"], c["reference_names"])
@@ -1509,6 +1566,7 @@ def director_revise(t, cut_id):
     new = (pick_json(text).get("cuts") or [None])[0]
     if not new or not new.get("prompt"):
         raise RuntimeError("감독이 고친 프롬프트를 만들지 못했습니다")
+    new["prompt"] = tidy_prompt(new["prompt"])
     refs = has_images(ctx, new.get("reference_names") or cut.get("reference_names"))
     secs = max(4, min(15, int(new.get("seconds") or cut.get("seconds") or 10)))
     then_gen = bool((t.get("payload") or {}).get("then_generate"))   # 대표가 '보완해서 다시 만들기'로 생성까지 맡긴 것
@@ -2772,11 +2830,11 @@ def _generate(t):
     kind = "i2v" if first_url else "ref" if refs else "t2v"
     route = vm["routes"][kind]
     if vm["key"] == "kling-4.0":
-        body = {"prompt": cut["prompt"], "duration": int(cut["seconds"]), "resolution": res}
+        body = {"prompt": tidy_prompt(cut["prompt"]), "duration": int(cut["seconds"]), "resolution": res}
         if kind == "t2v":
             body["aspect_ratio"] = gen.get("aspect_ratio", "9:16")
     else:
-        body = {"prompt": cut["prompt"], "duration": int(cut["seconds"]), "resolution": res,
+        body = {"prompt": tidy_prompt(cut["prompt"]), "duration": int(cut["seconds"]), "resolution": res,
                 "generate_audio": bool(gen.get("audio", True))}
         if route == "text-to-video":   # output_format은 글→영상만 받는다(사진→영상·참고→영상은 모르는 칸이 있으면 422로 거절)
             body["output_format"] = "mp4"
@@ -4199,7 +4257,11 @@ def script_review(t):
         if nos != sorted(nos):
             mech.append("씬 번호가 순서대로가 아닙니다: " + " → ".join(f"S#{n}" for n in nos[:30]))
     cuts = rpc("agent_list_cuts", p_token=TOKEN, p_episode=ep) or []
-    cut_view = [{k: c.get(k) for k in ("scene_no", "cut_no", "dialogue", "summary")} for c in cuts if c.get("status") != "cancelled"]
+    cut_view = [{k: c.get(k) for k in ("scene_no", "cut_no", "seconds", "dialogue", "summary", "staging", "continue_prev")} for c in cuts if c.get("status") != "cancelled"]
+    try:
+        plans = [x for x in (rpc("agent_scene_plans", p_token=TOKEN, p_episode=ep) or []) if x.get("plan")]
+    except Exception:
+        plans = []
     if cut_view:
         no_cut = [n for n in nos if not any(int(c["scene_no"] or 0) == n for c in cut_view)]
         if no_cut:
@@ -4207,11 +4269,18 @@ def script_review(t):
     model = setting(ctx, "generation", "claude_reviewer", "claude-sonnet-5-5")
     system = role_lessons_block(ctx, "대본감수자").lstrip() + (guide(ctx, "대본감수자") or "너는 대본감수자다. 원고 → 작가실 정리본 → 컷 설계가 씬 순서대로 빠짐없이 옮겨졌는지 감수한다.") + """
 
+[감독(제작자)과 함께 보는 것 — 컷 설계·씬 연출 계획이 있으면]
+- 연결: 씬과 씬 사이(transition_in/out)가 대본 흐름에 맞게 자연스러운가, 같은 씬 안 컷들이 짤막하게 끊기지 않고 이어지는가
+  (continue_prev, staging.connect, 4~6초 컷이 잘게 늘어서 있지 않은가, 대화가 컷마다 쪼개져 있지 않은가).
+- 구도·방향: 대본 지문의 등장·퇴장·위치와 staging(구도·연출)·씬 계획(direction)이 맞는가, 같은 씬에서 두 인물의 좌우·빛 방향이 바뀌지 않는가.
+- 이런 것은 who "감독", type "연결" 또는 "구도"로, fix에는 감독이 바로 고칠 수 있게 구체적으로(어느 컷을 어떻게 잇고 어떤 구도로).
+
 [답 형식] 문제만 적는다. 감정선 보강으로 늘어난 지문·숨은 문제가 아니다. 대사는 글자 그대로여야 한다.
 <json>{"verdict": "pass|fix", "summary": "대표용 한두 줄",
- "issues": [{"scene": "S#3", "type": "순서|누락|대사 변경|장소 구분|컷 누락|기타", "original": "원고(또는 정리본) 원문 짧게", "now": "지금 상태", "fix": "고칠 곳과 방법", "who": "작가실|감독|대표"}]}</json>"""
+ "issues": [{"scene": "S#3", "type": "순서|누락|대사 변경|장소 구분|컷 누락|연결|구도|기타", "original": "원고(또는 정리본) 원문 짧게", "now": "지금 상태", "fix": "고칠 곳과 방법", "who": "작가실|감독|대표"}]}</json>"""
     user = ("[대표 원고]\n" + orig["content"][:40000] + "\n\n[작가실 정리본" + (" — 확정" if draft is conf else " — 확정 전") + "]\n" + draft["content"][:50000]
-            + ("\n\n[컷 설계(씬·컷·대사)]\n" + json.dumps(cut_view, ensure_ascii=False)[:30000] if cut_view else "")
+            + ("\n\n[컷 설계(씬·컷·대사·구도·조명·연출·연결)]\n" + json.dumps(cut_view, ensure_ascii=False)[:40000] if cut_view else "")
+            + ("\n\n[감독의 씬 연출 계획]\n" + json.dumps(plans, ensure_ascii=False)[:15000] if plans else "")
             + ("\n\n[기계 점검에서 나온 것]\n" + "\n".join(mech) if mech else ""))
     progress(f"대본감수자가 원고·정리본{'·컷 설계' if cut_view else ''}를 씬 순서대로 대조하는 중")
     text, _ = claude(model, system, user, max_tokens=8000, stage="prompt_review", episode_id=ep, note="대본감수자: 원고·정리본 대조")
@@ -4402,7 +4471,8 @@ def flow_review(t):
   구도가 정리돼 있는가 — 샷 크기(풀·미디엄·바스트·클로즈업)가 이야기에 맞게 바뀌는가(같은 크기 반복·이유 없는 급변),
   카메라 높이·각도, 인물 배치(화면 왼쪽/오른쪽, 머리 위 여백, 잘린 곳), 180도 규칙(두 인물의 좌우가 컷마다 뒤바뀌지 않는가),
   시선 방향이 상대와 맞는가, 같은 장소의 공간 배치(문·창·소품 위치)가 컷마다 같은가,
-  컷 시작이 굳어 있거나(시작과 0.6초가 거의 같음) 끝에서 동작이 멈추는가.
+  컷 시작이 굳어 있거나(시작과 0.6초가 거의 같음) 끝에서 동작이 멈추는가,
+  몸이 망가졌는가(손·팔·손가락 개수가 이상함, 손이 겹치거나 녹아 붙음, 사람이 늘어남, 얼굴 일그러짐) — 보이면 꼭 remake와 원인(프롬프트의 HANDS·FRAME·ANATOMY 부족 등)을 적는다.
 - 감정감수자: 대본 씬과 비교해 감정이 앞 컷에서 다음 컷으로 자연스럽게 이어지는가(갑자기 다른 감정에서 시작 등),
   대사 순서·누락이 대본과 맞는가, 대사 사이 쉼(첫소리까지초·끝소리뒤_조용한초)이 너무 길거나 짧아 리듬이 깨지는가, 컷 경계에서 소리 크기가 튀는가.
 - 편집으로 고칠 수 있는 것(앞뒤 몇 초 잘라내기, 정적 줄이기)은 edit_fix에 적고 remake=false.
