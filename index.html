@@ -9671,6 +9671,9 @@ async function renderProduction(ep, quietRefresh = false) {
   const srTask = tasks.filter(t => t.kind === 'cut_review' && t.payload?.mode === 'script').sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
   let srRes = null; try { srRes = srTask?.status === 'done' ? JSON.parse(srTask.result || 'null') : null; } catch (e) {}
   const srBusy = srTask && ['queued', 'running'].includes(srTask.status);
+  // 지금 컷 기준으로 한 대본 감수인가(컷을 다시 설계했으면 다시 감수)
+  const lastCut = cuts.reduce((m, c) => Math.max(m, new Date(c.created_at).getTime()), 0);
+  const srFresh = srRes && srTask.finished_at && new Date(srTask.finished_at).getTime() >= lastCut - 60e3;
   const afterBtn = (id, m, label) => btn(id, `${label}${madeCuts.length ? ` (${madeCuts.filter(c => c.reviews?.['after_' + m]).length}/${madeCuts.length})` : ''}`, madeCuts.length > 0, false);
   const B = {
     wr: p => btn('pWr', versions.length ? '작가실 정리 실행' : '작가실 정리(원고 필요)', versions.length, p),
@@ -9689,6 +9692,10 @@ async function renderProduction(ep, quietRefresh = false) {
     : !confirmed ? { t: '작가실 정리 실행', d: '원고를 장소별 씬으로 나누고 감정선을 다듬습니다 → 확정하면 컷 설계까지 이어집니다(Claude 비용, 수백 원)', k: 'wr' }
     : busyKinds.has('director') ? { t: `감독이 ${ep.number}화 컷을 설계하는 중`, d: '끝나면 아래 씬 순서에 컷이 채워집니다' }
     : !cuts.length ? { t: `${ep.number}화 컷 설계`, d: '감독이 씬마다 4~15초 컷으로 나누고 감정감수자가 감수합니다(Claude 비용, 수백 원)', k: 'dir' }
+    // 작가실 정리 → 확정 → 컷 설계(자동)까지 넘어오면: 대본 감수로 빠진 것 없는지 확인 → 승인 대기 컷 전체 생성
+    : designedCost && srBusy ? { t: '대본 감수 중', d: '대본감수자가 원고·정리본·컷을 씬 순서대로 대조하고 있습니다. 끝나면 아래에 결과가 나옵니다' }
+    : designedCost && !srFresh ? { t: '대본 감수', d: `작가실이 정리해 온 대본과 컷 ${toReview.length}개가 씬 순서대로 빠짐없는지 확인합니다(Claude 비용, 수백 원). 이상 없으면 전체 생성으로`, k: 'scr' }
+    : designedCost && srRes?.verdict === 'fix' ? { t: '대본 감수에서 확인할 것 ' + srRes.issues.length + '건', d: '아래 표를 확인하세요. 괜찮으면 그대로 승인 대기 컷 전체 생성을 누르면 됩니다', k: 'ap' }
     : designedCost ? { t: '영상 생성 승인', d: `승인 대기 컷 ${cuts.filter(c => ['designed', 'failed', 'hold'].includes(c.status)).length}개 · 씬마다 따로 승인할 수도 있습니다`, k: 'ap' }
     : inProg ? { t: '영상 만드는 중', d: `${inProg}컷 생성·감수 중 · 통과 ${passed}/${cuts.length}` }
     : passed ? { t: '편집실에서 이어 붙이기', d: `통과 ${passed}/${cuts.length}컷`, k: 'ed' }
