@@ -5998,8 +5998,17 @@ function go(tab) {
     main.style.minHeight = ''; main.innerHTML = '<p class="quiet">불러오는 중…</p>'; window.scrollTo(0, 0);
   }
   const done = () => { if (same) { window.scrollTo(0, y); requestAnimationFrame(() => { main.style.minHeight = ''; main.classList.remove('refreshing'); }); } };
+  // 화면을 빠르게 두 번 그리면(두 번 누름·자동 새로 고침) 먼저 시작한 그리기가 이미 바뀐 화면에서 칸을 못 찾아 오류를 냈다 → 옛 그리기의 오류는 무시
+  const seq = S.goSeq = (S.goSeq || 0) + 1;
   views[tab](main)
-    .then(done).catch(e => { console.error(e); main.style.minHeight = ''; main.classList.remove('refreshing'); main.innerHTML = `<div class="msg err">${esc(errText(e))}</div>`; });
+    .then(done).catch(e => {
+      console.error(e);
+      if (seq !== S.goSeq || S.tab !== tab) return;
+      const where = (String(e?.stack || '').split('\n').find(l => /at (view|render|bind|show)\w*/.test(l)) || '').match(/at (\w+)/)?.[1];
+      main.style.minHeight = ''; main.classList.remove('refreshing');
+      main.innerHTML = `<div class="msg err">${esc(errText(e))}${where ? ` <span class="quiet">(${esc(where)})</span>` : ''} <button class="btn small" id="goRetry">다시 불러오기</button></div>`;
+      const r = $('#goRetry'); if (r) r.onclick = () => go(tab);
+    });
 }
 const pill = (text, kind = '') => `<span class="pill ${kind}">${esc(text)}</span>`;
 
@@ -6337,6 +6346,7 @@ async function viewScripts(main) {
   const drafts = episodes.length ? await q(S.sb.from('script_versions').select('episode_id').eq('status', 'draft')
     .in('episode_id', episodes.map(e => e.id))) : [];
 
+  if (S.tab !== 'scripts') return;   // 불러오는 사이 다른 탭으로 갔으면 그리지 않는다
   main.innerHTML = `
   <div class="split">
     <div>
@@ -6572,6 +6582,7 @@ async function viewEpisode(pane, ep) {
   </div>
   <div id="detail"></div>`;
 
+  if (!document.contains(pane)) return;   // 그사이 대본 탭이 다시 그려졌으면 옛 그리기는 멈춘다
   $('#epStatus').onchange = guard(async e => { await q(S.sb.from('episodes').update({ status: e.target.value }).eq('id', ep.id)); toast('상태를 바꿨습니다'); });
   $('#file').onchange = e => {
     const f = e.target.files[0]; if (!f) return;
@@ -6657,11 +6668,13 @@ async function renderNotes(ep) {
     <textarea id="ntxt" style="min-height:70px;font-family:inherit" placeholder="예: 주인공이 물잔을 들 때는 슬로우로 움직여 줘 / 이 장면은 매우 중요하니 공들여 촬영"></textarea>
     <div class="row" style="margin-top:8px"><button class="btn primary" id="nadd">메모 추가</button></div>
   </div>`;
-  $('#nadd').onclick = guard(async () => {
-    const content = $('#ntxt').value.trim(); if (!content) return toast('메모 내용을 적어 주세요');
-    const sc = parseInt($('#nsc').value, 10);
+  if (!document.contains(box)) return;   // 그사이 화면이 다시 그려졌으면(두 번 누름 등) 옛 상자는 건너뛴다
+  const B = s => box.querySelector(s);
+  B('#nadd').onclick = guard(async () => {
+    const content = B('#ntxt').value.trim(); if (!content) return toast('메모 내용을 적어 주세요');
+    const sc = parseInt(B('#nsc').value, 10);
     await q(S.sb.from('episode_notes').insert({ episode_id: ep.id, scene_no: Number.isFinite(sc) ? sc : null,
-      priority: $('#npri').value, important: $('#nimp').checked, content }));
+      priority: B('#npri').value, important: B('#nimp').checked, content }));
     toast('연출 메모를 남겼습니다'); await renderNotes(ep);
   });
   box.querySelectorAll('[data-nst]').forEach(b => b.onclick = guard(async () => {
@@ -6681,6 +6694,7 @@ async function showVersion(id, scroll = true) {
     q(S.sb.from('scenes').select('scene_no,heading,grade,status').eq('script_version_id', id).order('scene_no')),
   ]);
   const shown = changes.filter(c => c.change_type !== 'unchanged');
+  if (!$('#detail') || S.versionId !== id) return;   // 그사이 다른 화·버전을 골랐으면 그리지 않는다
   $('#detail').innerHTML = `
   <div class="card">
     <div class="row"><b>${v.version_no ? 'v' + v.version_no : '초안'}</b> ${pill(V_STATUS[v.status] || v.status)}
@@ -6693,7 +6707,7 @@ async function showVersion(id, scroll = true) {
       <td>${pill({ main: '주요', normal: '일반', transition: '연결' }[s.grade])}</td><td class="quiet">${esc(s.status)}</td></tr>`).join('')}</table>` : ''}
     <h3>대본</h3><pre class="doc">${esc(v.content)}</pre>
   </div>`;
-  $('#copy').onclick = () => { $('#txt').value = v.content; $('#txt').scrollIntoView({ behavior: 'smooth' }); toast('입력창에 불러왔습니다. 고친 뒤 초안 저장하세요'); };
+  $('#copy').onclick = () => { if (!$('#txt')) return; $('#txt').value = v.content; $('#txt').scrollIntoView({ behavior: 'smooth' }); toast('입력창에 불러왔습니다. 고친 뒤 초안 저장하세요'); };
   if (scroll) $('#detail').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -6717,6 +6731,7 @@ function lineDiff(a, b) {
 async function compareVersions(aId, bId) {
   const [a, b] = await Promise.all([aId, bId].map(id => q(S.sb.from('script_versions').select('version_no,content').eq('id', id).single())));
   const d = lineDiff(a.content, b.content);
+  if (!$('#detail')) return;
   const added = d ? d.filter(x => x[0] === '+').length : 0, removed = d ? d.filter(x => x[0] === '-').length : 0;
   $('#detail').innerHTML = `<div class="card">
     <div class="row"><b>v${a.version_no} → v${b.version_no}</b><span class="quiet">추가 ${added}줄 · 삭제 ${removed}줄</span>
