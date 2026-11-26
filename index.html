@@ -360,6 +360,7 @@
   .tasklist .tli.tdone { flex-wrap: wrap; align-items: center; }
   .tasklist .tres { flex-basis: 100%; font-size: 12.5px; margin: 2px 0 0; white-space: pre-wrap; } .tasklist .tres.bad { color: var(--bad); }
   .tasklist .tlog { flex-basis: 100%; font-size: 12px; } .tasklist .tlog > div { padding: 1px 0; } .tasklist .tlog summary { color: var(--quiet); cursor: pointer; }
+  .nextbox .nextalt { flex-basis: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
   .flowbox { margin-top: 10px; padding: 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--panel); }
   .flowbox .fi { border-top: 1px solid var(--line); padding: 8px 0; display: grid; grid-template-columns: 22px 1fr; gap: 6px; }
   .flowbox .fi.sent { opacity: .55; }
@@ -10523,7 +10524,7 @@ async function renderProduction(ep, quietRefresh = false) {
     prep: p => { const n = toReview.filter(c => ['none', 'failed', 'fix'].includes(c.prep_status)).length;
       return n ? btn('pPrep', `장면 사진 준비 (${n}컷)`, !busyKinds.has('prep_cut'), p) : ''; },
     dir: p => btn('pDir', `컷 ${cuts.length ? '다시 설계' : '설계'}`, !!confirmed, p),
-    ap: p => designedCost ? btn('pApproveAll', `승인 대기 컷 전체 생성 · 예상 ${usdKrw(designedCost, rate)}`, true, p) : '',
+    ap: p => designedCost ? btn('pApproveAll', `전체 영상 생성 · 예상 ${usdKrw(designedCost, rate)}`, true, p) : '',
     ed: p => passed ? btn('pEdit', `편집실 열기 (통과 ${passed}컷)`, true, p) : '',
   };
   // 다음 할 일: 지금 단계에서 대표가 눌러야 할 것 하나만 크게
@@ -10538,15 +10539,17 @@ async function renderProduction(ep, quietRefresh = false) {
     : designedCost && srAp?.st === 'done' ? { t: '대본 감수 반영 완료 → 컷 생성', d: `감수한 내용을 반영해 컷 ${toReview.length}개를 다시 설계했습니다. 됐다고 보시면 바로 생성하세요. 한 번 더 확인하려면 옆의 '대본 감수'(Claude 비용, 수백 원)`, k: 'ap' }
     : designedCost && !srFresh ? { t: '대본 감수', d: `작가실이 정리해 온 대본과 컷 ${toReview.length}개가 씬 순서대로 빠짐없는지 확인합니다(Claude 비용, 수백 원). 이상 없으면 전체 생성으로`, k: 'scr' }
     : srAp?.st === 'run' ? { t: '대본 감수 반영 중', d: srAp.msg + ' — 끝나면 아래 씬 순서가 새로 채워집니다' }
-    : designedCost && srRes?.verdict === 'fix' && !srAp ? { t: '대본 감수에서 확인할 것 ' + srRes.issues.length + '건', d: '아래 표를 확인하세요. 괜찮으면 그대로 승인 대기 컷 전체 생성을 누르면 됩니다', k: 'ap' }
+    : designedCost && srRes?.verdict === 'fix' && !srAp ? { t: '대본 감수에서 확인할 것 ' + srRes.issues.length + '건', d: '아래 표를 확인하세요. 괜찮으면 그대로 전체 영상 생성을 누르면 됩니다', k: 'ap' }
     : designedCost ? { t: '영상 생성 승인', d: `승인 대기 컷 ${cuts.filter(c => ['designed', 'failed', 'hold'].includes(c.status)).length}개 · 씬마다 따로 승인할 수도 있습니다`, k: 'ap' }
     : inProg ? { t: '영상 만드는 중', d: `${inProg}컷 생성·감수 중 · 통과 ${passed}/${cuts.length}` }
     : passed ? { t: '편집실에서 이어 붙이기', d: `통과 ${passed}/${cuts.length}컷`, k: 'ed' }
     : { t: '컷 상태 확인', d: '아래 씬에서 불합격·보류 컷을 확인하세요' };
   // 자주 쓰는 것만 보이게: 작가실 정리 · 대본 감수 · 전체 생성 · 편집실 / 생성 후 감수. 컷 다시 설계·장면 사진 준비는 컷 설계·대본 감수 반영 때 자동이라 ⋯ 안으로
   // 제작 탭 = 대본 흐름 확인. 영상·음성·감정 감수와 영상 보기는 편집실(흐름 감수)에서
+  // 대본 감수 단계라도 바로 만들 수 있게: 같은 '다음 할 일' 상자 안에 파란 '전체 영상 생성'을 함께(감수는 건너뛰어도 됨)
+  const apInNext = !!designedCost && next.k !== 'ap' && (next.k === 'scr' || srBusy || srAp?.st === 'done' || srAp?.st === 'run');
   const more = ['dir'].filter(k => k !== next.k).map(k => B[k](false)).filter(Boolean);
-  const others = ['wr', 'scr', 'ap', 'ed'].filter(k => k !== next.k).map(k => B[k](false)).join('')
+  const others = ['wr', 'scr', 'ap', 'ed'].filter(k => k !== next.k && !(apInNext && k === 'ap')).map(k => B[k](false)).join('')
     + (more.length ? `<details class="cmore pmore"><summary title="자주 쓰지 않는 것">⋯</summary><div>${more.join('')}</div></details>` : '');
 
   pane.innerHTML = `
@@ -10562,7 +10565,8 @@ async function renderProduction(ep, quietRefresh = false) {
     <div class="pbar">${PROD_STEPS.map((_, i) => `<i class="${i < step ? 'done' : i === step ? 'now' : ''}"></i>`).join('')}</div>
     <div class="pbar-l">${PROD_STEPS.map(([t], i) => `<span class="${i === step ? 'now' : ''}">${t}</span>`).join('')}</div>
     <div class="nextbox"><div><div class="t">다음 할 일: ${esc(next.t)}</div><div class="d">${esc(next.d)}</div></div>
-      ${next.k ? B[next.k](true) : next.go ? `<button class="btn primary" id="pNextGo">대본 탭으로</button>` : '<span class="spin"></span>'}</div>
+      ${next.k ? B[next.k](true) : next.go ? `<button class="btn primary" id="pNextGo">대본 탭으로</button>` : '<span class="spin"></span>'}
+      ${apInNext ? `<div class="nextalt"><span class="d">제작 탭에서 하나씩 고쳐 두었다면 감수 없이 바로 만들어도 됩니다</span>${B.ap(true)}</div>` : ''}</div>
     <div class="row" style="margin-top:10px;gap:6px">${others}
       <span class="quiet" style="margin-left:auto;font-size:12.5px">${G.generation?.video_model === 'kling-4.0' ? 'Kling 4.0' : 'Seedance 2.5'} · 대사 ${G.generation?.dialogue_tool === 'elevenlabs' ? 'ElevenLabs' : 'Higgsfield'} · ${esc(G.generation?.resolution || '480p')} · ${esc(G.generation?.aspect_ratio || '9:16')}
         · 보관 ${hasWin ? '집 PC(OneDrive)' : '<b>집 PC 에이전트 미설치</b>'} · <a href="#settings" id="pSet">바꾸기</a></span></div>
