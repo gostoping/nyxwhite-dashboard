@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.41.0"
+VERSION = "1.41.1"
 
 import base64
 import glob
@@ -2816,6 +2816,9 @@ def img_block(path, label):
     return b
 
 
+PREP_KO = {"ready": "준비됨", "fix": "확인 필요", "failed": "실패"}
+
+
 @task("prep_cut")
 def t_prep_cut(t):
     """컷 설계 ②③: 승인 전 컷마다 대사 미리 듣기 + 장면 사진(첫·끝) + 영상감수자·감정감수자 사전 감수."""
@@ -2926,7 +2929,8 @@ def t_prep_cut(t):
                                 log(f"'{n}' 참고 사진 저장 실패: {ex}")
             except Exception as ex:
                 fr.update({"prompt": fprompt, "status": "failed", "error": str(ex)[:300]})
-                problems.append(f"{'첫' if key == 'frame_first' else '끝'} 장면 사진 실패")
+                problems.append(f"{'첫' if key == 'frame_first' else '끝'} 장면 사진 실패: {str(ex)[:160]}")
+                progress(f"⚠ {code} {'첫' if key == 'frame_first' else '끝'} 장면 사진 실패 — {str(ex)[:200]}")
             c[key] = fr
         # 사전 감수: 영상감수자(사진 ↔ 바이블) + 감정감수자(목소리 ↔ 감정선)
         review = {}
@@ -2998,7 +3002,9 @@ def t_prep_cut(t):
             except Exception as ex:
                 rpc("agent_update_cut", p_token=TOKEN, p_id=c["id"], p={"status": "designed"})
                 log(f"{code} 자동 재시도 못 함(대표 승인 필요): {ex}")
-        return f"{code}:{'다시 준비' if fixed else status}"
+        why = "; ".join(problems)[:200] if problems else ("감수 지적: " + str(review.get("summary") or "")[:120] if status == "fix" else "")
+        progress(f"{code} 준비 끝 — {'다시 준비' if fixed else PREP_KO.get(status, status)}" + (f" ({why})" if why else "") + (" · 앞 컷에서 이어 시작이라 사진 없음" if chained else ""))
+        return f"{code}:{'다시 준비' if fixed else status}" + (f" ({why})" if why else "")
 
     def safe_one(c):
         try:
@@ -3011,17 +3017,19 @@ def t_prep_cut(t):
                 pass
             if is_transient(str(ex)) and len(cuts) == 1:
                 raise   # 컷 하나짜리 일은 일시적 문제면 대기열이 알아서 다시
-            return f"{c.get('code')}:failed"
+            progress(f"⚠ {c.get('code')} 준비 실패 — {str(ex)[:200]}")
+            return f"{c.get('code')}:failed ({str(ex)[:160]})"
 
     # 컷마다 대사·사진·감수를 3개씩 동시에(예전엔 씬 전체를 한 컷씩 차례로 해서 45분을 넘기기도 함)
     done = parallel([(lambda c=c: safe_one(c)) for c in cuts], workers=3)
     err = next((d for d in done if isinstance(d, Exception)), None)
     if err:
         raise err
-    ready = sum(1 for d in done if d.endswith(":ready"))
+    ready = sum(1 for d in done if d.split(" (")[0].endswith(":ready"))
     if not t.get("cut_id") or p.get("second_pass"):
         notify(f"{enum}화 컷 준비 {ready}/{len(done)}", "제작 탭에서 장면 사진을 보고 대사를 들어 본 뒤 생성 승인을 눌러 주세요")
-    return "컷 준비: " + ", ".join(done)
+    bad = [d for d in done if not d.split(" (")[0].endswith(":ready")]
+    return f"컷 준비 {len(done)}개: 준비됨 {ready}" + (f" · 확인 필요 {len(bad)} — " + " / ".join(bad) if bad else "")
 
 
 def inflight_take(cut, max_hours=3):
