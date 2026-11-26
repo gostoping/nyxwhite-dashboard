@@ -499,7 +499,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.40.0"
+VERSION = "1.40.1"
 
 import base64
 import glob
@@ -1400,8 +1400,8 @@ def writers_bible_sync(t, p):
     names = [x for x in (p.get("names") or []) if x]
     bible = ctx.get("bible") or []
     focus = [b for b in bible if not names or b.get("name") in names]
-    if not focus:
-        raise RuntimeError("반영할 바이블 항목을 찾지 못했습니다(이 화 맥락에 없는 이름)")
+    if not focus:   # 고른 항목이 이 화에는 나오지 않음(예: 8화부터 나오는 '예뻐진 린'을 1화에) → 바꿀 것 없음
+        return f"{epno}화: 고른 항목({', '.join(names)})은 이 화에 나오지 않아 바꿀 곳이 없습니다(바이블 '나오는 화' 기준)"
     model = setting(ctx, "generation", "claude_writer", "claude-opus-5-5")
     content = normalize_scene_heads(src["content"])
     scenes = split_scenes(content)
@@ -7922,19 +7922,28 @@ document.addEventListener('click', ev => {
   run().catch(e => { b.disabled = false; toast('오류: ' + errText(e)); });
 });
 // 화 번호 입력: "5-12", "5~", "3,4,7" → [5..12] / [5..마지막 화] / [3,4,7]
+// 나오는 화: "5-12", "5~", "3,4,7", "8화부터", "8화 이후", "8화~", "8-12화". '부터·~'처럼 끝이 없으면 앞으로 생길 화까지(최대 200화)
+const EPS_OPEN = 200;
 function parseEps(s) {
-  const out = new Set(), max = Math.max(S.bibleMaxEp || 0, 1);
-  String(s || '').split(/[,\s]+/).filter(Boolean).forEach(p => {
-    const m = p.match(/^(\d+)\s*[-~]\s*(\d+)?$/);
-    if (m) { const a = +m[1], b = m[2] ? +m[2] : Math.max(max, a); for (let i = a; i <= Math.min(b, a + 300); i++) out.add(i); }
+  const out = new Set();
+  const t = String(s || '').replace(/화/g, '').replace(/\s*(부터|이후|이후로|부터는|~부터)\s*/g, '~ ').replace(/\s*(까지)\s*/g, ' ');
+  t.split(/[,\s]+/).filter(Boolean).forEach(p => {
+    const m = p.match(/^(\d+)\s*[-~]\s*(\d+)?~?$/);
+    if (m) { const a = +m[1], b = m[2] ? +m[2] : EPS_OPEN; for (let i = a; i <= Math.min(b, EPS_OPEN); i++) out.add(i); }
     else if (/^\d+$/.test(p)) out.add(+p);
   });
   return [...out].sort((a, b) => a - b);
 }
+// 글(달라진 점·묘사)에서 "8화부터 / 8화 이후 / 8화~"를 찾는다(나오는 화를 비워 둔 경우)
+function epsFromText(s) {
+  const m = String(s || '').match(/(\d{1,3})\s*화\s*(부터|이후|~)/);
+  return m ? parseEps(m[1] + '~') : [];
+}
 function fmtEps(arr) {
   if (!arr?.length) return '';
   const a = [...arr].sort((x, y) => x - y), parts = [];
-  for (let i = 0; i < a.length; i++) { let j = i; while (j + 1 < a.length && a[j + 1] === a[j] + 1) j++; parts.push(j > i ? `${a[i]}-${a[j]}` : `${a[i]}`); i = j; }
+  for (let i = 0; i < a.length; i++) { let j = i; while (j + 1 < a.length && a[j + 1] === a[j] + 1) j++;
+    parts.push(j > i ? (a[j] >= EPS_OPEN ? `${a[i]}~` : `${a[i]}-${a[j]}`) : `${a[i]}`); i = j; }
   return parts.join(', ');
 }
 // 카드 한 줄: 동일인 · 나오는 화 · 달라진 점
@@ -8879,7 +8888,7 @@ function openBibleEditor({ entry, base, urls, fromId }) {
       <div class="row" style="gap:8px"><div style="flex:1;min-width:150px"><label>동일인 (누구의 다른 모습인가요?)</label>
         <select id="bsame"><option value="">없음 (다른 사람)</option>${(S.bibleEntries || []).filter(x => x.category === 'character' && x.id !== entry?.id)
           .map(x => `<option value="${esc(x.id)}" ${entry?.same_as === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
-        <div style="flex:1;min-width:150px"><label>나오는 화 <span class="quiet">(예: 5-12, 5~, 3,4,7 · 비우면 모든 화)</span></label>
+        <div style="flex:1;min-width:150px"><label>나오는 화 <span class="quiet">(예: 8~ 또는 8화부터, 5-12, 3,4,7 · 비우면 모든 화)</span></label>
         <input id="bapply" value="${esc(fmtEps(entry?.apply_eps))}" placeholder="예: 5~"></div></div>
       <label>무엇이 달라졌나요? <span class="quiet">— 작가실·감독·코디네이터에게 그대로 전달됩니다</span></label>
       <textarea id="bchg" style="min-height:70px" placeholder="예: 성형 수술 후 더 예뻐진 모습. 쌍꺼풀이 또렷해지고 턱선이 갸름해짐, 머리는 밝은 갈색 웨이브. 목소리·말투·성격은 그대로">${esc(entry?.change_note || '')}</textarea>
@@ -8925,7 +8934,11 @@ function openBibleEditor({ entry, base, urls, fromId }) {
         await q(S.sb.from('bible_entries').update({ summary }).eq('id', entryId));
       }
       if ((entry?.category || $('#bcat')?.value) === 'character' && $('#bvarBox')) {
-        const eps = parseEps($('#bapply').value);
+        let eps = parseEps($('#bapply').value);
+        if (!eps.length && sameId) {   // 나오는 화를 비우고 글에 "8화부터"라고만 쓴 경우 → 그 화부터로
+          eps = epsFromText(chg) .length ? epsFromText(chg) : epsFromText($('#bdesc')?.value) .length ? epsFromText($('#bdesc')?.value) : epsFromText($('#bsum')?.value);
+          if (eps.length) toast(`글에 적힌 대로 ${fmtEps(eps)}화부터 이 모습으로 나오게 저장합니다`);
+        }
         await q(S.sb.from('bible_entries').update({ same_as: sameId, apply_eps: eps.length ? eps : null, change_note: chg || null }).eq('id', entryId))
           .catch(e => toast('동일인·나오는 화 저장 실패(DB 업데이트 전일 수 있음): ' + errText(e)));
       }

@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.40.0"
+VERSION = "1.40.1"
 
 import base64
 import glob
@@ -911,8 +911,8 @@ def writers_bible_sync(t, p):
     names = [x for x in (p.get("names") or []) if x]
     bible = ctx.get("bible") or []
     focus = [b for b in bible if not names or b.get("name") in names]
-    if not focus:
-        raise RuntimeError("반영할 바이블 항목을 찾지 못했습니다(이 화 맥락에 없는 이름)")
+    if not focus:   # 고른 항목이 이 화에는 나오지 않음(예: 8화부터 나오는 '예뻐진 린'을 1화에) → 바꿀 것 없음
+        return f"{epno}화: 고른 항목({', '.join(names)})은 이 화에 나오지 않아 바꿀 곳이 없습니다(바이블 '나오는 화' 기준)"
     model = setting(ctx, "generation", "claude_writer", "claude-opus-5-5")
     content = normalize_scene_heads(src["content"])
     scenes = split_scenes(content)
