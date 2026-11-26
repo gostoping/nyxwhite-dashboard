@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.40.3"
+VERSION = "1.41.0"
 
 import base64
 import glob
@@ -1246,7 +1246,7 @@ def prompt_ko_task(t, cut, ctx):
     if not new_ko:
         raise RuntimeError("반영할 한글 프롬프트가 비어 있습니다")
     progress(f"감독이 {cut.get('code')} 대표가 고친 한글 프롬프트를 영어 프롬프트에 반영하는 중")
-    dmodel = setting(ctx, "generation", "claude_director", "claude-opus-5-5")
+    dmodel = setting(ctx, "generation", "claude_detailer", "claude-sonnet-5-5")
     system = (guide(ctx, "감독") or "너는 실사 AI 드라마 감독이다.") + """
 
 [이번 일] 대표가 한국어판 프롬프트를 직접 고쳤다. 고친 한국어판이 기준이다(대표 지시 — 최우선).
@@ -1713,7 +1713,7 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
             if (inum(c["scene_no"]), inum(c["cut_no"])) in fixed else c for c in cuts]   # 고친 컷도 번호·코드는 그대로
     # 기본: 화 처음부터 끝까지 컷 연결·손발·몸·카메라 무빙 디테일 다듬기(감수 설정과 상관없이 항상)
     try:
-        nfix = continuity_pass(ctx, ep, epno, cuts, all_sc, dmodel)
+        nfix = continuity_pass(ctx, ep, epno, cuts, all_sc, setting(ctx, "generation", "claude_detailer", "claude-sonnet-5-5"))
         log(f"연결·디테일 다듬기: 컷 {nfix}개 보강")
     except Exception as ex:
         log(f"연결·디테일 다듬기 실패(설계는 저장): {ex}")
@@ -1808,7 +1808,7 @@ def director_revise(t, cut_id):
     if pmode in ("ko", "from_ko"):
         return prompt_ko_task(t, cut, ctx)
     last = (cut.get("takes") or [{}])[-1] if cut.get("takes") else {}
-    dmodel = setting(ctx, "generation", "claude_director", "claude-opus-5-5")
+    dmodel = setting(ctx, "generation", "claude_detailer", "claude-sonnet-5-5")   # 컷 하나 고치기는 다듬기 모델
     progress(f"감독이 {cut.get('code')} 프롬프트를 고치는 중")
     rng = ((t.get("payload") or {}).get("script_range") or "").strip()   # 대표가 제작 탭에서 대본 범위를 늘리거나 줄임
     head = ("아래 컷 하나를 고쳐서 같은 형식(cuts 배열에 1개)으로 주세요. 이 컷이 맡을 대본 범위를 대표가 새로 정했습니다:\n"

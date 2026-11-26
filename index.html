@@ -502,7 +502,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.40.3"
+VERSION = "1.41.0"
 
 import base64
 import glob
@@ -1738,7 +1738,7 @@ def prompt_ko_task(t, cut, ctx):
     if not new_ko:
         raise RuntimeError("반영할 한글 프롬프트가 비어 있습니다")
     progress(f"감독이 {cut.get('code')} 대표가 고친 한글 프롬프트를 영어 프롬프트에 반영하는 중")
-    dmodel = setting(ctx, "generation", "claude_director", "claude-opus-5-5")
+    dmodel = setting(ctx, "generation", "claude_detailer", "claude-sonnet-5-5")
     system = (guide(ctx, "감독") or "너는 실사 AI 드라마 감독이다.") + """
 
 [이번 일] 대표가 한국어판 프롬프트를 직접 고쳤다. 고친 한국어판이 기준이다(대표 지시 — 최우선).
@@ -2205,7 +2205,7 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
             if (inum(c["scene_no"]), inum(c["cut_no"])) in fixed else c for c in cuts]   # 고친 컷도 번호·코드는 그대로
     # 기본: 화 처음부터 끝까지 컷 연결·손발·몸·카메라 무빙 디테일 다듬기(감수 설정과 상관없이 항상)
     try:
-        nfix = continuity_pass(ctx, ep, epno, cuts, all_sc, dmodel)
+        nfix = continuity_pass(ctx, ep, epno, cuts, all_sc, setting(ctx, "generation", "claude_detailer", "claude-sonnet-5-5"))
         log(f"연결·디테일 다듬기: 컷 {nfix}개 보강")
     except Exception as ex:
         log(f"연결·디테일 다듬기 실패(설계는 저장): {ex}")
@@ -2300,7 +2300,7 @@ def director_revise(t, cut_id):
     if pmode in ("ko", "from_ko"):
         return prompt_ko_task(t, cut, ctx)
     last = (cut.get("takes") or [{}])[-1] if cut.get("takes") else {}
-    dmodel = setting(ctx, "generation", "claude_director", "claude-opus-5-5")
+    dmodel = setting(ctx, "generation", "claude_detailer", "claude-sonnet-5-5")   # 컷 하나 고치기는 다듬기 모델
     progress(f"감독이 {cut.get('code')} 프롬프트를 고치는 중")
     rng = ((t.get("payload") or {}).get("script_range") or "").strip()   # 대표가 제작 탭에서 대본 범위를 늘리거나 줄임
     head = ("아래 컷 하나를 고쳐서 같은 형식(cuts 배열에 1개)으로 주세요. 이 컷이 맡을 대본 범위를 대표가 새로 정했습니다:\n"
@@ -11628,6 +11628,7 @@ async function renderProdSettings() {
         <td>${toolSel('gMus', 'music', G.music_tool || 'elevenlabs')} ${toolSel('gMm', 'mmodel', G.music_model || 'music_v1')}</td></tr>
       <tr><td>작가실(대본·바이블)</td><td><b>${esc(nm('claude', G.claude_writer || 'claude-opus-5-5'))}</b></td><td>${toolSel('gCw', 'claude', G.claude_writer || 'claude-opus-5-5')}</td></tr>
       <tr><td>감독(컷 설계)</td><td><b>${esc(nm('claude', G.claude_director || 'claude-opus-5-5'))}</b></td><td>${toolSel('gCd', 'claude', G.claude_director || 'claude-opus-5-5')}</td></tr>
+      <tr><td>감독 다듬기<br><span class="quiet" style="font-size:12px">연결·디테일 다듬기, 컷 하나 고치기, 한글 프롬프트 반영</span></td><td><b>${esc(nm('claude', G.claude_detailer || 'claude-sonnet-5-5'))}</b></td><td>${toolSel('gCdt', 'claude', G.claude_detailer || 'claude-sonnet-5-5')}</td></tr>
       <tr><td>감수자(영상·감정)</td><td><b>${esc(nm('claude', G.claude_reviewer || 'claude-sonnet-5-5'))}</b></td><td>${toolSel('gCr', 'claude', G.claude_reviewer || 'claude-sonnet-5-5')}</td></tr>
     </table>
     <div id="gToolWarn"></div>
@@ -11647,7 +11648,7 @@ async function renderProdSettings() {
   $('#gSave').onclick = guard(async () => {
     await q(S.sb.from('app_settings').upsert([
       { key: 'generation', value: { ...G, char_photo_model: $('#gChar')?.value || G.char_photo_model || 'seedream', resolution: $('#gRes').value, aspect_ratio: $('#gAsp').value, auto_prep: $('#gPrep').checked, image_model: $('#gImgSel').value === 'custom' ? $('#gImg').value.trim() : $('#gImgSel').value, music_model: $('#gMm').value,
-        claude_writer: $('#gCw').value, claude_director: $('#gCd').value, claude_reviewer: $('#gCr').value, max_auto_retries: Number($('#gRetry').value), auto_review: $('#gAutoRv').value === 'auto', dialogue_tool: $('#gDlg').value, music_tool: $('#gMus').value, video_model: $('#gVid').value,
+        claude_writer: $('#gCw').value, claude_director: $('#gCd').value, claude_detailer: $('#gCdt')?.value || G.claude_detailer || 'claude-sonnet-5-5', claude_reviewer: $('#gCr').value, max_auto_retries: Number($('#gRetry').value), auto_review: $('#gAutoRv').value === 'auto', dialogue_tool: $('#gDlg').value, music_tool: $('#gMus').value, video_model: $('#gVid').value,
         resolution: $('#gVid').value === 'kling-4.0' && $('#gRes').value === '480p' ? '720p' : $('#gRes').value }, updated_at: new Date().toISOString() },
       { key: 'storage', value: { ...ST, windows_folder: $('#gWin').value.trim(), mac_folder: $('#gMac').value.trim(), server: 'windows' }, updated_at: new Date().toISOString() }]));
     toast('제작 설정을 저장했습니다 (새로 설계하는 컷부터 적용)');
