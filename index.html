@@ -10838,13 +10838,13 @@ function bindFlowView(pane) {
   sp.querySelectorAll('[data-addscene]').forEach(b => b.onclick = guard(async ev => { ev.stopPropagation();
     if (!confirm(`감독이 S#${b.dataset.addscene}을(를) 컷으로 설계합니다(Claude 비용, 수백 원).`)) return;
     await q(S.sb.from('pipeline_tasks').insert({ kind: 'director', episode_id: S.flowEp.id, scene_no: +b.dataset.addscene, payload: { scenes: [+b.dataset.addscene], prepped: true } }));
-    toast(`감독이 S#${b.dataset.addscene} 컷을 설계합니다`); }));
+    toast(`감독이 S#${b.dataset.addscene} 컷을 설계합니다`); prodKick(); }));
   pane.querySelectorAll('[data-pshow]').forEach(b => b.onclick = ev => { ev.stopPropagation(); flowPromptPopup(b.dataset.pshow); });
   pane.querySelectorAll('[data-sshow]').forEach(b => b.onclick = ev => { ev.stopPropagation(); scenePopup(+b.dataset.sshow); });
   pane.querySelectorAll('[data-reprep]').forEach(b => b.onclick = guard(async ev => { ev.stopPropagation();
     const c = flowCutById(b.dataset.reprep); if (!c) return;
     await q(S.sb.from('pipeline_tasks').insert({ kind: 'prep_cut', episode_id: S.flowEp.id, scene_no: c.scene_no, cut_id: c.id, payload: { force: true } }));
-    b.disabled = true; toast(`S#${c.scene_no} C${c.cut_no} 장면 사진을 다시 만듭니다. 결과는 '최근 끝난 일'에 이유와 함께 나옵니다`); }));
+    b.disabled = true; toast(`S#${c.scene_no} C${c.cut_no} 장면 사진을 다시 만듭니다. 진행은 '지금 하는 일', 결과는 '최근 끝난 일'에 나옵니다`); prodKick(); }));
   const ka = pane.querySelector('#pKoAll'); if (ka) ka.onclick = guard(async () => {
     const need = Object.values(S.flowScenes || {}).flat().filter(c => !c.prompt_ko && c.prompt);
     if (!confirm(`한글 프롬프트가 없는 ${need.length}컷의 한글판을 만듭니다(컷마다 Claude 비용 수십 원).`)) return;
@@ -10852,7 +10852,7 @@ function bindFlowView(pane) {
     const has = new Set((open || []).filter(t => t.payload?.mode === 'ko').map(t => t.cut_id));
     const rows = need.filter(c => !has.has(c.id)).map(c => ({ kind: 'director', episode_id: S.flowEp.id, scene_no: c.scene_no, cut_id: c.id, payload: { cut_id: c.id, mode: 'ko' } }));
     if (rows.length) await q(S.sb.from('pipeline_tasks').insert(rows));
-    toast(`한글 프롬프트 ${rows.length}컷을 만드는 중입니다(몇 분)`);
+    toast(`한글 프롬프트 ${rows.length}컷을 만드는 중입니다(몇 분)`); prodKick();
   });
   sp.querySelectorAll('[data-li]').forEach(l => l.onclick = () => {
     const r = (S.flowRows || [])[+l.dataset.li];
@@ -10956,6 +10956,8 @@ function flowRangeBox(pane, sp, c, orig, a, b) {
   }));
 }
 const ctx0rate = () => S.prodRate || 1340;
+// 제작 탭에서 일을 맡긴 직후: 바로 다시 그려 '지금 하는 일'에 보이게 하고, 끝날 때까지 8초마다 새로 고침
+function prodKick() { S.prodBusy = true; if (S.flowEp && S.tab === 'production') setTimeout(() => renderProduction(S.flowEp, true).catch(() => {}), 300); }
 // 컷에 없는 대사: 앞·뒤 컷에 붙이거나 씬을 다시 설계
 async function flowAddMissing(li) {
   const rows = S.flowRows || [], r = rows[li]; if (!r) return;
@@ -10971,7 +10973,7 @@ async function flowAddMissing(li) {
   if (how === 'scene') {
     await q(S.sb.from('episode_notes').insert({ episode_id: ep.id, scene_no: r.sc, priority: 'must', important: true, content: `[대표 지시 · 제작 탭] S#${r.sc}: 컷에 빠진 대사를 꼭 넣는다 — ${r.text}` }));
     await q(S.sb.from('pipeline_tasks').insert({ kind: 'director', episode_id: ep.id, scene_no: r.sc, payload: { scenes: [r.sc], prepped: true } }));
-    return toast(`감독이 S#${r.sc}을(를) 빠진 대사까지 넣어 다시 설계합니다`);
+    prodKick(); return toast(`감독이 S#${r.sc}을(를) 빠진 대사까지 넣어 다시 설계합니다`);
   }
   const c = how === 'prev' ? prev : next;
   const cur = (M[c.id] || []).slice();
@@ -10980,7 +10982,7 @@ async function flowAddMissing(li) {
   await q(S.sb.from('production_cuts').update({ fix_request: `[대표 지시 — 최우선] 컷에 빠진 대사 "${r.text}"를 이 컷에 넣음`, status: 'designed' }).eq('id', c.id));
   await q(S.sb.from('pipeline_tasks').insert({ kind: 'director', episode_id: ep.id, scene_no: c.scene_no, cut_id: c.id, payload: { cut_id: c.id, script_range: lines.join('\n') } }));
   await ownerFixRecord(ep.id, c, `빠진 대사를 C${c.cut_no}에 넣음: ${r.text}`, '제작실');
-  toast(`감독이 C${c.cut_no}에 빠진 대사를 넣어 다시 설계합니다(생성은 승인 후)`);
+  toast(`감독이 C${c.cut_no}에 빠진 대사를 넣어 다시 설계합니다(생성은 승인 후)`); prodKick();
 }
 // 프롬프트 팝업: 항목별로 나눠 보고, 앞뒤 컷과 레퍼런스가 이어지는지 함께 본다
 function promptSections(p) {
@@ -11153,7 +11155,7 @@ function bindPromptPopup(inner, c, close, setBusy) {
     await q(S.sb.from('production_cuts').update({ status: 'approved' }).eq('id', c.id));
     await q(S.sb.from('pipeline_tasks').insert({ kind: 'generate', episode_id: ep.id, scene_no: c.scene_no, cut_id: c.id, payload: {} }));
     c.status = 'approved'; setBusy(undefined);
-    toast('영상을 만들기 시작했습니다. 끝나면 이 컷에 새 영상이 나옵니다');
+    toast('영상을 만들기 시작했습니다. 끝나면 이 컷에 새 영상이 나옵니다'); S.prodBusy = true;
   });
   const fx = inner.querySelector('#pFailX'); if (fx) fx.onclick = () => { c._fail = ''; setBusy(undefined); };
   const ap = inner.querySelector('#pKoApply'); if (ap) ap.onclick = guard(async () => {
@@ -11171,7 +11173,7 @@ function bindPromptPopup(inner, c, close, setBusy) {
     await ownerFixRecord(ep.id, c, [note, changed.length ? '한글 프롬프트 직접 수정: ' + changed.join(' / ') : ''].filter(Boolean).join(' / '), '제작실');
     c.fix_request = fr; c._fail = '';
     const nt = inner.querySelector('#pNote'); if (nt) nt.value = '';
-    setBusy('감독이 대표 지시를 한글·영어 프롬프트에 반영하는 중…');
+    setBusy('감독이 대표 지시를 한글·영어 프롬프트에 반영하는 중…'); S.prodBusy = true;
   });
 }
 const takesOf = id => (S.flowTakes || []).filter(t => t.cut_id === id);
@@ -11251,7 +11253,7 @@ function scenePopup(no) {
   box.querySelectorAll('[data-sopen]').forEach(b => b.onclick = () => { close(); flowPromptPopup(b.dataset.sopen); });
   const sk = box.querySelector('#sKo'); if (sk) sk.onclick = guard(async () => {
     await q(S.sb.from('pipeline_tasks').insert(noKo.map(c => ({ kind: 'director', episode_id: S.flowEp.id, scene_no: c.scene_no, cut_id: c.id, payload: { cut_id: c.id, mode: 'ko' } }))));
-    toast(`한글 프롬프트 ${noKo.length}컷을 만드는 중입니다. 조금 뒤 다시 열어 보세요`); sk.disabled = true;
+    toast(`한글 프롬프트 ${noKo.length}컷을 만드는 중입니다. 조금 뒤 다시 열어 보세요`); sk.disabled = true; S.prodBusy = true;
   });
   box.querySelector('#sApply').onclick = guard(async () => {
     const note = box.querySelector('#sNote').value.trim(); if (!note) return toast('씬 전체에 줄 대표 지시를 써 주세요');
@@ -11263,7 +11265,7 @@ function scenePopup(no) {
       await q(S.sb.from('pipeline_tasks').insert({ kind: 'director', episode_id: ep.id, scene_no: c.scene_no, cut_id: c.id, payload: { cut_id: c.id } }));
     }
     try { await q(S.sb.from('episode_notes').insert({ episode_id: ep.id, scene_no: no, priority: 'must', important: true, content: `[대표 지시 · 제작실 · S#${no} 씬 전체] ${note}`.slice(0, 2000) })); } catch (e) {}
-    toast(`감독이 S#${no}의 ${pick.length}컷 프롬프트를 고치는 중입니다(글만). 끝나면 다시 열어 확인하세요`);
+    toast(`감독이 S#${no}의 ${pick.length}컷 프롬프트를 고치는 중입니다(글만). 끝나면 다시 열어 확인하세요`); S.prodBusy = true;
     box.querySelector('#sNote').value = '';
   });
 }
