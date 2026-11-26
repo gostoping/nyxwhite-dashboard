@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.40.1"
+VERSION = "1.40.2"
 
 import base64
 import glob
@@ -1840,6 +1840,20 @@ def director_revise(t, cut_id):
     if not new or not new.get("prompt"):
         raise RuntimeError(f"감독이 고친 프롬프트를 만들지 못했습니다 — {why} (두 번 시도)")
     new["prompt"] = tidy_prompt(new["prompt"])
+    if rng:   # 대표가 정한 범위의 대사가 모두 들어갔는지 확인 — 빠졌으면 한 번 더
+        want, got = dlg_texts(rng), dlg_texts(new.get("dialogue") or "")
+        lost = [w for w in want if not any(w in g or g in w for g in got)]
+        if lost:
+            log(f"{cut.get('code')} 범위 대사 {len(lost)}줄 빠짐 → 다시 요청")
+            text2, _ = claude(dmodel, director_system(ctx), user + "\n\n[중요] 지난 답에서 범위의 대사가 빠졌다. dialogue에 범위의 대사를 하나도 빠짐없이 원문 그대로 넣는다: "
+                              + " / ".join(lost), max_tokens=12000, stage="cut_card", episode_id=ep, scene_no=cut.get("scene_no"), cut_code=cut.get("code"), note="감독 컷 수정 (대사 누락 보완)")
+            d2 = safe_json(text2) or {}
+            n2 = (d2.get("cuts") or [None])[0] if isinstance(d2.get("cuts"), list) else None
+            if isinstance(n2, dict) and n2.get("prompt"):
+                got2 = dlg_texts(n2.get("dialogue") or "")
+                if len([w for w in want if not any(w in g or g in w for g in got2)]) < len(lost):
+                    new = n2
+                    new["prompt"] = tidy_prompt(new["prompt"])
     if not new.get("prompt_ko"):
         try:
             new["prompt_ko"] = ko_from_prompt(new["prompt"])

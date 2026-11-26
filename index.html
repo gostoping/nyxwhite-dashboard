@@ -357,6 +357,9 @@
   .fcut dd.none { color: var(--quiet); font-style: italic; }
   .fcut .fw { font-size: 12px; color: #b4231f; margin-top: 4px; }
   .fcut .cacts { margin-top: 6px; }
+  .tasklist .tli.tdone { flex-wrap: wrap; align-items: center; }
+  .tasklist .tres { flex-basis: 100%; font-size: 12.5px; margin: 2px 0 0; white-space: pre-wrap; } .tasklist .tres.bad { color: var(--bad); }
+  .tasklist .tlog { flex-basis: 100%; font-size: 12px; } .tasklist .tlog > div { padding: 1px 0; } .tasklist .tlog summary { color: var(--quiet); cursor: pointer; }
   .flowbox { margin-top: 10px; padding: 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--panel); }
   .flowbox .fi { border-top: 1px solid var(--line); padding: 8px 0; display: grid; grid-template-columns: 22px 1fr; gap: 6px; }
   .flowbox .fi.sent { opacity: .55; }
@@ -499,7 +502,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.40.1"
+VERSION = "1.40.2"
 
 import base64
 import glob
@@ -2329,6 +2332,20 @@ def director_revise(t, cut_id):
     if not new or not new.get("prompt"):
         raise RuntimeError(f"감독이 고친 프롬프트를 만들지 못했습니다 — {why} (두 번 시도)")
     new["prompt"] = tidy_prompt(new["prompt"])
+    if rng:   # 대표가 정한 범위의 대사가 모두 들어갔는지 확인 — 빠졌으면 한 번 더
+        want, got = dlg_texts(rng), dlg_texts(new.get("dialogue") or "")
+        lost = [w for w in want if not any(w in g or g in w for g in got)]
+        if lost:
+            log(f"{cut.get('code')} 범위 대사 {len(lost)}줄 빠짐 → 다시 요청")
+            text2, _ = claude(dmodel, director_system(ctx), user + "\n\n[중요] 지난 답에서 범위의 대사가 빠졌다. dialogue에 범위의 대사를 하나도 빠짐없이 원문 그대로 넣는다: "
+                              + " / ".join(lost), max_tokens=12000, stage="cut_card", episode_id=ep, scene_no=cut.get("scene_no"), cut_code=cut.get("code"), note="감독 컷 수정 (대사 누락 보완)")
+            d2 = safe_json(text2) or {}
+            n2 = (d2.get("cuts") or [None])[0] if isinstance(d2.get("cuts"), list) else None
+            if isinstance(n2, dict) and n2.get("prompt"):
+                got2 = dlg_texts(n2.get("dialogue") or "")
+                if len([w for w in want if not any(w in g or g in w for g in got2)]) < len(lost):
+                    new = n2
+                    new["prompt"] = tidy_prompt(new["prompt"])
     if not new.get("prompt_ko"):
         try:
             new["prompt_ko"] = ko_from_prompt(new["prompt"])
@@ -10407,7 +10424,8 @@ async function renderProduction(ep, quietRefresh = false) {
   const [versions, cuts, tasks, pkgs, props, agents, costSet, gen] = await Promise.all([
     q(S.sb.from('script_versions').select('id,status,version_no,created_at,note').eq('episode_id', ep.id).order('created_at', { ascending: false })),
     q(S.sb.from('production_cuts').select('*').eq('episode_id', ep.id).order('scene_no').order('cut_no')),
-    q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,result,error,scene_no,cut_id,take_id,payload,platform,series_id,episode_id,created_at,started_at,finished_at,devices(name)').eq('episode_id', ep.id).order('created_at', { ascending: false }).limit(40)),
+    q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,progress_log,result,error,scene_no,cut_id,take_id,payload,platform,series_id,episode_id,created_at,started_at,finished_at,devices(name)').eq('episode_id', ep.id).order('created_at', { ascending: false }).limit(40))
+      .catch(() => q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,result,error,scene_no,cut_id,take_id,payload,platform,series_id,episode_id,created_at,started_at,finished_at,devices(name)').eq('episode_id', ep.id).order('created_at', { ascending: false }).limit(40))),
     q(S.sb.from('scene_packages').select('*').eq('episode_id', ep.id)),
     q(S.sb.from('story_proposals').select('id').eq('episode_id', ep.id).eq('status', 'proposed')),
     agentRows(),
@@ -10430,7 +10448,7 @@ async function renderProduction(ep, quietRefresh = false) {
   const urls = await signTakeUrls(takes, cuts);
   const confirmed = versions.find(v => v.status === 'confirmed');
   const drafts = versions.filter(v => v.status === 'draft');
-  const openTasks = tasks.filter(t => ['queued', 'running'].includes(t.status));
+  const openTasks = tasks.filter(t => ['queued', 'running'].includes(t.status)); S.prodOpenTasks = openTasks;
   // 아직 해결 안 된 실패: 같은 일이 그 뒤에 다시 성공·진행 중이면 빼고, 같은 일은 마지막 것만
   const fseen = new Set();
   const failedNow = tasks.filter(t => t.status === 'failed' && !tasks.some(o => o.kind === t.kind && (o.cut_id || null) === (t.cut_id || null) && (o.scene_no || null) === (t.scene_no || null)
@@ -10551,12 +10569,20 @@ async function renderProduction(ep, quietRefresh = false) {
 
   ${failedNow.length ? `<div class="card" style="border-color:var(--bad)"><div class="row"><b>${ep.number}화 — 해결이 필요한 실패 ${failedNow.length}건</b></div>${failedNow.map(failCard).join('')}</div>` : ''}
   ${openTasks.length ? `<div class="card tasklist"><div class="row"><b>${ep.number}화에서 지금 하는 일 ${openTasks.length}개</b><span class="quiet">다른 화의 일은 위 '여러 화 한꺼번에' · 8초마다 새로 고침</span></div>
-    ${openTasks.map(t => `<div class="tli">${t.status === 'running' ? '<span class="spin"></span>' : '<span class="quiet">대기</span>'}
-      <b>${esc(TASK_LABEL[t.kind] || t.kind)}</b><span class="quiet">${esc(t.progress || (t.status === 'queued' ? '차례 기다리는 중' : '처리 중'))}</span>
-      <span class="quiet eta">${esc(t.devices?.name || '')} ⏱ ${esc(etaText(t.kind, t.started_at, t.status))}</span></div>`).join('')}</div>`
-    : tasks.length ? `<details class="card more tasklist"><summary>${ep.number}화 최근 끝난 일 ${Math.min(tasks.length, 5)}개</summary>
-    ${tasks.slice(0, 5).map(t => `<div class="tli">${pill(TASK_LABEL[t.kind] || t.kind, t.status === 'failed' ? 'bad' : t.status === 'done' ? 'good' : '')}
-      <span class="quiet">${esc(t.status === 'failed' ? (t.error || '실패') : t.status === 'done' ? (t.kind === 'balance_check' ? '잔액 조회 완료' : t.result || '완료') : t.status === 'cancelled' ? '취소됨' : '')}</span><span class="quiet eta">${fmt(t.finished_at || t.created_at)}</span></div>`).join('')}</details>` : ''}
+    ${openTasks.map(t => { const W = failWhere(t); return `<div class="tli">${t.status === 'running' ? '<span class="spin"></span>' : '<span class="quiet">대기</span>'}
+      <b>${esc(W.what)}</b><span>📍 ${esc(W.where)}</span><span class="quiet">${esc(t.progress || (t.status === 'queued' ? '차례 기다리는 중' : '처리 중'))}</span>
+      <span class="quiet eta">${esc(t.devices?.name || '')} ⏱ ${esc(etaText(t.kind, t.started_at, t.status))}</span>
+      ${(t.progress_log || []).length ? `<details class="tlog"><summary>기록 ${t.progress_log.length}줄</summary>${t.progress_log.map(l => `<div><span class="quiet">${esc(new Date(l.at).toLocaleTimeString('ko-KR', { hour12: false }))}</span> ${esc(l.text)}</div>`).join('')}</details>` : ''}</div>`; }).join('')}</div>` : ''}
+  ${(() => { const doneT = tasks.filter(t => ['done', 'failed', 'cancelled'].includes(t.status)).slice(0, 8); if (!doneT.length) return '';
+    const fresh = doneT.some(t => Date.now() - new Date(t.finished_at || t.created_at) < 15 * 60000);
+    return `<details class="card more tasklist" ${fresh ? 'open' : ''}><summary>${ep.number}화 최근 끝난 일 ${doneT.length}개${fresh ? ' · 방금 끝난 일 있음' : ''}</summary>
+    ${doneT.map(t => { const W = failWhere(t);
+      const res = t.status === 'failed' ? (t.error || '실패') : t.status === 'done' ? (t.kind === 'balance_check' ? '잔액 조회 완료' : (String(t.result || '완료').startsWith('{') ? '완료' : t.result || '완료')) : '취소됨';
+      return `<div class="tli tdone">${pill(W.what, t.status === 'failed' ? 'bad' : t.status === 'done' ? 'good' : '')}
+        <b style="font-size:13px">📍 ${esc(W.where)}</b>${W.cut ? `<button class="btn small" data-fgoto="${esc(W.cut.id)}">이 컷으로</button>` : t.scene_no ? `<button class="btn small" data-fgoscene="${t.scene_no}">이 씬으로</button>` : ''}
+        <span class="quiet eta">${esc(t.devices?.name || '')} · ${fmt(t.finished_at || t.created_at)}</span>
+        <div class="tres ${t.status === 'failed' ? 'bad' : ''}">${esc(res)}</div>
+        ${(t.progress_log || []).length ? `<details class="tlog"><summary>과정 기록 ${t.progress_log.length}줄${t.started_at && t.finished_at ? ` · ${Math.max(1, Math.round((new Date(t.finished_at) - new Date(t.started_at)) / 1000))}초 걸림` : ''}</summary>${t.progress_log.map(l => `<div><span class="quiet">${esc(new Date(l.at).toLocaleTimeString('ko-KR', { hour12: false }))}</span> ${esc(l.text)}</div>`).join('')}</details>` : ''}</div>`; }).join('')}</details>`; })()}
 
   ${sceneNos.length ? flowView(ep, sceneNos, scenes, scText, scInfo, rate, pkgs, takes, urls)
     : `<div class="card quiet">${confirmed ? '확정 대본에서 씬(S#)을 찾지 못했습니다. 대본 탭에서 씬 머리(S#1 | …)를 확인하세요.' : '대본을 확정하면 여기 왼쪽에 대본, 오른쪽에 씬별 컷(대사·장면·느낌·구도·조명·연출)이 나옵니다.'}</div>`}
@@ -10707,8 +10733,13 @@ function flowView(ep, sceneNos, scenes, scText, scInfo, rate, pkgs = [], takes =
   let t = 0; const at = {}; ordered.forEach(c => { at[c.id] = [t, t + (c.seconds || 0)]; t += c.seconds || 0; });
   const scriptScenes = new Set(rows.filter(r => r.head).map(r => r.sc));
   const nWarn = ordered.filter(c => (F.warn[c.id] || []).length).length;
+  // 지금 감독이 넣고 있는 줄(컷에 넣기·씬 다시 설계 진행 중): 버튼 대신 '넣는 중'
+  const busyDir = (S.prodOpenTasks || []).filter(t => t.kind === 'director');
+  const busyScenes = new Set(busyDir.filter(t => t.payload?.scenes?.length).flatMap(t => t.payload.scenes.map(Number)));
+  const busyRanges = busyDir.map(t => t.payload?.script_range).filter(Boolean).map(s => s.split('\n').map(x => x.trim()));
+  const pendingLine = r => busyScenes.has(r.sc) || busyRanges.some(rg => rg.includes(r.text.trim()));
   const left = rows.length ? rows.map(r => `<div class="sl ${r.head ? 'hd' : r.dlg ? 'dlg' : 'act'}${F.missing.has(r.i) ? ' miss' : ''}${F.nocut.has(r.i) ? ' nocut' : ''}" data-li="${r.i}">${esc(r.text)}${
-      F.missing.has(r.i) ? `<button class="addm" data-addmiss="${r.i}" title="빠진 대사를 이 씬 컷에 넣습니다">＋ 컷에 넣기</button>` : ''}${
+      F.missing.has(r.i) ? (pendingLine(r) ? `<span class="addm" style="cursor:default">⏳ 감독이 컷에 넣는 중</span>` : `<button class="addm" data-addmiss="${r.i}" title="빠진 대사를 이 씬 컷에 넣습니다">＋ 컷에 넣기</button>`) : ''}${
       r.head && r.sc && !(scenes[r.sc] || []).length ? `<button class="addm" data-addscene="${r.sc}" title="감독이 이 씬을 컷으로 설계합니다">＋ 이 씬 컷 만들기</button>` : ''}</div>`).join('')
     : '<div class="quiet">확정 대본이 없습니다</div>';
   const fld = (k, v) => `<dt>${k}</dt><dd class="${v ? '' : 'none'}">${v ? esc(v) : '다음 설계부터 채워집니다'}</dd>`;
