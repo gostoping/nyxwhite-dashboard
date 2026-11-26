@@ -324,6 +324,9 @@
   .spop .sconn { margin: 4px 0 4px 40px; padding: 4px 10px; border-left: 3px solid var(--accent); font-size: 12.5px; color: var(--ink); background: var(--accent-soft); border-radius: 0 6px 6px 0; }
   .spop .sconn.none { border-left-color: #e08a00; background: #fff7ea; color: #a85b00; }
   @media (max-width: 800px) { .spop .shead, .spop .scut { grid-template-columns: 1fr; } }
+  .ppop .bsl { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 6px 0 12px; max-height: 200px; overflow-y: auto; }
+  .ppop .bsl label { display: flex; gap: 5px; align-items: center; margin: 0; font-size: 13px; color: var(--ink); }
+  .ppop .bsl input { width: auto; margin: 0; }
   .ppop .pnote { width: 100%; box-sizing: border-box; min-height: 84px; resize: vertical; font-size: 13px; font-family: inherit; line-height: 1.55; white-space: pre-wrap; }
   .ppop .secin { display: flex; gap: 6px; margin-top: 4px; align-items: flex-start; }
   .ppop .secin textarea { flex: 1; min-height: 34px; height: 34px; font-size: 12.5px; font-family: inherit; box-sizing: border-box; }
@@ -1368,12 +1371,97 @@ def writers_split(t, p):
     return note + " · 자동 확정 → 감독이 컷 설계"
 
 
+def dlg_texts(text):
+    """대사 글자만(화자 이름은 빼고, 이름에 띄어쓰기가 있어도) — 바이블 반영 때 화자 이름만 바뀌었는지 확인용."""
+    out = []
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        if not s or re.match(r"^[*#>\[\s]*S\s*#", s) or re.match(r"^\d{1,2}:\d{2}", s):
+            continue
+        m = re.match(r"^([^:：()（）\[\]]{1,20})[:：]\s*(.+)$", s)
+        if m and not re.match(r"^(등장|장소|시간|배경)\s*$", m.group(1).strip()):
+            out.append(re.sub(r"\s+", "", re.sub(r"[（(][^)）]*[)）]", "", m.group(2))))
+    return [x for x in out if x]
+
+
+def writers_bible_sync(t, p):
+    """시리즈 바이블에 새로 넣거나 바꾼 항목(예: '예뻐진 린')을 대본에 반영한다. 대사 내용·사건·순서는 그대로,
+    씬 머리 '등장', 대사 화자 이름, 지문의 인물·장소 표기만 바이블대로. 바뀐 씬만 받아 바꿔 끼우고, 대표가 대본 탭에서 확정한다."""
+    ep = t["episode_id"]
+    ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep)
+    src = ctx.get("script") or ctx.get("latest_draft")
+    if not src or not src.get("content"):
+        raise RuntimeError("반영할 대본이 없습니다. 대본 탭에서 원고를 넣고 확정해 주세요")
+    e = ctx.get("episode") or {}
+    epno = int(e.get("number") or 0)
+    names = [x for x in (p.get("names") or []) if x]
+    bible = ctx.get("bible") or []
+    focus = [b for b in bible if not names or b.get("name") in names]
+    if not focus:
+        raise RuntimeError("반영할 바이블 항목을 찾지 못했습니다(이 화 맥락에 없는 이름)")
+    model = setting(ctx, "generation", "claude_writer", "claude-opus-5-5")
+    content = normalize_scene_heads(src["content"])
+    scenes = split_scenes(content)
+    system = (guide(ctx, "작가실") or "너는 드라마 작가실이다.") + role_lessons_block(ctx, "작가실") + f"""
+
+[이번 일 — 시리즈 바이블을 대본에 반영]
+대표가 시리즈 바이블에 아래 항목을 새로 넣거나 바꿨다. 대본이 바이블과 맞게 표기를 고친다.
+- 고치는 것: 씬 머리의 '등장:' 인물, 대사 화자 이름, 지문 속 인물·장소·소품 이름과 모습 묘사(바이블 항목 이름 그대로).
+- 같은 사람의 다른 모습(동일인 항목, 예: 변신 후 '예뻐진 린')은 대본 흐름상 그 모습이 된 순간부터 그 이름으로 쓴다. 그 전 씬은 원래 이름 그대로.
+  언제부터인지는 대본의 사건(변신·시간 경과 등)과 바이블의 변화 설명·나오는 화를 근거로 정하고, reason에 적는다.
+- 절대 바꾸지 않는 것: 대사 내용(글자 그대로), 사건, 순서, 씬 구분과 번호, 감정선. 새 대사·새 사건을 만들지 않는다.
+- 바꿀 게 없는 씬은 답에 넣지 않는다.
+
+[시리즈 바이블 — 이름은 반드시 이대로]
+{bible_text(ctx)}
+
+[이번에 반영할 항목]
+""" + "\n".join(f"- [{b.get('category')}] {b.get('name')}: {(b.get('description') or b.get('prompt_en') or '')[:300]}"
+              + (f" / 동일인: {b.get('same_as')}" if b.get("same_as") else "") + (f" / 변화: {b.get('change_note')}" if b.get("change_note") else "")
+              + (f" / 나오는 화: {b.get('apply_eps')}" if b.get("apply_eps") else "") for b in focus) + """
+
+답 형식: 바뀐 씬마다 <scene no="번호">씬 전체(머리 포함, 고친 뒤)</scene> 를 차례로, 맨 끝에
+<json>{"changes": [{"scene_no": 3, "what": "무엇을 바꿨나", "reason": "왜(대본 근거)"}], "summary": "대표용 두세 줄"}</json>"""
+    user = f"{epno}화 「{e.get('title') or ''}」" + (f"\n[대표 메모]\n{p.get('note')}" if p.get("note") else "") + f"\n\n[대본]\n{content}"
+    progress(f"작가실이 {epno}화 대본에 바이블({', '.join(b.get('name') for b in focus[:6])})을 반영하는 중")
+    text, _ = claude(model, system, user, max_tokens=32000, stage="script_revision", episode_id=ep, note="작가실: 바이블 반영")
+    got = {int(m.group(1)): m.group(2).strip() for m in re.finditer(r'<scene\s+no="?(\d+)"?\s*>(.*?)</scene>', text or "", re.S)}
+    meta = safe_json(text)
+    body_of = {n: b for n, _, b in scenes}
+    applied, skipped = [], []
+    new = content
+    for n, body in got.items():
+        old = body_of.get(n)
+        if not old:
+            skipped.append(f"S#{n}(대본에 없음)")
+            continue
+        # 대사 글자는 그대로여야 한다(화자 이름만 바뀌는 것은 허용)
+        if dlg_texts(old) != dlg_texts(body):
+            skipped.append(f"S#{n}(대사가 바뀌어 반영 안 함)")
+            continue
+        new = new.replace(old, body, 1)
+        applied.append(n)
+    if not applied:
+        summary = (meta.get("summary") or "") or "바꿀 곳이 없었습니다"
+        notify(f"{epno}화 바이블 반영: 바꿀 곳 없음", (summary + (" · 건너뜀: " + ", ".join(skipped) if skipped else ""))[:300])
+        return f"{epno}화: 바이블과 이미 맞아 바꿀 곳이 없습니다" + (f" (건너뜀: {', '.join(skipped)})" if skipped else "")
+    ch = meta.get("changes") or []
+    note = (f"작가실: 바이블 반영({', '.join(b.get('name') for b in focus[:5])}) — S#{', S#'.join(map(str, sorted(applied)))} · "
+            + "; ".join(f"S#{c.get('scene_no')} {c.get('what')}" for c in ch[:6]))[:480]
+    rpc("agent_save_script_draft", p_token=TOKEN, p_episode=ep, p_content=new, p_note=note)
+    notify(f"{epno}화 바이블 반영 정리본: 확정을 기다립니다",
+           ((meta.get("summary") or note) + (" · 건너뜀: " + ", ".join(skipped) if skipped else "") + "\n대사는 그대로입니다. 대본 탭에서 비교하고 확정하세요.")[:400])
+    return note + (f" · 건너뜀 {', '.join(skipped)}" if skipped else "") + " · 대본 탭에서 확정 대기"
+
+
 @task("writers_room")
 def t_writers_room(t):
     ep = t["episode_id"]
     p = t.get("payload") or {}
     if p.get("mode") == "split_scenes":
         return writers_split(t, p)
+    if p.get("mode") == "bible_sync":
+        return writers_bible_sync(t, p)
     ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep, p_version=p.get("source_version_id"))
     src = (ctx.get("script") if p.get("source_version_id") else None) or ctx.get("latest_draft") or ctx.get("script")
     if not src or not src.get("content"):
@@ -7810,6 +7898,37 @@ function applyHelp(list) {
     </ul></div>`;
 }
 
+// 바이블 → 대본 반영: 고른 항목을 고른 화의 대본 표기(등장·화자·지문)에 반영 → 작가실 정리본(대사 그대로) → 대본 탭에서 확정
+function bibleToScript(entries, episodes) {
+  const items = entries.filter(e => e.category !== 'glossary' && e.category !== 'music').sort((a, b) => (a.category === 'character' ? 0 : 1) - (b.category === 'character' ? 0 : 1) || new Date(b.created_at) - new Date(a.created_at));
+  const recent = Date.now() - 3 * 86400000;
+  document.getElementById('zoomBox')?.remove();
+  const box = document.createElement('div'); box.id = 'zoomBox'; box.className = 'zoombox';
+  box.innerHTML = `<div class="zoomin ppop" style="width:min(720px,94vw)">
+    <div class="row pphead"><b>📜 바이블을 대본에 반영</b><button class="btn small" id="zClose" style="margin-left:auto">닫기</button></div>
+    <div class="ppbody" style="margin-top:8px">
+      <p class="quiet" style="font-size:12.5px;margin:0 0 8px">작가실이 고른 항목을 대본의 <b>등장 인물·대사 화자 이름·지문</b>에 바이블 이름대로 반영합니다. 같은 사람의 다른 모습(예: 예뻐진 린)은 대본상 그 모습이 된 씬부터 씁니다. <b>대사 글자는 바뀌지 않으며</b>, 대사가 바뀐 씬은 반영하지 않습니다. 결과는 대본 탭에 정리본으로 올라오고, 비교해 보신 뒤 확정하면 됩니다.</p>
+      <b style="font-size:13px">반영할 항목</b> <span class="quiet" style="font-size:12px">(최근 3일 안에 넣은 항목이 먼저 골라져 있습니다)</span>
+      <div class="bsl">${items.map(e => `<label><input type="checkbox" data-bsn="${esc(e.name)}" ${new Date(e.created_at) > recent || e.same_as ? 'checked' : ''}> ${esc(e.name)} <span class="quiet">${esc(BIBLE_CAT[e.category] || e.category)}${e.same_as ? ' · 동일인' : ''}</span></label>`).join('')}</div>
+      <b style="font-size:13px">반영할 화</b>
+      <div class="bsl">${episodes.map(ep => `<label><input type="checkbox" data-bse="${esc(ep.id)}" checked> ${ep.number}화 ${esc(ep.title || '')}</label>`).join('')}</div>
+      <b style="font-size:13px">메모 (선택)</b>
+      <textarea id="bsNote" class="pnote" placeholder="예: 린은 1화 미용실 씬 이후부터 '예뻐진 린'으로"></textarea>
+      <div class="row" style="gap:6px;margin-top:8px"><button class="btn primary" id="bsGo">작가실에 맡기기</button><span class="quiet" style="font-size:12px">화마다 Claude 비용(수백 원)</span></div>
+    </div></div>`;
+  const close = () => box.remove();
+  box.onclick = ev => { if (ev.target === box) close(); };
+  document.body.appendChild(box);
+  box.querySelector('#zClose').onclick = close;
+  box.querySelector('#bsGo').onclick = guard(async () => {
+    const names = [...box.querySelectorAll('[data-bsn]:checked')].map(c => c.dataset.bsn);
+    const eps = [...box.querySelectorAll('[data-bse]:checked')].map(c => c.dataset.bse);
+    if (!names.length) return toast('반영할 항목을 고르세요'); if (!eps.length) return toast('반영할 화를 고르세요');
+    const note = box.querySelector('#bsNote').value.trim() || null;
+    await q(S.sb.from('pipeline_tasks').insert(eps.map(id => ({ kind: 'writers_room', episode_id: id, payload: { mode: 'bible_sync', names, note } }))));
+    close(); toast(`작가실이 ${eps.length}개 화 대본에 ${names.join(', ')}을(를) 반영합니다. 끝나면 대본 탭에 정리본이 올라옵니다`);
+  });
+}
 async function viewBible(main) {
   const tok = S.bibleTok = (S.bibleTok || 0) + 1;   // 겹쳐 그리기 방지: 늦게 끝난 옛 그리기는 버린다
   const series = await q(S.sb.from('series').select('id,title').order('created_at'));
@@ -7903,7 +8022,8 @@ async function viewBible(main) {
       <button class="btn primary small" id="bnew" title="바이블에 새 항목(인물·장소·배경·소품·스타일·목소리·용어·배경음악)을 직접 등록합니다">+ 항목 추가</button></div>
     <div class="btools">
       <div class="brow"><span class="blbl">대본에서</span><div class="bbtns">
-        <button class="btn small" id="bextract" title="작가실이 대본을 화별로 읽고 씬마다 필요한 인물·장소·배경·소품을 찾아 바이블 수정안으로 올립니다">필요한 인물·장소·소품 찾기</button></div></div>
+        <button class="btn small" id="bextract" title="작가실이 대본을 화별로 읽고 씬마다 필요한 인물·장소·배경·소품을 찾아 바이블 수정안으로 올립니다">필요한 인물·장소·소품 찾기</button>
+        <button class="btn small primary" id="bsync" title="바이블에 새로 넣거나 바꾼 인물(예: 예뻐진 린)을 대본의 등장·화자·지문 표기에 반영합니다. 대사는 그대로, 대본 탭에서 확정">📜 바이블을 대본에 반영</button></div></div>
       <div class="brow"><span class="blbl">한꺼번에</span><div class="bbtns">
         ${showPhotoBtn ? `<button class="btn small" id="bphotos" title="적용된 묘사는 있고 사진이 없는 항목의 사진 후보를 만듭니다. '직접 올리기' 항목은 빠집니다(인물은 Soul 2 실사)">${catLabel ? esc(catLabel) + ' ' : ''}사진 만들기 (${photoTodo.length})</button>` : ''}
         <button class="btn small" id="bcoord" title="코디네이터가 지금 적용된 모든 항목의 묘사·영어 프롬프트·대본 일치를 감수하고 카드에 기록합니다(항목당 수십 원)">전체 감수 다시 하기</button>
@@ -8031,6 +8151,7 @@ async function viewBible(main) {
   ($('#bser') || {}).onchange = e => { S.seriesId = e.target.value; S.episodeId = null; S.contEp = null; go('bible'); };
   main.querySelectorAll('[data-bc]').forEach(b => b.onclick = () => { S.bibleCat = b.dataset.bc; go('bible'); });
   ($('#bnew') || {}).onclick = () => openBibleEditor({ urls });
+  ($('#bsync') || {}).onclick = () => bibleToScript(entries, episodes);
   ($('#bextract') || {}).onclick = guard(async () => {
     if (!confirm('작가실이 이 시리즈 대본을 화별로 읽고, 씬마다 필요한 인물·장소·배경·소품을 바이블 수정안으로 올립니다.\n이미 있는 항목은 등장 씬만 보탭니다. (Claude 화당 수백 원)')) return;
     await q(S.sb.from('pipeline_tasks').insert({ kind: 'bible_extract', series_id: S.seriesId, payload: { series_id: S.seriesId } }));

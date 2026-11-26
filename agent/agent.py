@@ -885,12 +885,97 @@ def writers_split(t, p):
     return note + " · 자동 확정 → 감독이 컷 설계"
 
 
+def dlg_texts(text):
+    """대사 글자만(화자 이름은 빼고, 이름에 띄어쓰기가 있어도) — 바이블 반영 때 화자 이름만 바뀌었는지 확인용."""
+    out = []
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        if not s or re.match(r"^[*#>\[\s]*S\s*#", s) or re.match(r"^\d{1,2}:\d{2}", s):
+            continue
+        m = re.match(r"^([^:：()（）\[\]]{1,20})[:：]\s*(.+)$", s)
+        if m and not re.match(r"^(등장|장소|시간|배경)\s*$", m.group(1).strip()):
+            out.append(re.sub(r"\s+", "", re.sub(r"[（(][^)）]*[)）]", "", m.group(2))))
+    return [x for x in out if x]
+
+
+def writers_bible_sync(t, p):
+    """시리즈 바이블에 새로 넣거나 바꾼 항목(예: '예뻐진 린')을 대본에 반영한다. 대사 내용·사건·순서는 그대로,
+    씬 머리 '등장', 대사 화자 이름, 지문의 인물·장소 표기만 바이블대로. 바뀐 씬만 받아 바꿔 끼우고, 대표가 대본 탭에서 확정한다."""
+    ep = t["episode_id"]
+    ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep)
+    src = ctx.get("script") or ctx.get("latest_draft")
+    if not src or not src.get("content"):
+        raise RuntimeError("반영할 대본이 없습니다. 대본 탭에서 원고를 넣고 확정해 주세요")
+    e = ctx.get("episode") or {}
+    epno = int(e.get("number") or 0)
+    names = [x for x in (p.get("names") or []) if x]
+    bible = ctx.get("bible") or []
+    focus = [b for b in bible if not names or b.get("name") in names]
+    if not focus:
+        raise RuntimeError("반영할 바이블 항목을 찾지 못했습니다(이 화 맥락에 없는 이름)")
+    model = setting(ctx, "generation", "claude_writer", "claude-opus-5-5")
+    content = normalize_scene_heads(src["content"])
+    scenes = split_scenes(content)
+    system = (guide(ctx, "작가실") or "너는 드라마 작가실이다.") + role_lessons_block(ctx, "작가실") + f"""
+
+[이번 일 — 시리즈 바이블을 대본에 반영]
+대표가 시리즈 바이블에 아래 항목을 새로 넣거나 바꿨다. 대본이 바이블과 맞게 표기를 고친다.
+- 고치는 것: 씬 머리의 '등장:' 인물, 대사 화자 이름, 지문 속 인물·장소·소품 이름과 모습 묘사(바이블 항목 이름 그대로).
+- 같은 사람의 다른 모습(동일인 항목, 예: 변신 후 '예뻐진 린')은 대본 흐름상 그 모습이 된 순간부터 그 이름으로 쓴다. 그 전 씬은 원래 이름 그대로.
+  언제부터인지는 대본의 사건(변신·시간 경과 등)과 바이블의 변화 설명·나오는 화를 근거로 정하고, reason에 적는다.
+- 절대 바꾸지 않는 것: 대사 내용(글자 그대로), 사건, 순서, 씬 구분과 번호, 감정선. 새 대사·새 사건을 만들지 않는다.
+- 바꿀 게 없는 씬은 답에 넣지 않는다.
+
+[시리즈 바이블 — 이름은 반드시 이대로]
+{bible_text(ctx)}
+
+[이번에 반영할 항목]
+""" + "\n".join(f"- [{b.get('category')}] {b.get('name')}: {(b.get('description') or b.get('prompt_en') or '')[:300]}"
+              + (f" / 동일인: {b.get('same_as')}" if b.get("same_as") else "") + (f" / 변화: {b.get('change_note')}" if b.get("change_note") else "")
+              + (f" / 나오는 화: {b.get('apply_eps')}" if b.get("apply_eps") else "") for b in focus) + """
+
+답 형식: 바뀐 씬마다 <scene no="번호">씬 전체(머리 포함, 고친 뒤)</scene> 를 차례로, 맨 끝에
+<json>{"changes": [{"scene_no": 3, "what": "무엇을 바꿨나", "reason": "왜(대본 근거)"}], "summary": "대표용 두세 줄"}</json>"""
+    user = f"{epno}화 「{e.get('title') or ''}」" + (f"\n[대표 메모]\n{p.get('note')}" if p.get("note") else "") + f"\n\n[대본]\n{content}"
+    progress(f"작가실이 {epno}화 대본에 바이블({', '.join(b.get('name') for b in focus[:6])})을 반영하는 중")
+    text, _ = claude(model, system, user, max_tokens=32000, stage="script_revision", episode_id=ep, note="작가실: 바이블 반영")
+    got = {int(m.group(1)): m.group(2).strip() for m in re.finditer(r'<scene\s+no="?(\d+)"?\s*>(.*?)</scene>', text or "", re.S)}
+    meta = safe_json(text)
+    body_of = {n: b for n, _, b in scenes}
+    applied, skipped = [], []
+    new = content
+    for n, body in got.items():
+        old = body_of.get(n)
+        if not old:
+            skipped.append(f"S#{n}(대본에 없음)")
+            continue
+        # 대사 글자는 그대로여야 한다(화자 이름만 바뀌는 것은 허용)
+        if dlg_texts(old) != dlg_texts(body):
+            skipped.append(f"S#{n}(대사가 바뀌어 반영 안 함)")
+            continue
+        new = new.replace(old, body, 1)
+        applied.append(n)
+    if not applied:
+        summary = (meta.get("summary") or "") or "바꿀 곳이 없었습니다"
+        notify(f"{epno}화 바이블 반영: 바꿀 곳 없음", (summary + (" · 건너뜀: " + ", ".join(skipped) if skipped else ""))[:300])
+        return f"{epno}화: 바이블과 이미 맞아 바꿀 곳이 없습니다" + (f" (건너뜀: {', '.join(skipped)})" if skipped else "")
+    ch = meta.get("changes") or []
+    note = (f"작가실: 바이블 반영({', '.join(b.get('name') for b in focus[:5])}) — S#{', S#'.join(map(str, sorted(applied)))} · "
+            + "; ".join(f"S#{c.get('scene_no')} {c.get('what')}" for c in ch[:6]))[:480]
+    rpc("agent_save_script_draft", p_token=TOKEN, p_episode=ep, p_content=new, p_note=note)
+    notify(f"{epno}화 바이블 반영 정리본: 확정을 기다립니다",
+           ((meta.get("summary") or note) + (" · 건너뜀: " + ", ".join(skipped) if skipped else "") + "\n대사는 그대로입니다. 대본 탭에서 비교하고 확정하세요.")[:400])
+    return note + (f" · 건너뜀 {', '.join(skipped)}" if skipped else "") + " · 대본 탭에서 확정 대기"
+
+
 @task("writers_room")
 def t_writers_room(t):
     ep = t["episode_id"]
     p = t.get("payload") or {}
     if p.get("mode") == "split_scenes":
         return writers_split(t, p)
+    if p.get("mode") == "bible_sync":
+        return writers_bible_sync(t, p)
     ctx = rpc("agent_context", p_token=TOKEN, p_episode=ep, p_version=p.get("source_version_id"))
     src = (ctx.get("script") if p.get("source_version_id") else None) or ctx.get("latest_draft") or ctx.get("script")
     if not src or not src.get("content"):
