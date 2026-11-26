@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.39.0"
+VERSION = "1.40.0"
 
 import base64
 import glob
@@ -1128,8 +1128,78 @@ sheet는 대표가 읽는 한국어 지시서다: 항목마다 짧고 구체적�
 CUT_SCHEMA = CUT_SCHEMA.replace("__SHEET__", SHEET_SCHEMA)
 
 
-ANATOMY_LINE = ("ANATOMY: Each person has exactly two arms and two hands with five fingers each. No extra or missing limbs, "
-                "no duplicated or merged hands, no extra people, natural body proportions.")
+ANATOMY_LINE = ("ANATOMY: Each person has exactly two arms, two hands with five fingers each, and two legs; exactly one left hand and one right hand. "
+                "Torso, hips, legs and feet face the same direction unless the action explicitly turns the whole body together; "
+                "knees and elbows bend naturally, feet stay planted on the ground. No extra or missing limbs, no duplicated or merged hands, "
+                "no twisted or reversed body, no extra people, natural body proportions.")
+PROMPT_HEADS = ["SHOT", "CAMERA", "FRAME", "LIGHT", "CHARACTERS", "BODY", "HANDS", "ACTION", "CONTINUITY"]
+
+
+def missing_heads(prompt):
+    """프롬프트에 빠진 머리말(구도·카메라·몸·손·구간 동작·연결 등)."""
+    p = prompt or ""
+    return [h for h in PROMPT_HEADS if not re.search(rf"(?mi)^\s*{h}\S*\s*[:：]" if h != "ACTION" else r"(?mi)^\s*ACTION[^:\n]*:", p)]
+
+
+def continuity_pass(ctx, ep, epno, cuts, all_sc, dmodel):
+    """기본 단계(감수 설정과 상관없이 항상): 화 처음부터 끝까지 컷을 순서대로 이어 보며
+    ① 컷과 컷(씬과 씬 경계 포함)이 자연스럽게 이어지게 시작·끝 자세·시선·동선·카메라를 맞추고
+    ② 프롬프트 머리말(SHOT·CAMERA·FRAME·LIGHT·CHARACTERS·BODY·HANDS·ACTION·CONTINUITY)을 빠짐없이 자세히 채운다(손·발·몸 방향, 줌·무빙).
+    대사·컷 수·길이는 바꾸지 않는다. 고친 컷만 돌려받는다."""
+    order = sorted(cuts, key=lambda c: (inum(c.get("scene_no") or 0), inum(c.get("cut_no") or 0)))
+    if not order:
+        return 0
+    system = director_system(ctx) + """
+
+[이번 일 — 연결·디테일 다듬기(컷 설계의 기본 마지막 단계)]
+아래는 이 화의 컷을 처음부터 순서대로 늘어놓은 것이다(앞뒤 씬 경계 포함). 각 컷을 앞 컷·뒤 컷과 이어서 본다.
+- 연결: 컷 시작 자세·위치·시선·손에 든 물건·카메라 위치가 앞 컷 끝과 이어지게. 씬이 바뀌는 곳은 scene_plan의 transition(소리 먼저·동작 이어 붙이기 등)으로 부드럽게.
+  같은 씬 안 컷은 continue_prev=true가 기본. staging.connect와 프롬프트 CONTINUITY 줄을 꼭 채운다.
+- 디테일: 모든 컷의 영어 프롬프트에 SHOT, CAMERA(무빙·줌의 종류·방향·속도·구간), FRAME, LIGHT, CHARACTERS, BODY(가슴·골반·다리·발 방향을 같게, 무게중심·발 위치),
+  HANDS(왼손·오른손 따로), ACTION 구간별(손·발·몸 움직임), DIALOGUE(대사 있으면), CONTINUITY 줄이 있어야 한다. 빠진 줄은 채우고, 막연한 줄은 구체적으로.
+- 바꾸지 않는 것: 대사 글자, 컷 수, 컷 순서, seconds, reference_names, 장면의 뜻.
+- prompt를 고쳤으면 prompt_ko도 같은 내용으로 고친다.
+답: 고친 컷만 <json>{"cuts": [{"scene_no": 1, "cut_no": 2, "prompt": "영어 전체", "prompt_ko": "한국어판 전체", "continue_prev": true,
+ "staging": {"composition": "", "lighting": "", "blocking": "", "connect": ""}}]}</json>"""
+    view = lambda c: {k: c.get(k) for k in ("scene_no", "cut_no", "seconds", "summary", "dialogue", "emotion", "camera", "staging", "continue_prev", "prompt", "scene_plan")}
+    win, changed = 7, 0
+    starts = list(range(0, len(order), win - 1))
+    def do(i0):
+        part = order[i0:i0 + win]
+        if i0 and len(part) < 2:
+            return {}
+        scs = {inum(c.get("scene_no") or 0) for c in part}
+        src = "\n\n".join(b for n, _, b in all_sc if n in scs)
+        text = ""
+        for attempt in range(2):
+            text, _ = claude(dmodel, system, f"{epno}화 컷 {i0 + 1}~{i0 + len(part)}번째(순서대로)\n" + json.dumps([view(c) for c in part], ensure_ascii=False)
+                             + f"\n\n[대본(이 컷들의 씬)]\n{src[:20000]}" + ("\n\n[중요] 설명 없이 <json>{\"cuts\": [...]}</json> 하나만." if attempt else ""),
+                             max_tokens=24000, stage="cut_card", episode_id=ep, note=f"감독 연결·디테일 다듬기 {i0 + 1}~{i0 + len(part)}")
+            d = safe_json(text)
+            if isinstance(d.get("cuts"), list):
+                return {(inum(x.get("scene_no") or 0), inum(x.get("cut_no") or 0)): x for x in d["cuts"] if isinstance(x, dict) and x.get("prompt")}
+        return {}
+    progress(f"감독이 {epno}화 컷 {len(order)}개를 처음부터 끝까지 이어 보며 연결·손발·몸·카메라 무빙을 다듬는 중")
+    for r in parallel([(lambda i0=i0: do(i0)) for i0 in starts], workers=min(4, len(starts))):
+        if isinstance(r, Exception) or not r:
+            continue
+        for c in order:
+            k = (inum(c.get("scene_no") or 0), inum(c.get("cut_no") or 0))
+            x = r.get(k)
+            if not x:
+                continue
+            c["prompt"] = x["prompt"]
+            if x.get("prompt_ko"):
+                c["prompt_ko"] = x["prompt_ko"]
+            if isinstance(x.get("staging"), dict):
+                c["staging"] = {**(c.get("staging") or {}), **{kk: v for kk, v in x["staging"].items() if v}}
+            if "continue_prev" in x:
+                c["continue_prev"] = bool(x["continue_prev"])
+            changed += 1
+    miss = [f"{c.get('code')}: {', '.join(missing_heads(c.get('prompt')))}" for c in order if missing_heads(c.get("prompt"))]
+    if miss:
+        log(f"프롬프트 머리말이 아직 빠진 컷 {len(miss)}개: " + "; ".join(miss[:6]))
+    return changed
 
 
 def attach_scene_plans(cuts, scenes):
@@ -1144,15 +1214,15 @@ def attach_scene_plans(cuts, scenes):
 
 
 def tidy_prompt(prompt):
-    """프롬프트 꼼꼼함 보강: 신체 규칙(손·팔 개수) 줄이 없으면 붙인다. 소리 규칙 문장은 맨 끝에 둔다."""
+    """프롬프트 꼼꼼함 보강: 신체 규칙(손·팔·다리 개수, 몸통·다리 방향 일치) 줄을 늘 최신 문장 하나로 맞춘다. 소리 규칙 문장은 맨 끝에 둔다."""
     p = (prompt or "").strip()
-    if not p or re.search(r"exactly two (arms|hands)", p, re.I):
+    if not p:
         return p
     tail = "No background music, no score. Dialogue and natural ambient sound only."
-    if tail in p:
-        p = p.replace(tail, "").rstrip()
-        return f"{p}\n{ANATOMY_LINE}\n{tail}"
-    return f"{p}\n{ANATOMY_LINE}"
+    has_tail = tail in p
+    lines = [ln for ln in p.replace(tail, "").splitlines() if not re.match(r"^\s*ANATOMY\s*:", ln, re.I)]
+    body = "\n".join(lines).rstrip()
+    return f"{body}\n{ANATOMY_LINE}" + (f"\n{tail}" if has_tail else "")
 
 
 def ko_from_prompt(prompt):
@@ -1244,13 +1314,17 @@ def director_system(ctx):
 - 4~6초짜리 컷을 잘게 늘어놓지 않는다. 대사가 이어지는 대화는 한 컷에 길게(최대 15초) 담고, 반응 컷은 감정이 바뀔 때만.
 
 [프롬프트 꼼꼼함 — 영상이 망가지는 가장 큰 원인]
-영어 프롬프트는 빠짐없이 아래 순서로 적는다(줄마다 머리말 그대로):
-SHOT: 샷 크기·카메라 높이·각도·움직임(한 가지만, 천천히)
-FRAME: 화면에 보이는 사람 수를 숫자로("Exactly 2 people in frame") + 각 인물의 위치(left third / right third / center, 앞·뒤)와 몸·얼굴 방향
+영어 프롬프트는 빠짐없이 아래 순서로 적는다(줄마다 머리말 그대로, 모든 컷에 모든 줄):
+SHOT: 샷 크기(시작 → 끝)·카메라 높이·각도
+CAMERA: 카메라 움직임과 줌을 반드시 구체적으로 — 종류(static locked-off / slow push-in / pull-out / pan left·right / tilt / dolly / handheld 금지 등),
+        방향, 속도, 몇 초부터 몇 초까지, 시작·끝 프레이밍(예: "slow push-in from medium shot to close-up, 0-5s, very smooth, no shake"). 움직임은 한 가지만
+FRAME: 화면에 보이는 사람 수를 숫자로("Exactly 2 people in frame") + 각 인물의 위치(left third / right third / center, 앞·뒤)와 얼굴 방향
 LIGHT: 빛이 들어오는 방향·시간대·색(씬 안에서 같은 방향 유지)
 CHARACTERS: 바이블 고정 묘사(얼굴·머리·의상) — 인물마다
-HANDS: 인물마다 왼손·오른손이 무엇을 하는지·무엇을 들고 있는지(빈손이면 "left hand relaxed at side")
-ACTION 0-3s / 3-6s …: 구간마다 동작 하나씩, 단순하고 느리게. 시작 자세는 앞 컷 끝과 같게
+BODY: 인물마다 몸 전체 자세 — 가슴·골반·다리·발이 향하는 방향(서로 같게, 몸을 돌릴 때는 어깨·골반·발이 함께 돈다), 서 있는지 앉아 있는지,
+      무게중심, 두 발의 위치(바닥에 붙어 있음), 걷는다면 어느 방향으로 몇 걸음
+HANDS: 인물마다 왼손·오른손을 따로 — 무엇을 하는지·무엇을 들고 있는지·어디에 있는지(빈손이면 "left hand relaxed at side")
+ACTION 0-3s / 3-6s …: 구간마다 동작 하나씩, 단순하고 느리게(손·발·몸이 어떻게 움직이는지까지). 시작 자세는 앞 컷 끝과 같게
 DIALOGUE: 화자·한국어 원문 따옴표·목소리
 CONTINUITY: 시작 자세(앞 컷에서 이어짐)와 끝 자세(다음 컷이 이어받음)
 ANATOMY: "Each person has exactly two arms and two hands with five fingers each. No extra or missing limbs, no duplicated or merged hands, no extra people, natural body proportions."
@@ -1637,6 +1711,12 @@ JSON 최상위에 "end_state"도 함께 준다: 이 씬들이 끝났을 때 주�
              "sheet": fixed[(inum(c["scene_no"]), inum(c["cut_no"]))].get("sheet") or c.get("sheet"),
              **({"scene_plan": c["scene_plan"]} if c.get("scene_plan") else {})}
             if (inum(c["scene_no"]), inum(c["cut_no"])) in fixed else c for c in cuts]   # 고친 컷도 번호·코드는 그대로
+    # 기본: 화 처음부터 끝까지 컷 연결·손발·몸·카메라 무빙 디테일 다듬기(감수 설정과 상관없이 항상)
+    try:
+        nfix = continuity_pass(ctx, ep, epno, cuts, all_sc, dmodel)
+        log(f"연결·디테일 다듬기: 컷 {nfix}개 보강")
+    except Exception as ex:
+        log(f"연결·디테일 다듬기 실패(설계는 저장): {ex}")
     by_scene = {}
     for c in cuts:
         k = (inum(c.get("scene_no") or 0), inum(c.get("cut_no") or 0))
