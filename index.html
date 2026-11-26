@@ -8114,7 +8114,7 @@ async function viewBible(main) {
       ${sameAsLine(e, entries)}
       ${c?.details ? `<details style="margin-top:8px"><summary class="quiet">세부 사항</summary><pre class="doc" style="margin-top:6px">${esc(c.details)}</pre></details>` : ''}
       ${c?.soul_id ? `<div class="quiet" style="margin-top:6px">${pill('얼굴 고정됨', 'good')} 이 얼굴로 모든 장면을 만듭니다</div>` : ''}
-      ${c?.voice_path && urls[c.voice_path] ? `<audio controls preload="none" src="${esc(urls[c.voice_path])}"></audio>` : ''}
+      ${c?.voice_path && urls[c.voice_path] && !['character', 'voice'].includes(e.category) ? `<audio controls preload="none" src="${esc(urls[c.voice_path])}"></audio>` : ''}
       <div class="bact">
         ${e.category === 'character' && 'same_as' in e ? `<div class="brow"><span class="blbl">동일인</span><div class="bbtns">
           <select data-same="${esc(e.id)}" style="width:auto;min-width:140px" title="같은 사람의 다른 시점·호칭이면 연결하세요(예: 미래의 남자 → 탄). 목소리를 물려받고, 사진이 없으면 그 사람 사진을 참고합니다">
@@ -8134,6 +8134,7 @@ async function viewBible(main) {
           ${e.category === 'character' && (c?.image_paths || []).length ? `<button class="btn small only-up" data-pd="${esc(e.id)}" title="올린 사진으로 Soul ID를 학습해 같은 얼굴의 기준 사진을 만듭니다">${c?.soul_id ? '얼굴 다시 고정' : '이 사진으로 얼굴 고정'}</button>` : ''}</div></div>` : ''}
         ${['character', 'voice'].includes(e.category) ? `<div class="brow"><span class="blbl">목소리</span><div class="bbtns">
           <span class="vlive" data-vsample="${esc(c?.voice_path || '')}">${c?.voice_path ? '' : '<span class="quiet">아직 없어요 — 이 인물이 말하는 영상을 만들면 그 목소리가 여기 저장됩니다</span>'}</span></div></div>` : ''}
+      </div>
       <div id="be-${esc(e.id)}"></div>
       <div id="pd-${esc(e.id)}"></div>
       <div id="vd-${esc(e.id)}"></div>
