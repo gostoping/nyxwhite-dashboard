@@ -313,6 +313,17 @@
   .ppop .ko-wait { min-height: 220px; display: flex; align-items: center; justify-content: center; gap: 6px; color: var(--quiet); }
   .ppop #pKo { width: 100%; box-sizing: border-box; min-height: 220px; font-size: 12.5px; font-family: inherit; line-height: 1.55; }
   .ppop .psec h4 { margin: 14px 0 4px; font-size: 13.5px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .spop .shead { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 14px; align-items: start; }
+  .spop .splay video { width: 100%; max-height: 52vh; background: #000; border-radius: 8px; display: block; }
+  .spop .schips { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+  .spop .scut { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+  .spop .scut.on { border-color: #d63b3b; box-shadow: 0 0 0 1px #d63b3b inset; }
+  .spop .scv video { width: 100%; max-height: 260px; background: #000; border-radius: 6px; display: block; }
+  .spop .scv .novid { aspect-ratio: 9 / 16; max-height: 200px; }
+  .spop .scp .pc { max-height: 220px; overflow: auto; }
+  .spop .sconn { margin: 4px 0 4px 40px; padding: 4px 10px; border-left: 3px solid var(--accent); font-size: 12.5px; color: var(--ink); background: var(--accent-soft); border-radius: 0 6px 6px 0; }
+  .spop .sconn.none { border-left-color: #e08a00; background: #fff7ea; color: #a85b00; }
+  @media (max-width: 800px) { .spop .shead, .spop .scut { grid-template-columns: 1fr; } }
   .ppop .pnote { width: 100%; box-sizing: border-box; min-height: 84px; resize: vertical; font-size: 13px; font-family: inherit; line-height: 1.55; white-space: pre-wrap; }
   .ppop .secin { display: flex; gap: 6px; margin-top: 4px; align-items: flex-start; }
   .ppop .secin textarea { flex: 1; min-height: 34px; height: 34px; font-size: 12.5px; font-family: inherit; box-sizing: border-box; }
@@ -10495,6 +10506,7 @@ function flowView(ep, sceneNos, scenes, scText, scInfo, rate, pkgs = [], takes =
         ${!scriptScenes.has(+no) && rows.length ? pill('대본에 없는 씬', 'bad') : ''}</div>
         <div class="j ${J.bad ? '' : 'quiet'}">${cs.length ? `${J.bad ? '⚠ ' : ''}대본 분량 약 ${J.est}초 → 컷 ${J.rec}개 정도가 알맞음 · 지금 컷 ${cs.length}개 · ${J.tot}초` : `대본 분량 약 ${J.est}초 · 아직 컷이 없습니다`}</div>
         ${cs.length ? `<div class="row" style="gap:6px;margin-top:6px">${pend.length ? `<button class="btn small" data-approve-scene="${no}">이 씬 ${pend.length}컷 생성 승인 · ${usdKrw(cost, rate)}</button>` : ''}
+          <button class="btn small primary" data-sshow="${no}" title="이 씬의 컷 영상을 이어서 보고, 컷 프롬프트를 한곳에 모아 연결을 확인합니다">🎬 씬 전체 보기 (영상·프롬프트)</button>
           <button class="btn small" data-redesign="${no}">이 씬 컷 다시 설계</button></div>` : ''}</div>
       ${cs.length ? `<dl class="pplan">${hasPlan ? PLAN.map(([k, l]) => `<dt>${l}</dt><dd class="${plan[k] ? '' : 'none'}">${plan[k] ? esc(plan[k]) : '—'}</dd>`).join('')
         : '<dt>연출 계획</dt><dd class="none">감독이 다음 설계(또는 "이 씬 컷 다시 설계")부터 화면 구성·방향·흐름·분위기·앞뒤 씬 연결을 적습니다</dd>'}</dl>` : ''}
@@ -10557,6 +10569,7 @@ function bindFlowView(pane) {
     await q(S.sb.from('pipeline_tasks').insert({ kind: 'director', episode_id: S.flowEp.id, scene_no: +b.dataset.addscene, payload: { scenes: [+b.dataset.addscene], prepped: true } }));
     toast(`감독이 S#${b.dataset.addscene} 컷을 설계합니다`); }));
   pane.querySelectorAll('[data-pshow]').forEach(b => b.onclick = ev => { ev.stopPropagation(); flowPromptPopup(b.dataset.pshow); });
+  pane.querySelectorAll('[data-sshow]').forEach(b => b.onclick = ev => { ev.stopPropagation(); scenePopup(+b.dataset.sshow); });
   const ka = pane.querySelector('#pKoAll'); if (ka) ka.onclick = guard(async () => {
     const need = Object.values(S.flowScenes || {}).flat().filter(c => !c.prompt_ko && c.prompt);
     if (!confirm(`한글 프롬프트가 없는 ${need.length}컷의 한글판을 만듭니다(컷마다 Claude 비용 수십 원).`)) return;
@@ -10885,6 +10898,96 @@ function bindPromptPopup(inner, c, close, setBusy) {
   });
 }
 const takesOf = id => (S.flowTakes || []).filter(t => t.cut_id === id);
+// ---------------- 씬 전체 보기: 컷 영상을 순서대로 이어 보고, 컷 프롬프트(한글·영어)와 컷 사이 연결을 한곳에서
+function sceneShot(c) {
+  const ts = takesOf(c.id), U = S.flowUrls || {};
+  const sh = ts.find(x => x.id === c.best_take_id && U[x.files?.preview]) || ts.filter(x => U[x.files?.preview]).at(-1);
+  return sh ? { src: U[sh.files.preview], poster: U[sh.files?.poster] || '', take: sh.take_no } : null;
+}
+function scenePopup(no) {
+  const cs = (S.flowScenes[no] || []).slice().sort((a, b) => a.cut_no - b.cut_no); if (!cs.length) return;
+  const plan = ((S.flowPkgs || []).find(x => +x.scene_no === +no) || {}).plan || {};
+  const info = (S.flowRows || []).find(r => r.head && r.sc === +no)?.text || `S#${no}`;
+  const vids = cs.map(c => ({ c, v: sceneShot(c) }));
+  const playable = vids.filter(x => x.v);
+  const tot = cs.reduce((s, c) => s + (c.seconds || 0), 0);
+  const PL = [['composition', '화면 구성'], ['direction', '방향'], ['flow', '흐름'], ['mood', '분위기'], ['transition_in', '앞 씬에서'], ['transition_out', '다음 씬으로']];
+  const conn = (a, b) => {
+    const PA = promptSections(a.prompt_ko || a.prompt), PB = promptSections(b.prompt_ko || b.prompt);
+    const lines = [(a.staging || {}).connect ? `C${a.cut_no} → 다음: ${(a.staging || {}).connect}` : '', PA.CONTINUITY ? `C${a.cut_no} 끝: ${PA.CONTINUITY}` : '',
+      b.continue_prev ? `C${b.cut_no}은 앞 컷 마지막 장면에서 이어 시작` : '', PB.CONTINUITY ? `C${b.cut_no} 시작: ${PB.CONTINUITY}` : ''].filter(Boolean);
+    return `<div class="sconn ${lines.length ? '' : 'none'}">↓ ${lines.length ? lines.map(esc).join('<br>') : `C${a.cut_no} → C${b.cut_no} 연결이 적혀 있지 않습니다(끊겨 보일 수 있음)`}</div>`;
+  };
+  const rows = cs.map((c, i) => { const v = vids[i].v;
+    return `${i ? conn(cs[i - 1], c) : ''}<div class="scut" data-scut="${c.id}">
+      <div class="scv">${v ? `<video src="${esc(v.src)}" ${v.poster ? `poster="${esc(v.poster)}"` : ''} controls playsinline preload="metadata"></video>` : '<div class="novid">영상 없음</div>'}
+        <div class="quiet" style="font-size:12px;margin-top:3px"><b>C${c.cut_no}</b> · ${c.seconds}초 · ${pill((CUT_STATUS[c.status] || [c.status])[0], (CUT_STATUS[c.status] || [])[1] || '')}</div>
+        <button class="btn small" data-sopen="${c.id}" style="margin-top:4px">📝 이 컷 프롬프트 고치기</button></div>
+      <div class="scp"><div class="quiet" style="font-size:12px">${esc(c.summary || '')}${c.dialogue ? ' · 대사: ' + esc(parseDlg(c.dialogue).map(d => d.speaker + ': ' + d.text).join(' / ')) : ''}</div>
+        <div class="kogrid"><div><div class="quiet" style="font-size:11.5px">한글</div><pre class="pc">${c.prompt_ko ? esc(c.prompt_ko) : '<span class="quiet">한글판 없음</span>'}</pre></div>
+          <div><div class="quiet" style="font-size:11.5px">영어 (생성에 쓰임)</div><pre class="pc en">${esc(c.prompt || '')}</pre></div></div></div>
+    </div>`; }).join('');
+  const noKo = cs.filter(c => !c.prompt_ko && c.prompt);
+  document.getElementById('zoomBox')?.remove();
+  const box = document.createElement('div'); box.id = 'zoomBox'; box.className = 'zoombox';
+  box.innerHTML = `<div class="zoomin ppop spop">
+    <div class="row pphead"><b>🎬 ${esc(info)}</b><span class="quiet" style="font-size:12.5px">컷 ${cs.length}개 · ${tot}초 · 영상 ${playable.length}/${cs.length}</span><button class="btn small" id="zClose" style="margin-left:auto">닫기 (Esc)</button></div>
+    <div class="ppbody" style="margin-top:10px">
+      <div class="shead">
+        <div class="splay">${playable.length ? `<video id="sPlay" playsinline controls></video>
+          <div class="row" style="gap:6px;margin-top:6px"><button class="btn small primary" id="sPlayAll">▶ 씬 이어서 보기</button><span class="quiet" id="sNow" style="font-size:12.5px"></span></div>
+          <div class="schips">${vids.map((x, i) => `<button class="btn small ${x.v ? '' : 'ghost'}" data-sjump="${i}" ${x.v ? '' : 'disabled title="영상 없음"'}>C${x.c.cut_no}</button>`).join('')}</div>`
+          : '<div class="novid" style="aspect-ratio:auto;height:200px">아직 만든 영상이 없습니다</div>'}</div>
+        <div><b style="font-size:13.5px">씬 연출 계획</b><dl class="pplan" style="padding:6px 0">${PL.map(([k, l]) => `<dt>${l}</dt><dd class="${plan[k] ? '' : 'none'}">${plan[k] ? esc(plan[k]) : '—'}</dd>`).join('')}</dl>
+          <div style="margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:8px">
+            <b style="font-size:13px">씬 전체에 대표 지시</b> <span class="quiet" style="font-size:12px">— 고른 컷마다 감독이 앞뒤 컷과 이어지게 프롬프트(한글·영어)를 고칩니다(글만 · 영상은 컷마다)</span>
+            <textarea id="sNote" class="pnote" placeholder="예:&#10;C1 끝에서 린이 휴대폰을 꺼내는 동작 → C2는 그 손 클로즈업에서 시작&#10;씬 내내 린은 화면 왼쪽, 빛은 왼쪽 통유리에서"></textarea>
+            <div class="row" style="gap:8px;margin-top:6px;flex-wrap:wrap">${cs.map(c => `<label style="display:flex;gap:4px;align-items:center;font-size:12.5px;margin:0"><input type="checkbox" data-ssel="${c.id}" checked style="width:auto"> C${c.cut_no}</label>`).join('')}
+              <button class="btn small primary" id="sApply" style="margin-left:auto">고른 컷 프롬프트 반영</button></div>
+            ${noKo.length ? `<div style="margin-top:6px"><button class="btn small" id="sKo">한글 프롬프트 만들기 (${noKo.length}컷)</button></div>` : ''}
+          </div></div>
+      </div>
+      <div class="quiet" style="font-size:12px;margin:14px 0 4px">컷 순서대로 영상·프롬프트, 그 사이에 연결(↓)을 보여 줍니다</div>
+      ${rows}
+    </div></div>`;
+  const key = ev => { if (ev.key === 'Escape' && !ev.target.closest('textarea')) close(); };
+  function close() { box.querySelectorAll('video').forEach(v => v.pause()); box.remove(); document.removeEventListener('keydown', key); }
+  box.onclick = ev => { if (ev.target === box) close(); };
+  document.addEventListener('keydown', key); document.body.appendChild(box);
+  box.querySelector('#zClose').onclick = close;
+  // 이어서 보기: 영상 있는 컷을 차례로
+  const pv = box.querySelector('#sPlay');
+  if (pv) {
+    let k = -1;
+    const go = i => { const x = vids[i]; if (!x?.v) return; k = i; pv.src = x.v.src; if (x.v.poster) pv.poster = x.v.poster;
+      box.querySelector('#sNow').textContent = `지금 C${x.c.cut_no} (${playable.indexOf(x) + 1}/${playable.length})`;
+      box.querySelectorAll('[data-sjump]').forEach(b => b.classList.toggle('primary', +b.dataset.sjump === i));
+      box.querySelectorAll('.scut').forEach(r => r.classList.toggle('on', r.dataset.scut === x.c.id));
+      pv.play().catch(() => {}); };
+    const first = vids.findIndex(x => x.v); go(first); pv.pause();
+    pv.onended = () => { const n = vids.findIndex((x, i) => i > k && x.v); if (n >= 0) go(n); else box.querySelector('#sNow').textContent = '씬 끝'; };
+    box.querySelector('#sPlayAll').onclick = () => go(first);
+    box.querySelectorAll('[data-sjump]').forEach(b => b.onclick = () => go(+b.dataset.sjump));
+  }
+  box.querySelectorAll('[data-sopen]').forEach(b => b.onclick = () => { close(); flowPromptPopup(b.dataset.sopen); });
+  const sk = box.querySelector('#sKo'); if (sk) sk.onclick = guard(async () => {
+    await q(S.sb.from('pipeline_tasks').insert(noKo.map(c => ({ kind: 'director', episode_id: S.flowEp.id, scene_no: c.scene_no, cut_id: c.id, payload: { cut_id: c.id, mode: 'ko' } }))));
+    toast(`한글 프롬프트 ${noKo.length}컷을 만드는 중입니다. 조금 뒤 다시 열어 보세요`); sk.disabled = true;
+  });
+  box.querySelector('#sApply').onclick = guard(async () => {
+    const note = box.querySelector('#sNote').value.trim(); if (!note) return toast('씬 전체에 줄 대표 지시를 써 주세요');
+    const pick = cs.filter(c => box.querySelector(`[data-ssel="${c.id}"]`)?.checked); if (!pick.length) return toast('반영할 컷을 고르세요');
+    const ep = S.flowEp;
+    for (const c of pick) {
+      const fr = `[대표 지시 — 최우선 · S#${no} 씬 전체] ${note}\n(이 컷은 C${c.cut_no}. 씬 안 앞뒤 컷과 자연스럽게 이어지게 — 시작 자세는 앞 컷 끝, 끝 동작은 다음 컷 시작과 맞춘다)`;
+      await q(S.sb.from('production_cuts').update({ fix_request: fr, status: 'designed' }).eq('id', c.id));
+      await q(S.sb.from('pipeline_tasks').insert({ kind: 'director', episode_id: ep.id, scene_no: c.scene_no, cut_id: c.id, payload: { cut_id: c.id } }));
+    }
+    try { await q(S.sb.from('episode_notes').insert({ episode_id: ep.id, scene_no: no, priority: 'must', important: true, content: `[대표 지시 · 제작실 · S#${no} 씬 전체] ${note}`.slice(0, 2000) })); } catch (e) {}
+    toast(`감독이 S#${no}의 ${pick.length}컷 프롬프트를 고치는 중입니다(글만). 끝나면 다시 열어 확인하세요`);
+    box.querySelector('#sNote').value = '';
+  });
+}
 function sceneCard(no, cs, takes, urls, pkg, rate, hasWin, isOpen, info, last) {
   info = info || {};
   const h = (cs[0]?.scene_heading || pkg?.heading || '').replace(/^\S*S#\s*\d+\s*\|?\s*/, '').split('|').map(s => s.trim()).filter(Boolean);
