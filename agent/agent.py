@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.42.2"
+VERSION = "1.42.3"
 
 import base64
 import glob
@@ -3896,6 +3896,9 @@ def t_bible_extract(t):
     ov = rpc("agent_bible_overview", p_token=TOKEN, p_series=sid, p_episode=t.get("episode_id") or p.get("episode_id")) or {}
     title = (ov.get("series") or {}).get("title", "")
     known = [{k: e.get(k) for k in ("category", "name", "summary")} for e in ov.get("entries") or []]
+    # 대본 파일 앞부분에서 가져온 작품 공통 설정(캐릭터 정의·외형 단계·공통 규칙) — 인물 묘사의 1차 근거
+    common = "\n\n".join(f"[{e.get('name')}]\n{e.get('description')}" for e in ov.get("entries") or []
+                         if e.get("category") == "style" and (e.get("description") or "").strip())[:12000]
     eps = [e for e in ov.get("episodes") or [] if (e.get("text") or "").strip()]
     if not eps:
         return "읽을 대본이 없습니다"
@@ -3914,7 +3917,7 @@ def t_bible_extract(t):
     total = {"new_entries": 0, "proposals": 0}
     for e in eps:
         progress(f"작가실이 {e['number']}화에서 필요한 인물·장소·소품을 찾는 중")
-        user = f"시리즈: {title}\n\n[이미 바이블에 있는 항목]\n{json.dumps(known, ensure_ascii=False)}\n\n[{e['number']}화 {e.get('title') or ''} 대본]\n{(e.get('text') or '')[:60000]}"
+        user = f"시리즈: {title}\n\n" + (f"[작품 공통 설정 — 대표가 정한 캐릭터 정의·외형 단계·규칙. 인물 description·details는 이 정의를 그대로 따른다(나이·국적·외형·의상 단계 코드 포함)]\n{common}\n\n" if common else "") + f"[이미 바이블에 있는 항목]\n{json.dumps(known, ensure_ascii=False)}\n\n[{e['number']}화 {e.get('title') or ''} 대본]\n{(e.get('text') or '')[:60000]}"
         text, _ = claude("claude-opus-5-5", system, user, max_tokens=8000, stage="other", note=f"바이블 필요 항목 추출: {title} {e['number']}화")
         items = pick_json(text).get("items") or []
         for it in items:
