@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.42.0"
+VERSION = "1.42.1"
 
 import base64
 import glob
@@ -5603,10 +5603,18 @@ def t_edit_command(t):
 remake의 instruction은 감독이 바로 프롬프트에 옮길 수 있게 구체적으로(대표가 한 말 그대로 + 앞뒤 컷과의 연결). 한 컷에 여러 요청이면 하나로 합친다.
 색보정·화면 효과처럼 둘 다 안 되는 것만 summary로 설명한다.
 {EDIT_OPS}
-답 형식: <json>{{"ops": [...], "remake": [{{"clip": "클립 id", "instruction": "감독에게 갈 대표 지시"}}], "summary": "무엇을 바꿨고 무엇을 다시 만들게 했는지 한두 줄(한국어)"}}</json>"""
+답 형식: <json>{{"ops": [...], "remake": [{{"clip": "클립 id", "instruction": "감독에게 갈 대표 지시"}}], "summary": "무엇을 바꿨고 무엇을 다시 만들게 했는지 한두 줄(한국어)"}}</json>
+JSON 글자 안에서는 큰따옴표(")를 쓰지 않는다 — 대사나 인용은 ‘ ’ 또는 「 」로 쓴다."""
     user = f"[대표 지시]\n{p.get('text')}\n\n[클립 {len(table)}개, 전체 {total:.1f}초]\n{json.dumps(table, ensure_ascii=False)}\n\n[음악]\n{json.dumps(music, ensure_ascii=False)}\n\n[자막]\n{json.dumps(subs, ensure_ascii=False)}"
-    text, _ = claude("claude-sonnet-5-5", system, user, max_tokens=3000, stage="edit", episode_id=(ed.get("episode") or {}).get("id"), note="말로 편집")
-    res = pick_json(text)
+    res = {}
+    for attempt in range(2):   # 답의 JSON이 깨지면(글자 안 큰따옴표 등) 한 번 더
+        text, _ = claude("claude-sonnet-5-5", system, user + ("" if not attempt else "\n\n[중요] 지난 답의 JSON이 깨졌다(글자 안의 큰따옴표 등). 글자 안에는 큰따옴표를 쓰지 말고, <json>{...}</json> 하나만."),
+                         max_tokens=6000, stage="edit", episode_id=(ed.get("episode") or {}).get("id"), note="말로 편집" + (" (다시)" if attempt else ""))
+        res = safe_json(text)
+        if res:
+            break
+    if not res:
+        raise RuntimeError("편집 보조의 답을 읽지 못했습니다(두 번 시도). 말을 조금 나눠서 다시 해 주세요")
     done = apply_ops(tl, res.get("ops"))
     # 영상을 다시 만들어야 하는 것: 감독(대표 지시 — 최우선) → 바로 생성 → 새 영상이 통과하면 편집실 타임라인에서 자동 교체
     sent = []
