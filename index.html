@@ -7355,7 +7355,8 @@ async function viewEpisode(pane, ep) {
   pane.innerHTML = `
   <div class="card">
     <div class="row"><h2 style="margin:0">${ep.number}화 ${esc(ep.title || '')}</h2>
-      <select id="epStatus" style="width:auto;margin-left:auto">${Object.entries(EP_STATUS).map(([k, l]) => `<option value="${k}" ${k === ep.status ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      <select id="epStatus" style="width:auto;margin-left:auto">${Object.entries(EP_STATUS).map(([k, l]) => `<option value="${k}" ${k === ep.status ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <button class="btn small" id="epDel" style="border-color:var(--bad);color:var(--bad)">이 화 지우기</button></div>
   </div>
   <div id="propBox"></div>
   <div id="notesBox"></div>
@@ -7387,6 +7388,12 @@ async function viewEpisode(pane, ep) {
   <div id="detail"></div>`;
 
   if (!document.contains(pane)) return;   // 그사이 대본 탭이 다시 그려졌으면 옛 그리기는 멈춘다
+  $('#epDel').onclick = guard(async () => {
+    if (!confirm(`${ep.number}화${ep.title ? ' ' + ep.title : ''}를 지웁니다.\n대본(모든 버전)·컷·영상 기록·편집·연출 메모·작업이 모두 지워지고 되살릴 수 없습니다.\n(비용 기록은 남습니다. 저장소·컴퓨터에 받은 영상 파일은 그대로입니다)`)) return;
+    if (prompt(`정말 지우려면 "${ep.number}화"라고 입력하세요`) !== `${ep.number}화`) return;
+    await q(S.sb.rpc('owner_delete_episode', { p_episode: ep.id }));
+    S.episodeId = null; S.versionId = null; toast(`${ep.number}화를 지웠습니다`); go('scripts');
+  });
   $('#epStatus').onchange = guard(async e => { await q(S.sb.from('episodes').update({ status: e.target.value }).eq('id', ep.id)); toast('상태를 바꿨습니다'); });
   $('#file').onchange = e => {
     const f = e.target.files[0]; if (!f) return;
