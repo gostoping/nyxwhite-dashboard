@@ -8392,8 +8392,22 @@ async function viewBible(main) {
   const shownProps = proposals.filter(p => inCat(entryOf(p.entry_id)));
   const EXTRACT_REASON = '대본에서 필요 항목으로 추출';
   const extractProps = shownProps.filter(p => p.change_reason === EXTRACT_REASON);
-  const photoTodo = entries.filter(e => inCat(e) && PHOTO_CATS.includes(e.category) && e.photo_source !== 'upload'
+  // 사진을 만드는 건 필수 항목(인물·협찬)뿐: 대본에서 나온 장소·소품·배경은 사진 없이 묘사로 적용(대표 결정)
+  const photoTodo = entries.filter(e => inCat(e) && PHOTO_CATS.includes(e.category) && e.photo_source !== 'upload' && e.essential !== false
     && cur(e.id) && !(cur(e.id).image_paths || []).length);
+  const photoWhy = () => {   // 만들 게 없을 때: 왜 없는지
+    const inC = entries.filter(e => inCat(e) && PHOTO_CATS.includes(e.category));
+    const nonEss = inC.filter(e => e.essential === false).length;
+    const notApplied = inC.filter(e => e.essential !== false && !cur(e.id)).map(e => e.name);
+    const upload = inC.filter(e => e.essential !== false && cur(e.id) && e.photo_source === 'upload' && !(cur(e.id).image_paths || []).length).map(e => e.name);
+    const done = inC.filter(e => e.essential !== false && cur(e.id) && (cur(e.id).image_paths || []).length).length;
+    const nm = a => a.slice(0, 8).join(', ') + (a.length > 8 ? ` 외 ${a.length - 8}개` : '');
+    return [`사진을 새로 만들 ${catLabel ? catLabel + ' ' : ''}항목이 없습니다.`, '',
+      done ? `· 사진이 이미 적용된 항목 ${done}개` : '',
+      notApplied.length ? `· 묘사가 아직 적용되지 않은 인물·협찬 ${notApplied.length}개(${nm(notApplied)}) — 카드에서 수정안을 먼저 적용하면 만들 수 있습니다` : '',
+      upload.length ? `· '직접 올리기'로 둔 항목 ${upload.length}개(${nm(upload)}) — 사진을 올려 주세요` : '',
+      nonEss ? `· 장소·소품·배경 ${nonEss}개는 사진 없이 묘사로 적용하는 항목이라 만들지 않습니다(필요하면 카드에서 '협찬으로 지정')` : ''].filter(x => x !== '').join('\n');
+  };
   const hasPhotoSrc = entries.some(e => 'photo_source' in e);
   const showPhotoBtn = S.bibleCat === 'all' || S.bibleCat === 'sponsor' || PHOTO_CATS.includes(S.bibleCat);
 
@@ -8675,7 +8689,7 @@ async function viewBible(main) {
   }
   const bphotos = $('#bphotos');
   if (bphotos) bphotos.onclick = guard(async () => {
-    if (!photoTodo.length) return toast(`사진을 만들 ${catLabel || ''} 항목이 없습니다(적용된 묘사가 있고, 사진이 없고, '자동으로 만들기'인 항목만 만듭니다)`);
+    if (!photoTodo.length) return alert(photoWhy());
     const names = photoTodo.map(e => e.name);
     const how = await askChoice('사진 한꺼번에 만들기', `${photoTodo.length}개 항목: ${names.slice(0, 20).join(', ')}${names.length > 20 ? ' …' : ''}\n항목마다 후보를 만들고 코디네이터가 한 장씩 확인해 추천 사진을 고릅니다.\n(Higgsfield 비용)`, [
       { value: 'only', label: '추천만 받기', desc: '카드마다 후보와 추천 표시를 보고 내가 골라 적용합니다' },
@@ -8683,6 +8697,7 @@ async function viewBible(main) {
     if (!how) return;
     const n = await queuePhotos(photoTodo, cur, null, how === 'auto');
     const msg = photoSkipText(n);
+    if (!n && !(S.photoSkip?.waiting || []).length && !(S.photoSkip?.making || []).length) { alert(photoWhy()); return; }
     if ((S.photoSkip?.waiting || []).length || !n) alert('사진 한꺼번에 만들기\n\n' + msg.split(' · ').join('\n'));
     else toast(msg);
     go('bible');
