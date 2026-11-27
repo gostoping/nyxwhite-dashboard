@@ -7776,9 +7776,10 @@ function appearsLine(e, c) {
   return `<div class="row" style="gap:6px;margin-top:6px">${need ? pill(e.photo_source === 'upload' ? '사진 직접 올릴 예정' : '사진 필요', 'warn') : ''}${e.origin === 'script' ? pill('대본에서 찾음') : ''}${txt ? `<span class="quiet">등장: ${esc(txt)}</span>` : ''}</div>`;
 }
 // 사진 없는 인물·장소·배경·소품에 사진 디자인을 한꺼번에 맡긴다
-async function queuePhotos(entries, curOf, only, auto = false) {
+async function queuePhotos(entries, curOf, only, auto = false, all = false) {
   // 이미 사진 요청이 있는 항목은 건너뛰되, 이유를 항목별로 모은다(S.photoSkip). 요청은 있는데 맡은 작업이 없으면(작업이 사라짐) 다시 맡긴다.
-  const cand = entries.filter(e => PHOTO_CATS.includes(e.category) && e.photo_source !== 'upload' && e.essential !== false && (!only || only.has(e.id))
+  // all: 장소·소품·배경(묘사로 적용 항목)도 사진을 만든다(대표가 '사진 한꺼번에 만들기'를 누른 경우)
+  const cand = entries.filter(e => PHOTO_CATS.includes(e.category) && e.photo_source !== 'upload' && (all || e.essential !== false) && (!only || only.has(e.id))
     && curOf(e.id) && !(curOf(e.id).image_paths || []).length);
   const des = cand.length ? await q(S.sb.from('photo_designs').select('id,entry_id,status,created_at').in('entry_id', cand.map(e => e.id))
     .in('status', ['queued', 'ready', 'training', 'set_ready']).order('created_at', { ascending: false })) : [];
@@ -8213,7 +8214,9 @@ function essLine(e, c) {
   if (e.origin === 'sponsor' || e.essential) return `<div class="essline">${pill('필수 · 협찬', 'accent')}<span class="quiet">사진을 만들어 고정하고 코디네이터가 감수합니다.</span>
     ${e.origin === 'sponsor' ? `<button class="btn small" data-spon="${esc(e.id)}" data-v="0" style="margin-left:auto" title="협찬에서 빼고 대본 항목(묘사로 적용)으로 돌립니다">협찬 해제</button>` : ''}</div>`;
   const refs = e.refs || [];
-  return `<div class="essline">${pill('묘사로 적용')}<span class="quiet">사진을 따로 만들지 않습니다. 이 묘사(영어 프롬프트)로 장면을 만들고, 만들어진 장면 사진이 아래 참고 사진으로 쌓여(최근 6장) 다음 컷·다음 화도 같은 모습으로 나옵니다.</span>
+  const hasImg = ((S.bibleCur || {})[e.id]?.image_paths || []).length;
+  return `<div class="essline">${pill(hasImg ? '기준 사진 적용' : '묘사로 적용')}<span class="quiet">${hasImg ? '적용된 사진의 무드(재질·색감·조명·공간감)를 장면에 참고합니다. 사진의 구도는 따라 하지 않고 컷마다 감독 구도대로 만듭니다.'
+      : "아직 사진이 없어 이 묘사(영어 프롬프트)로 장면을 만듭니다. '사진 만들기'로 기준 사진을 만들어 적용하면 그 무드를 참고합니다. 만들어진 장면 사진도 아래 참고 사진으로 쌓입니다(최근 6장)."}</span>
     <button class="btn small spon" data-spon="${esc(e.id)}" data-v="1" style="margin-left:auto" title="협찬 ${e.category === 'prop' ? '소품' : '장소'}으로 지정: 필수 항목이 되어 사진을 직접 올리거나 후보에서 골라 고정하고, 코디네이터가 감수합니다">협찬으로 지정</button></div>
     ${refs.length ? `<div class="thumbs refthumbs">${refs.map(r => (S.refUrls || {})[r.path] ? `<a href="${esc(S.refUrls[r.path])}" target="_blank" rel="noopener" title="${esc((r.ep ? r.ep + '화 ' : '') + (r.cut || ''))}"><img src="${esc(S.refUrls[r.path])}" alt="참고 사진" loading="lazy"></a>` : '').join('')}</div>
       <div class="quiet" style="font-size:12px">쌓인 참고 사진 ${refs.length}장 · ${esc(refs.map(r => (r.ep ? r.ep + '화 ' : '') + (r.cut || '')).join(', '))}</div>` : '<div class="quiet" style="font-size:12px;margin-top:2px">아직 이 항목이 나온 장면 사진이 없습니다(첫 컷을 만들면 쌓이기 시작).</div>'}`;
@@ -8392,15 +8395,15 @@ async function viewBible(main) {
   const shownProps = proposals.filter(p => inCat(entryOf(p.entry_id)));
   const EXTRACT_REASON = '대본에서 필요 항목으로 추출';
   const extractProps = shownProps.filter(p => p.change_reason === EXTRACT_REASON);
-  // 사진을 만드는 건 필수 항목(인물·협찬)뿐: 대본에서 나온 장소·소품·배경은 사진 없이 묘사로 적용(대표 결정)
-  const photoTodo = entries.filter(e => inCat(e) && PHOTO_CATS.includes(e.category) && e.photo_source !== 'upload' && e.essential !== false
+  // 사진 한꺼번에 만들기 대상: 바이블에 사진이 아직 적용되지 않은 모든 항목(인물·협찬·장소·소품·배경, '직접 올리기' 제외) — 대표 결정 11/27
+  const photoTodo = entries.filter(e => inCat(e) && PHOTO_CATS.includes(e.category) && e.photo_source !== 'upload'
     && cur(e.id) && !(cur(e.id).image_paths || []).length);
   const photoWhy = () => {   // 만들 게 없을 때: 왜 없는지
     const inC = entries.filter(e => inCat(e) && PHOTO_CATS.includes(e.category));
-    const nonEss = inC.filter(e => e.essential === false).length;
-    const notApplied = inC.filter(e => e.essential !== false && !cur(e.id)).map(e => e.name);
-    const upload = inC.filter(e => e.essential !== false && cur(e.id) && e.photo_source === 'upload' && !(cur(e.id).image_paths || []).length).map(e => e.name);
-    const done = inC.filter(e => e.essential !== false && cur(e.id) && (cur(e.id).image_paths || []).length).length;
+    const nonEss = 0;
+    const notApplied = inC.filter(e => !cur(e.id)).map(e => e.name);
+    const upload = inC.filter(e => cur(e.id) && e.photo_source === 'upload' && !(cur(e.id).image_paths || []).length).map(e => e.name);
+    const done = inC.filter(e => cur(e.id) && (cur(e.id).image_paths || []).length).length;
     const nm = a => a.slice(0, 8).join(', ') + (a.length > 8 ? ` 외 ${a.length - 8}개` : '');
     return [`사진을 새로 만들 ${catLabel ? catLabel + ' ' : ''}항목이 없습니다.`, '',
       done ? `· 사진이 이미 적용된 항목 ${done}개` : '',
@@ -8695,7 +8698,7 @@ async function viewBible(main) {
       { value: 'only', label: '추천만 받기', desc: '카드마다 후보와 추천 표시를 보고 내가 골라 적용합니다' },
       { value: 'auto', label: '추천하고 자동 반영', desc: '추천 사진으로 (인물은 얼굴 고정·기준 사진까지) 바이블 적용까지 한 번에', primary: true }]);
     if (!how) return;
-    const n = await queuePhotos(photoTodo, cur, null, how === 'auto');
+    const n = await queuePhotos(photoTodo, cur, null, how === 'auto', true);
     const msg = photoSkipText(n);
     if (!n && !(S.photoSkip?.waiting || []).length && !(S.photoSkip?.making || []).length) { alert(photoWhy()); return; }
     if ((S.photoSkip?.waiting || []).length || !n) alert('사진 한꺼번에 만들기\n\n' + msg.split(' · ').join('\n'));
