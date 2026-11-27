@@ -12562,7 +12562,7 @@ function edAt(t) { return ED.L.clips.find(x => t >= x.start - 0.0005 && t < x.st
 const edVids = () => [$('#eVid'), $('#eVid2')].filter(Boolean);
 function edV() { const vs = edVids(); return vs[(ED.vi || 0) % vs.length] || null; }
 function edOther() { const vs = edVids(); return vs.length > 1 ? vs[1 - ((ED.vi || 0) % 2)] : null; }
-const edUrl = x => x && ED.urls[takeOf(x.c).files?.preview];
+const edUrl = x => x && (ED.urls[takeOf(x.c).files?.preview] || takeOf(x.c).remote_url || null);
 function edNextOf(x) { return x ? ED.L.clips.find(y => y.start >= x.start + x.dur - 0.05 && y !== x) : null; }
 function edPreload(x) {   // 다음 컷을 숨은 플레이어에 미리(같은 파일을 이어 쓰는 컷이면 필요 없음)
   const o = edOther(), nx = edNextOf(x); if (!o || !nx) return;
@@ -12647,7 +12647,8 @@ function edNavBind() {
   edNavSync();
 }
 function edPlay(stopAt) {
-  if (!ED.L.clips.length) return;
+  if (!ED.L.clips.length) return toast('타임라인에 컷이 없습니다. 위의 "영상 가져오기"로 컷을 넣어 주세요');
+  ED.stall = null;
   if (ED.t >= ED.L.total - 0.05) ED.t = 0;
   ED.playing = true; ED.stopAt = stopAt; $('#ePlay').textContent = '❚❚';
   edShowFrame();
@@ -12659,6 +12660,7 @@ function edPlay(stopAt) {
     if (lp && (ED.t >= lp.start + lp.dur - 0.05 || ED.t < lp.start - 0.05)) { ED.t = lp.start; edShowFrame(); edV()?.play().catch(() => {}); }
     const v = edV(); const x = edAt(ED.t);
     if (x && v && !v.paused && v.dataset.src === edUrl(x)) {
+      ED.stall = null;
       ED.t = x.start + (v.currentTime - +x.c.in);
       if (lp && x === lp && v.currentTime >= +x.c.out - 0.04) { ED.t = lp.start; try { v.currentTime = +x.c.in; } catch {} }
       else if (v.currentTime >= +x.c.out - 0.04) {   // 컷 경계: 다음 컷으로
@@ -12669,7 +12671,16 @@ function edPlay(stopAt) {
         else edShowFrame();
       }
     } else if (!x) { ED.t += (now - last) / 1000; const nx = edAt(ED.t); if (nx) { edShowFrame(); edV()?.play().catch(() => {}); } }
-    else if (x && v && (v.paused || v.dataset.src !== edUrl(x))) { if (v.dataset.src !== edUrl(x)) edShowFrame(); edV()?.play().catch(() => {}); ED.t += (now - last) / 1000 * 0; }
+    else if (x && v && (v.paused || v.dataset.src !== edUrl(x))) {
+      // 영상을 못 불러오면(파일 없음·주소 만료·디코딩 실패) 멈춰 서지 않고 그 컷을 검은 화면으로 흘려보내며 이유를 알린다
+      const bad = !edUrl(x) ? '영상 파일이 아직 없습니다(생성·보관 전)' : v.error ? `영상을 열지 못했습니다(오류 ${v.error.code})` : null;
+      if (!ED.stall || ED.stall.id !== x.c.id) ED.stall = { id: x.c.id, at: now };
+      const stuck = bad || now - ED.stall.at > 4000;
+      if (stuck) {
+        ED.t += (now - last) / 1000;
+        if (!ED.warned?.has(x.c.id)) { (ED.warned ||= new Set()).add(x.c.id); toast(`${clipCode(x.c)}: ${bad || '영상이 4초 넘게 열리지 않아 건너뜁니다(인터넷·주소 만료 — 새로고침하면 다시 받습니다)'}`); }
+      } else { if (v.dataset.src !== edUrl(x)) edShowFrame(); edV()?.play().catch(() => {}); }
+    }
     last = now;
     edMusicSync(); edSyncSub(); edUiTime();
     if (!ED.loop && ED.t >= (ED.stopAt ?? ED.L.total) - 0.02) { edPause(); return; }
