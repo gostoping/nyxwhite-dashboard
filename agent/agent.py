@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.43.3"
+VERSION = "1.43.4"
 
 import base64
 import glob
@@ -4380,6 +4380,23 @@ def t_bible_prompt(t):
     if info.get("status") not in ("active", "proposed"):
         return "이미 다른 버전으로 바뀌었습니다"
     cat, name = info.get("category"), info.get("name")
+    if p.get("ko_only"):   # 카드의 '한글로 보기': 지금 영어 프롬프트의 한국어판만 만든다
+        en0 = (info.get("prompt_en") or "").strip()
+        if not en0:
+            return f"{name}: 아직 영어 프롬프트가 없습니다"
+        progress(f"{name}: 영어 프롬프트를 한국어로 옮기는 중")
+        ko = bible_ko_of_en(en0, name)
+        rpc("agent_bible_set_prompt_ko", p_token=TOKEN, p_version=info["version_id"], p_ko=ko)
+        return f"{name} 한글 프롬프트 {len(ko)}자"
+    if p.get("from_ko"):   # 대표가 카드에서 고친 한글 프롬프트 → 영어 프롬프트에 그대로 반영
+        ko = (p.get("text") or "").strip()
+        if len(ko) < 5:
+            raise RuntimeError("한글 프롬프트가 비어 있습니다")
+        progress(f"{name}: 대표가 고친 한글 프롬프트를 영어 프롬프트로 옮기는 중")
+        en = bible_en_of_ko(ko, cat, name)
+        rpc("agent_bible_set_prompt", p_token=TOKEN, p_version=info["version_id"], p_prompt=en)
+        rpc("agent_bible_set_prompt_ko", p_token=TOKEN, p_version=info["version_id"], p_ko=ko)
+        return f"{name}: 한글 프롬프트를 영어 프롬프트로 반영({len(en)}자)"
     if (info.get("description") or "").startswith("(작가실이 사진을 보고 쓰는 중)"):
         return f"{name}: 코디네이터가 사진을 보고 쓰는 중이라 건너뜀"
     if info.get("prompt_en") and not p.get("apply_reason") and not p.get("rerun"):
@@ -4454,7 +4471,37 @@ def t_bible_prompt(t):
         raise RuntimeError(f"묘사와 대본 모두에서 '{name}'의 영어 프롬프트를 만들지 못했습니다(세 번 시도). "
                            f"바이블 '{name}' 카드에서 한글 묘사를 자세히 적어 주세요(담을 것: {need}). {PROMPT_EXAMPLE.get(cat, '')}")
     rpc("agent_bible_set_prompt", p_token=TOKEN, p_version=info["version_id"], p_prompt=en)
+    try:   # 카드에서 대표가 읽고 고칠 수 있게 한국어판도 함께
+        rpc("agent_bible_set_prompt_ko", p_token=TOKEN, p_version=info["version_id"], p_ko=bible_ko_of_en(en, name))
+    except Exception as ex:
+        log(f"{name}: 한글 프롬프트 만들기 실패(영어는 그대로): {ex}")
     return f"{name} 영어 프롬프트 {len(en)}자 ({how})" + (f" · 요청 반영: {applied}" if p.get("apply_reason") and reason else "")
+
+
+def bible_ko_of_en(en, name=""):
+    """바이블 영어 프롬프트 → 대표가 읽고 고칠 한국어판(빠짐없이, 더하지 않고)."""
+    txt, _ = claude("claude-sonnet-5-5", "너는 드라마 제작팀의 코디네이터다. 사진·영상 생성용 영어 프롬프트를 대표가 읽고 고칠 수 있게 자연스러운 한국어로 옮긴다. "
+                    "내용을 하나도 빼거나 더하지 않는다(색·재질·수치·금지 사항까지). 문장은 짧게, 특징마다 쉼표나 줄로 나눠 읽기 쉽게. 답은 <json>{\"ko\": \"\"}</json>",
+                    en, max_tokens=3000, stage="other", note=f"바이블 한글 프롬프트: {name}")
+    ko = (safe_json(txt).get("ko") or "").strip()
+    if not ko:
+        raise RuntimeError("한글 프롬프트를 만들지 못했습니다")
+    return ko
+
+
+def bible_en_of_ko(ko, cat, name=""):
+    """대표가 고친 한글 프롬프트 → 영어 프롬프트(대표 문장을 그대로 따르고, 생성 모델 규칙만 지킨다)."""
+    sysm = ("너는 드라마 제작팀의 코디네이터다. 대표가 고친 한국어 프롬프트를 사진·영상 생성 모델에 넣을 영어 고정 프롬프트로 옮긴다. "
+            "대표 문장의 내용을 하나도 빼거나 바꾸거나 더하지 않는다(대표 지시가 최우선). 현재형, 쉼표로 이어진 묘사 위주. "
+            "한글은 한 글자도 쓰지 않는다. 이름·실존 인물·배우·브랜드 이름은 빼고 그 특징만 쓴다. 신체를 성적으로 강조하는 표현은 뜻을 살려 완곡하게. "
+            "답은 <json>{\"prompt_en\": \"\"}</json>")
+    for k in range(2):
+        txt, _ = claude("claude-sonnet-5-5", sysm, f"분류: {cat}\n[대표 한글 프롬프트]\n{ko}" + ("\n\n[중요] 지난 답이 형식에 맞지 않았다. <json> 하나만." if k else ""),
+                        max_tokens=3000, stage="other", note=f"바이블 한글→영어 프롬프트: {name}")
+        en = clean_en(txt)
+        if en:
+            return en
+    raise RuntimeError("한글 프롬프트를 영어로 옮기지 못했습니다(두 번 시도). 문장을 조금 더 구체적으로 적어 다시 눌러 주세요")
 
 
 def safe_prompt(prompt, name=""):
