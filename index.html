@@ -506,7 +506,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.42.1"
+VERSION = "1.42.2"
 
 import base64
 import glob
@@ -1762,7 +1762,7 @@ def prompt_ko_task(t, cut, ctx):
             break
     if not r.get("prompt"):
         raise RuntimeError("감독이 영어 프롬프트를 만들지 못했습니다 — " + ("답이 길이 제한에 잘림" if CURRENT.get("last_stop") == "max_tokens" else "답 형식(JSON)이 깨짐") + " (두 번 시도)")
-    then_gen = bool(p.get("then_generate"))
+    then_gen = bool(p.get("then_generate")) or owner_approved(cid)
     rpc("agent_update_cut", p_token=TOKEN, p_id=cid, p={"prompt": tidy_prompt(r["prompt"]), "prompt_ko": (r.get("prompt_ko") or "").strip() or new_ko, "clear_fix": True,
                                                          "status": "approved" if then_gen else "designed",
                                                          "director_note": "대표가 한글 프롬프트를 직접 고침: " + (r.get("summary") or "")[:200]})
@@ -2358,8 +2358,9 @@ def director_revise(t, cut_id):
     refs = has_images(ctx, new.get("reference_names") or cut.get("reference_names"))
     secs = max(4, min(15, int(new.get("seconds") or cut.get("seconds") or 10)))
     then_gen = bool((t.get("payload") or {}).get("then_generate"))   # 대표가 '보완해서 다시 만들기'로 생성까지 맡긴 것
+    keep_ok = owner_approved(cut_id)   # 감독이 고치는 사이 대표가 이미 승인했으면 그 승인을 지우지 않는다
     rpc("agent_update_cut", p_token=TOKEN, p_id=cut_id, p={
-        "status": "approved" if then_gen else "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"), "staging": new.get("staging") if isinstance(new.get("staging"), dict) else None, "camera": new.get("camera") or None, "prompt_ko": new.get("prompt_ko") or None,
+        "status": "approved" if (then_gen or keep_ok) else "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"), "staging": new.get("staging") if isinstance(new.get("staging"), dict) else None, "camera": new.get("camera") or None, "prompt_ko": new.get("prompt_ko") or None,
         "shot_sheet": new.get("sheet") if isinstance(new.get("sheet"), dict) else (cut.get("shot_sheet") or None),
         "reference_names": refs, "director_note": new.get("director_note"), "est_usd": est_cut_usd(ctx, secs, refs), "clear_fix": True,
         "voice_lines": new.get("voice_lines") or cut.get("voice_lines") or [], "frame_first": new.get("frame_first") or {"prompt": (cut.get("frame_first") or {}).get("prompt")},
@@ -3570,6 +3571,14 @@ def t_generate(t):
         raise
 
 
+def owner_approved(cut_id):
+    """지금 이 컷이 대표 승인 상태인지(승인됨·생성 중). 감독이 고친 뒤 승인을 지우지 않으려고 저장 직전에 다시 읽는다."""
+    try:
+        return (rpc("agent_get_cut", p_token=TOKEN, p_id=cut_id) or {}).get("status") in ("approved", "generating")
+    except Exception:
+        return False
+
+
 def _generate(t):
     cut = rpc("agent_get_cut", p_token=TOKEN, p_id=t["cut_id"])
     if not cut:
@@ -3583,6 +3592,11 @@ def _generate(t):
             rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "designed"})
             raise RuntimeError("감독 보완이 25분 넘게 끝나지 않아 생성을 멈췄습니다(감독 일이 실패했을 수 있음). 제작 탭에서 확인하고 다시 눌러 주세요")
         raise Retry(30, "감독이 보완하는 중 — 끝나면 바로 만듭니다")
+    if cut["status"] in ("designed",) and (t.get("payload") or {}).get("after_director"):
+        # 대표가 클릭으로 승인한 '감독 보완 뒤 생성' 일 — 감독이 상태를 '설계됨'으로 되돌렸어도 대표 승인은 유효하다
+        rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "approved"})
+        cut["status"] = "approved"
+        log(f"{cut.get('code')} 대표 승인 유지 — 감독 보완이 끝나 바로 만듭니다")
     if cut["status"] not in ("approved", "generating"):
         return f"생성 승인 상태가 아니어서 건너뜀 ({cut['status']})"
     ep = cut["episode_id"]
@@ -11935,11 +11949,15 @@ async function edPendRender() {
   const since = id => new Date(pend[id].since || 0).getTime() - 60e3;
   const last = (id, kind) => (tasks || []).find(t => t.cut_id === id && t.kind === kind && new Date(t.created_at).getTime() >= since(id));
   const ago = s => { if (!s) return ''; const m = Math.round((Date.now() - new Date(s)) / 60000); return m < 1 ? '방금' : m < 60 ? `${m}분 전` : `${Math.floor(m / 60)}시간 전`; };
+  // 승인했는데 감독 수정 뒤 컷이 '설계됨'으로 돌아가 생성 일이 건너뛰어진 경우(옛 버전 에이전트)
+  const lost = id => { const d = pend[id], c = C[id] || {}, gen = last(id, 'generate'), dir = last(id, 'director');
+    return !!d.approved && ['designed', 'hold'].includes(c.status) && !(gen && ['queued', 'running'].includes(gen.status)) && !(dir && ['queued', 'running'].includes(dir.status)); };
   const stage = id => {
     const d = pend[id], c = C[id] || {}, dir = last(id, 'director'), gen = last(id, 'generate');
     if (dir?.status === 'failed') return { k: 'bad', t: '감독 수정 실패', why: dir.error };
     if (dir && ['queued', 'running'].includes(dir.status)) return dir.status === 'queued' ? { k: 'wait', t: '감독 대기', why: '감독 차례를 기다리는 중' } : { k: 'run', t: '감독 고치는 중', why: dir.progress || '', at: dir.started_at };
     if (!d.approved) return { k: 'need', t: '승인 대기', why: dir?.status === 'done' ? `감독이 고침(${ago(dir.finished_at)}) · 승인하면 만듭니다` : '승인하면 감독이 고친 뒤 이어서 만듭니다' };
+    if (lost(id)) return { k: 'need', t: '승인이 풀림 — 다시 승인해 주세요', why: '감독이 고치면서 승인이 지워져 영상이 만들어지지 않았습니다(비용 없음). 아래 버튼을 누르면 바로 만듭니다' };
     if (gen?.status === 'failed' || c.status === 'failed') return { k: 'bad', t: '생성 실패', why: gen?.error || '제작 탭에서 이유 확인' };
     if (gen && gen.status === 'queued') return { k: 'wait', t: '생성 대기', why: gen.progress || '차례를 기다리는 중' };
     if (gen && gen.status === 'running') return { k: 'run', t: '생성 중', why: gen.progress || '', at: gen.started_at };
@@ -11950,7 +11968,7 @@ async function edPendRender() {
   };
   const st = Object.fromEntries(ids.map(id => [id, stage(id)]));
   const cnt = k => ids.filter(id => st[id].k === k).length;
-  const need = ids.filter(id => pend[id].need_approve && !pend[id].approved);
+  const need = ids.filter(id => (pend[id].need_approve && !pend[id].approved) || lost(id));
   const cost = need.reduce((s, id) => s + Number(C[id]?.est_usd || ED.cuts.find(c => c.id === id)?.est_usd || 0), 0);
   const color = { ok: 'var(--good)', bad: 'var(--bad)', run: 'var(--accent)', wait: 'var(--quiet)', need: '#c06a00' };
   box.innerHTML = `<div class="flowbox" style="border-color:#e08a00">

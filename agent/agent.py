@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.42.1"
+VERSION = "1.42.2"
 
 import base64
 import glob
@@ -1266,7 +1266,7 @@ def prompt_ko_task(t, cut, ctx):
             break
     if not r.get("prompt"):
         raise RuntimeError("감독이 영어 프롬프트를 만들지 못했습니다 — " + ("답이 길이 제한에 잘림" if CURRENT.get("last_stop") == "max_tokens" else "답 형식(JSON)이 깨짐") + " (두 번 시도)")
-    then_gen = bool(p.get("then_generate"))
+    then_gen = bool(p.get("then_generate")) or owner_approved(cid)
     rpc("agent_update_cut", p_token=TOKEN, p_id=cid, p={"prompt": tidy_prompt(r["prompt"]), "prompt_ko": (r.get("prompt_ko") or "").strip() or new_ko, "clear_fix": True,
                                                          "status": "approved" if then_gen else "designed",
                                                          "director_note": "대표가 한글 프롬프트를 직접 고침: " + (r.get("summary") or "")[:200]})
@@ -1862,8 +1862,9 @@ def director_revise(t, cut_id):
     refs = has_images(ctx, new.get("reference_names") or cut.get("reference_names"))
     secs = max(4, min(15, int(new.get("seconds") or cut.get("seconds") or 10)))
     then_gen = bool((t.get("payload") or {}).get("then_generate"))   # 대표가 '보완해서 다시 만들기'로 생성까지 맡긴 것
+    keep_ok = owner_approved(cut_id)   # 감독이 고치는 사이 대표가 이미 승인했으면 그 승인을 지우지 않는다
     rpc("agent_update_cut", p_token=TOKEN, p_id=cut_id, p={
-        "status": "approved" if then_gen else "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"), "staging": new.get("staging") if isinstance(new.get("staging"), dict) else None, "camera": new.get("camera") or None, "prompt_ko": new.get("prompt_ko") or None,
+        "status": "approved" if (then_gen or keep_ok) else "designed", "prompt": new["prompt"], "expression_beats": new.get("expression_beats") or cut.get("expression_beats"), "staging": new.get("staging") if isinstance(new.get("staging"), dict) else None, "camera": new.get("camera") or None, "prompt_ko": new.get("prompt_ko") or None,
         "shot_sheet": new.get("sheet") if isinstance(new.get("sheet"), dict) else (cut.get("shot_sheet") or None),
         "reference_names": refs, "director_note": new.get("director_note"), "est_usd": est_cut_usd(ctx, secs, refs), "clear_fix": True,
         "voice_lines": new.get("voice_lines") or cut.get("voice_lines") or [], "frame_first": new.get("frame_first") or {"prompt": (cut.get("frame_first") or {}).get("prompt")},
@@ -3074,6 +3075,14 @@ def t_generate(t):
         raise
 
 
+def owner_approved(cut_id):
+    """지금 이 컷이 대표 승인 상태인지(승인됨·생성 중). 감독이 고친 뒤 승인을 지우지 않으려고 저장 직전에 다시 읽는다."""
+    try:
+        return (rpc("agent_get_cut", p_token=TOKEN, p_id=cut_id) or {}).get("status") in ("approved", "generating")
+    except Exception:
+        return False
+
+
 def _generate(t):
     cut = rpc("agent_get_cut", p_token=TOKEN, p_id=t["cut_id"])
     if not cut:
@@ -3087,6 +3096,11 @@ def _generate(t):
             rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "designed"})
             raise RuntimeError("감독 보완이 25분 넘게 끝나지 않아 생성을 멈췄습니다(감독 일이 실패했을 수 있음). 제작 탭에서 확인하고 다시 눌러 주세요")
         raise Retry(30, "감독이 보완하는 중 — 끝나면 바로 만듭니다")
+    if cut["status"] in ("designed",) and (t.get("payload") or {}).get("after_director"):
+        # 대표가 클릭으로 승인한 '감독 보완 뒤 생성' 일 — 감독이 상태를 '설계됨'으로 되돌렸어도 대표 승인은 유효하다
+        rpc("agent_update_cut", p_token=TOKEN, p_id=cut["id"], p={"status": "approved"})
+        cut["status"] = "approved"
+        log(f"{cut.get('code')} 대표 승인 유지 — 감독 보완이 끝나 바로 만듭니다")
     if cut["status"] not in ("approved", "generating"):
         return f"생성 승인 상태가 아니어서 건너뜀 ({cut['status']})"
     ep = cut["episode_id"]
