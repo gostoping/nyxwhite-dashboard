@@ -506,7 +506,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.42.3"
+VERSION = "1.43.0"
 
 import base64
 import glob
@@ -1210,8 +1210,10 @@ def bible_text(ctx, limit=60):
         rows.append(f"- [{b.get('category')}] {b.get('name')}: {main}"
                     + (f" / 한국어 원문(참고): {b.get('description')}" if en and b.get("description") and b.get("description") != en else "")
                     + (f" / 고정 특징: {b.get('details')}" if b.get("details") else "")
+                    + (f" / ★모습 단계: {b.get('same_as')}의 '{b.get('stage')}' 단계(같은 사람). 대본에 '{b.get('same_as')}({b.get('stage')})'로 적힌 컷은 이 항목의 얼굴·체형·머리·의상을 쓰고, 목소리·눈·팔찌 같은 공통 특징은 {b.get('same_as')} 항목을 따른다"
+                       + ("" if b.get("images") else f" (이 단계 사진이 없으면 {b.get('same_as')}의 사진으로 얼굴만 참고)") if b.get("stage") and b.get("same_as") else "")
                     + (f" / 동일인: {b.get('same_as')}와 같은 사람(다른 시점·호칭). 이름·목소리·버릇·정체성은 이어지고, 외모는 이 항목 묘사를 따른다"
-                       + ("" if b.get("images") else f", 이 항목 사진이 없으면 {b.get('same_as')}의 사진을 참고") if b.get("same_as") else "")
+                       + ("" if b.get("images") else f", 이 항목 사진이 없으면 {b.get('same_as')}의 사진을 참고") if b.get("same_as") and not b.get("stage") else "")
                     + (f" / ★이 화에서는 '{b.get('variant')}' 모습으로 나온다(같은 사람): {b.get('change_note') or ''} — 묘사·사진·얼굴은 이 모습을 따른다" if b.get("variant") else "")
                     + (f" / 변화: {b.get('change_note')}" if b.get("change_note") and not b.get("variant") else "")
                     + (f" / 나오는 화: {', '.join(map(str, b.get('apply_eps')))}화" if b.get("apply_eps") else "")
@@ -1418,6 +1420,7 @@ def writers_bible_sync(t, p):
 대표가 시리즈 바이블에 아래 항목을 새로 넣거나 바꿨다. 대본이 바이블과 맞게 표기를 고친다.
 - 고치는 것: 씬 머리의 '등장:' 인물, 대사 화자 이름, 지문 속 인물·장소·소품 이름과 모습 묘사(바이블 항목 이름 그대로).
 - 같은 사람의 다른 모습(동일인 항목, 예: 변신 후 '예뻐진 린')은 대본 흐름상 그 모습이 된 순간부터 그 이름으로 쓴다. 그 전 씬은 원래 이름 그대로.
+- 단, '★모습 단계' 항목(예: 린 A1)은 이름을 바꾸지 않는다 — 대사 화자·등장은 원래 이름(린) 그대로 두고, 단계는 '린(A1)'처럼 괄호 표기로만 남긴다(이미 있으면 그대로).
   언제부터인지는 대본의 사건(변신·시간 경과 등)과 바이블의 변화 설명·나오는 화를 근거로 정하고, reason에 적는다.
 - 절대 바꾸지 않는 것: 대사 내용(글자 그대로), 사건, 순서, 씬 구분과 번호, 감정선. 새 대사·새 사건을 만들지 않는다.
 - 바꿀 게 없는 씬은 답에 넣지 않는다.
@@ -1789,6 +1792,9 @@ def director_system(ctx):
 - 목소리는 Seedance가 영상과 함께 만든다(대표 결정): 프롬프트의 대사마다 화자의 목소리를 영어로 적는다 — 기본은 "young adult in their early-to-mid 20s, soft gentle natural human voice, natural Korean delivery, sentence endings softly trailing off" + 이 대사의 감정 변화(작게 떨리며 시작 → 끝에서 커짐 등). 같은 인물은 모든 컷에서 같은 목소리 문장을 쓴다.
 - 소리: 대사와 현장음만. 배경음악은 넣지 않는다 → 프롬프트 끝에 "No background music, no score. Dialogue and natural ambient sound only." 를 반드시 붙인다(편집에서 음악을 따로 깐다).
 - 화면 비율 {asp}. 자막·글자를 화면에 넣지 않는다(화면 글자가 대본에 있으면 summary에만 적는다).
+- 인물 모습 단계: 대본 컷에 '린(A1)'처럼 단계가 적혀 있으면, 그 인물은 바이블의 모습 단계 항목(★모습 단계: 린의 'A1' 단계)을 쓴다 — reference_names에 그 단계 항목 이름(예: "린 A1")을 넣고, CHARACTERS에는 그 단계의 얼굴·체형·머리·의상 묘사를 옮긴다.
+  한 컷에 같은 인물의 단계를 둘 이상 섞지 않는다. 단계 표기가 없는 컷은 같은 씬의 앞뒤 컷·화의 흐름(수술 전후·잠옷·무대 등)에 맞는 단계를 고르고, 같은 씬 안에서는 단계를 바꾸지 않는다.
+  단계 항목이 바이블에 없으면 원래 인물 항목을 쓰고 대본의 단계 설명(의상·머리)을 CHARACTERS에 적는다. 단계는 겉모습만이다 — 감정·무드는 표정·연기(expression_beats)로 표현한다.
 - reference_names에는 이 컷 화면에 나오는 바이블 항목 이름을 바이블 표기 그대로(괄호·수식어 붙이지 말 것): 인물 최대 3, 장소 또는 배경 최대 1, PPL·중요 소품 최대 1. 사진이 없는 항목도 넣는다(제작 때 임시 기준 사진을 만들어 고정한다).
 - voice_lines: 대사 한 줄마다 화자·대사·감정 지시. tags는 ElevenLabs v3 영어 감정 태그(예: [nervous] [whispers] [excited] [sighs] [crying] [laughs])로, direction은 한국어로 크기·높낮이·속도 변화를 적는다.
   direction에는 끝음 처리도 적는다(예: "끝음이 살짝 내려가며 흐려짐", "끝에 짧은 숨"). 모든 목소리는 젊고 나긋한 사람 목소리가 기본이고, 끝음이 뚝 끊기거나 기계적이면 안 된다.
@@ -4391,7 +4397,7 @@ def t_bible_extract(t):
     sid = t.get("series_id") or p.get("series_id")
     ov = rpc("agent_bible_overview", p_token=TOKEN, p_series=sid, p_episode=t.get("episode_id") or p.get("episode_id")) or {}
     title = (ov.get("series") or {}).get("title", "")
-    known = [{k: e.get(k) for k in ("category", "name", "summary")} for e in ov.get("entries") or []]
+    known = [{k: e.get(k) for k in ("category", "name", "summary", "same_as", "stage") if e.get(k)} for e in ov.get("entries") or []]
     # 대본 파일 앞부분에서 가져온 작품 공통 설정(캐릭터 정의·외형 단계·공통 규칙) — 인물 묘사의 1차 근거
     common = "\n\n".join(f"[{e.get('name')}]\n{e.get('description')}" for e in ov.get("entries") or []
                          if e.get("category") == "style" and (e.get("description") or "").strip())[:12000]
@@ -4409,12 +4415,20 @@ def t_bible_extract(t):
 - summary: 한국어 한 줄(대본 속 역할).
 - appears: 이 항목이 나오는 씬 [{"ep": 화 번호, "scene": 씬 번호}]. 씬 번호는 대본의 씬 순서(1부터).
 - 장소·소품·배경은 사진을 따로 만들지 않고 이 묘사로 바로 바이블에 적용된다. 그러니 description을 모습이 늘 같게 나올 만큼 구체적으로(구조·재질·색·크기·빛).
-답 형식: <json>{"items": [{"category": "", "name": "", "summary": "", "description": "", "details": "", "appears": [{"ep": 1, "scene": 1}]}]}</json>"""
+- 인물 모습 단계: 같은 사람의 겉모습이 달라지는 단계(작품 공통 설정의 A1·A2·B…, '1번·2번', 성형 전·후, 다이어트 전·후, 환자복·잠옷·무대복 등)는
+  ① 원래 인물 항목 하나(name: "린") — description은 단계와 상관없이 늘 같은 공통 특징만(국적·나이·눈 색·목소리 느낌·늘 차는 소품 등, 의상·체형·머리는 쓰지 않음), details에 단계 목록(코드: 한 줄 요약)을 한국어로.
+  ② 단계마다 항목 하나 — name은 "원래이름 단계코드"(예: "린 A1", "린 H"), "same_as": "린", "stage": "A1",
+     description은 그 단계의 얼굴·체형·머리·의상까지 영상 모델에 그대로 넣을 영어 고정 묘사(공통 특징도 함께), details는 한국어로 그 단계의 의상·달라진 점,
+     appears는 대본에서 그 단계로 나오는 씬(대본의 '린(A1)' 표기 기준. 표기가 없으면 사건·시간 흐름으로 판단하고 reason에 "추정: 근거"를 적는다).
+  단계 코드는 작품 공통 설정에 있으면 그대로, 없으면 짧게 새로 정한다(예: "성형전", "성형후"). 작품 공통 설정에 정의됐더라도 이 화에 나오지 않는 단계는 만들지 않는다.
+  겉모습이 하나뿐인 인물은 단계 없이 항목 하나만. 감정·무드(긴장, 슬픔 등)는 단계가 아니다 — 단계로 만들지 않는다.
+답 형식: <json>{"items": [{"category": "", "name": "", "summary": "", "description": "", "details": "", "appears": [{"ep": 1, "scene": 1}], "same_as": "", "stage": "", "reason": ""}]}</json>
+(same_as·stage는 모습 단계 항목에만. 원래 인물 항목을 단계 항목보다 먼저 적는다)"""
     total = {"new_entries": 0, "proposals": 0}
     for e in eps:
         progress(f"작가실이 {e['number']}화에서 필요한 인물·장소·소품을 찾는 중")
         user = f"시리즈: {title}\n\n" + (f"[작품 공통 설정 — 대표가 정한 캐릭터 정의·외형 단계·규칙. 인물 description·details는 이 정의를 그대로 따른다(나이·국적·외형·의상 단계 코드 포함)]\n{common}\n\n" if common else "") + f"[이미 바이블에 있는 항목]\n{json.dumps(known, ensure_ascii=False)}\n\n[{e['number']}화 {e.get('title') or ''} 대본]\n{(e.get('text') or '')[:60000]}"
-        text, _ = claude("claude-opus-5-5", system, user, max_tokens=8000, stage="other", note=f"바이블 필요 항목 추출: {title} {e['number']}화")
+        text, _ = claude("claude-opus-5-5", system, user, max_tokens=16000, stage="other", note=f"바이블 필요 항목 추출: {title} {e['number']}화")
         items = pick_json(text).get("items") or []
         for it in items:
             it["appears"] = [{"ep": inum(x.get("ep") or e["number"]), "scene": inum(x.get("scene") or 0)} for x in (it.get("appears") or []) if isinstance(x, dict)]
@@ -4422,8 +4436,8 @@ def t_bible_extract(t):
         for k in total:
             total[k] += int(r.get(k) or 0)
         for it in items:
-            if not any(k["name"].lower() == (it.get("name") or "").lower() and k["category"] == it.get("category") for k in known):
-                known.append({k: it.get(k) for k in ("category", "name", "summary")})
+            if not any(k["name"].lower() == (it.get("name") or "").lower() and k.get("category") == it.get("category") for k in known):
+                known.append({k: it.get(k) for k in ("category", "name", "summary", "same_as", "stage") if it.get(k)})
     if total["proposals"]:
         notify(f"바이블 필요 항목 {total['proposals']}개 제안", "바이블 탭에서 확인하고 '모두 적용 + 사진 만들기'를 눌러 주세요")
     return f"새 항목 {total['new_entries']}개 · 적용 대기 {total['proposals']}개"
@@ -8050,6 +8064,7 @@ function fmtEps(arr) {
 function variantLine(e) {
   if (e.category !== 'character' || !(e.same_as || e.apply_eps?.length || e.change_note)) return '';
   const orig = (S.bibleEntries || []).find(x => x.id === e.same_as);
+  if (e.stage && orig) return `<div class="vline">${pill(`${orig.name} · 모습 단계 ${e.stage}`, 'accent')}${e.apply_eps?.length ? ` <b>${esc(fmtEps(e.apply_eps))}화</b>에 나옴` : ''} <span class="quiet">컷마다 대본의 "${esc(orig.name)}(${esc(e.stage)})" 표기대로 이 모습을 씁니다 · 목소리·눈·팔찌 같은 공통 특징은 ${esc(orig.name)} 카드를 따릅니다</span>${e.change_note ? `<div class="quiet">달라진 점: ${esc(e.change_note)}</div>` : ''}</div>`;
   return `<div class="vline">${orig ? `${pill(`${orig.name}의 다른 모습`, 'accent')}` : ''}${e.apply_eps?.length ? ` <b>${esc(fmtEps(e.apply_eps))}화</b>에 적용` : ' 모든 화'}${e.change_note ? `<div class="quiet">달라진 점: ${esc(e.change_note)}</div>` : ''}</div>`;
 }
 // 필수 항목: 인물·스타일·음악은 늘 필수. 소품·장소·배경은 '필수'(미리 사진·감수) 또는 '자동 참고'(첫 등장 장면 사진을 참고로)
@@ -8128,12 +8143,18 @@ async function viewBible(main) {
   if (!S.seriesId) { main.innerHTML = '<h2>시리즈 바이블</h2><div class="card quiet">먼저 대본 탭에서 시리즈를 만드세요.</div>'; return; }
   const [entries, episodes] = await Promise.all([
     // photo_source(사진 방식) 칸이 아직 DB에 없으면(반영 전) 없이 다시 읽는다
-    q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin,photo_source,placement,same_as,temp_image,essential,apply_eps,change_note,refs').eq('series_id', S.seriesId).order('sort_order').order('created_at'))
+    q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin,photo_source,placement,same_as,temp_image,essential,apply_eps,change_note,refs,stage').eq('series_id', S.seriesId).order('sort_order').order('created_at'))
+      .catch(() => q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin,photo_source,placement,same_as,temp_image,essential,apply_eps,change_note,refs').eq('series_id', S.seriesId).order('sort_order').order('created_at')))
       .catch(() => q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin,photo_source,placement,same_as,temp_image,essential,apply_eps,change_note').eq('series_id', S.seriesId).order('sort_order').order('created_at')))
       .catch(() => q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin,photo_source,placement,same_as,temp_image').eq('series_id', S.seriesId).order('sort_order').order('created_at')))
       .catch(() => q(S.sb.from('bible_entries').select('id,category,name,summary,sort_order,created_at,appears,origin').eq('series_id', S.seriesId).order('sort_order').order('created_at'))),
     q(S.sb.from('episodes').select('id,number,title').eq('series_id', S.seriesId).order('number')),
   ]);
+  // 인물 모습 단계(A1·A2…)는 그 인물 카드 바로 뒤에 단계 순서대로
+  { const stg = entries.filter(e => e.stage && e.same_as && entries.some(x => x.id === e.same_as));
+    if (stg.length) { const rest = entries.filter(e => !stg.includes(e)); entries.length = 0;
+      const nat = (a, b) => String(a.stage).localeCompare(String(b.stage), 'ko', { numeric: true });
+      rest.forEach(e => { entries.push(e); entries.push(...stg.filter(s => s.same_as === e.id).sort(nat)); }); } }
   const versions = entries.length ? await q(S.sb.from('bible_versions')
     .select('id,entry_id,version_no,description,details,voice_id,soul_id,image_paths,voice_path,change_reason,status,proposed_by,decided_at,created_at,devices(name),prompt_en')
     .in('entry_id', entries.map(e => e.id)).order('version_no', { ascending: false }))
@@ -8214,7 +8235,7 @@ async function viewBible(main) {
       <button class="btn primary small" id="bnew" title="바이블에 새 항목(인물·장소·배경·소품·스타일·목소리·용어·배경음악)을 직접 등록합니다">+ 항목 추가</button></div>
     <div class="btools">
       <div class="brow"><span class="blbl">대본에서</span><div class="bbtns">
-        <button class="btn small" id="bextract" title="작가실이 대본을 화별로 읽고 씬마다 필요한 인물·장소·배경·소품을 찾아 바이블 수정안으로 올립니다">필요한 인물·장소·소품 찾기</button>
+        <button class="btn small primary" id="bextract" title="작가실이 대본을 화별로 읽고 씬마다 필요한 인물·장소·배경·소품을 찾아 바이블 수정안으로 올립니다">필요한 인물·장소·소품 찾기</button>
         <button class="btn small primary" id="bsync" title="바이블에 새로 넣거나 바꾼 인물(예: 예뻐진 린)을 대본의 등장·화자·지문 표기에 반영합니다. 대사는 그대로, 대본 탭에서 확정">📜 바이블을 대본에 반영</button></div></div>
       <div class="brow"><span class="blbl">한꺼번에</span><div class="bbtns">
         ${showPhotoBtn ? `<button class="btn small" id="bphotos" title="적용된 묘사는 있고 사진이 없는 항목의 사진 후보를 만듭니다. '직접 올리기' 항목은 빠집니다(인물은 Soul 2 실사)">${catLabel ? esc(catLabel) + ' ' : ''}사진 만들기 (${photoTodo.length})</button>` : ''}
