@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.41.1"
+VERSION = "1.42.0"
 
 import base64
 import glob
@@ -5589,22 +5589,54 @@ def t_edit_command(t):
     takes = ed.get("takes") or {}
     clips, total, _ = tl_layout(tl)
     table = [{"clip": c["id"], "code": c.get("code") or (takes.get(c.get("take_id")) or {}).get("code"), "position_sec": c["start"],
+              "summary": ((takes.get(c.get("take_id")) or {}).get("summary") or "")[:100],
               "length": c["dur"], "in": c["in"], "out": c["out"], "src_len": c.get("src_len"), "gap_before": c.get("gap") or 0,
               "voice_offset": c.get("voice_offset") or 0, "voice_gain": c.get("voice_gain", 1),
               "dialogue": ((takes.get(c.get("take_id")) or {}).get("dialogue") or "")[:120]} for c in clips]
     music = [{k: m.get(k) for k in ("id", "name", "start", "in", "out", "gain", "fade_in", "fade_out")} for m in tl.get("music") or []]
     subs = [{k: s.get(k) for k in ("id", "clip_id", "text")} for s in (tl.get("subs") or [])][:200]
     system = f"""너는 드라마 편집 보조다. 대표의 말을 타임라인 명령으로 바꾼다. 컷 이름(S03 C02, E01-S03-C02, 세 번째 컷 등)은 code와 position으로 찾는다.
-애매하면 가장 그럴듯한 해석 하나만 하고 summary에 그렇게 해석했다고 적는다. 할 수 없는 요청(색보정, 화면 효과 등)은 ops 없이 summary로 설명한다.
+애매하면 가장 그럴듯한 해석 하나만 하고 summary에 그렇게 해석했다고 적는다.
+편집(자르기·순서·소리·자막·음악)으로 되는 것은 ops로 한다.
+영상 자체를 바꿔야 하는 요청(누가 나오는지, 인물 모습, 구도·카메라 무빙·포커스, 연기·동작, 배경 등)은 remake로 보낸다 —
+감독이 그 컷 프롬프트를 고쳐 다시 만들고, 새 영상이 나오면 편집실 타임라인의 그 컷이 자동으로 바뀐다(대표가 이미 이렇게 하라고 정함).
+remake의 instruction은 감독이 바로 프롬프트에 옮길 수 있게 구체적으로(대표가 한 말 그대로 + 앞뒤 컷과의 연결). 한 컷에 여러 요청이면 하나로 합친다.
+색보정·화면 효과처럼 둘 다 안 되는 것만 summary로 설명한다.
 {EDIT_OPS}
-답 형식: <json>{{"ops": [...], "summary": "무엇을 바꿨는지 한두 줄(한국어)"}}</json>"""
+답 형식: <json>{{"ops": [...], "remake": [{{"clip": "클립 id", "instruction": "감독에게 갈 대표 지시"}}], "summary": "무엇을 바꿨고 무엇을 다시 만들게 했는지 한두 줄(한국어)"}}</json>"""
     user = f"[대표 지시]\n{p.get('text')}\n\n[클립 {len(table)}개, 전체 {total:.1f}초]\n{json.dumps(table, ensure_ascii=False)}\n\n[음악]\n{json.dumps(music, ensure_ascii=False)}\n\n[자막]\n{json.dumps(subs, ensure_ascii=False)}"
     text, _ = claude("claude-sonnet-5-5", system, user, max_tokens=3000, stage="edit", episode_id=(ed.get("episode") or {}).get("id"), note="말로 편집")
     res = pick_json(text)
     done = apply_ops(tl, res.get("ops"))
-    if done:
+    # 영상을 다시 만들어야 하는 것: 감독(대표 지시 — 최우선) → 바로 생성 → 새 영상이 통과하면 편집실 타임라인에서 자동 교체
+    sent = []
+    by_clip = {c["id"]: c for c in clips}
+    for r in (res.get("remake") or [])[:12]:
+        c = by_clip.get(r.get("clip")) if isinstance(r, dict) else None
+        tk = takes.get((c or {}).get("take_id")) or {}
+        cid = tk.get("cut_id") or (c or {}).get("cut_id")
+        ins = (r.get("instruction") or "").strip() if isinstance(r, dict) else ""
+        if not cid or not ins:
+            continue
+        try:
+            cur = rpc("agent_get_cut", p_token=TOKEN, p_id=cid) or {}
+            rpc("agent_update_cut", p_token=TOKEN, p_id=cid, p={"fix_request": f"[대표 지시 — 최우선 · 편집실 말로 편집] {ins}\n(대표 원문: {p.get('text')})"[:3000], "status": "designed"})
+            epid = cur.get("episode_id") or (ed.get("episode") or {}).get("id")
+            rpc("agent_add_task", p_token=TOKEN, p={"kind": "director", "episode_id": epid, "scene_no": cur.get("scene_no"), "cut_id": cid,
+                                                   "payload": {"cut_id": cid}})
+            # 영상 생성(결제)은 대표가 편집실에서 '다시 만들기 승인'을 눌러야 시작된다(DB 규칙: 생성은 대표 승인으로만)
+            pend = tl.setdefault("pending", {})
+            pend[cid] = {"since": datetime.now().isoformat(timespec="seconds"), "old_take": c.get("take_id"), "instruction": ins[:300],
+                         "code": cur.get("code"), "episode_id": epid, "scene_no": cur.get("scene_no"), "need_approve": True}
+            sent.append(cur.get("code") or cid)
+            progress(f"{cur.get('code')}: 감독에게 다시 만들기 요청 — {ins[:120]}")
+        except Exception as ex:
+            log(f"말로 편집 → 다시 만들기 요청 실패 {cid}: {ex}")
+    if done or sent:
         rpc("agent_save_edit", p_token=TOKEN, p_project=p["project_id"], p_timeline=tl)
-    return (res.get("summary") or "") + f" (명령 {len(done)}개 적용)"
+    if sent:
+        notify(f"편집실: {len(sent)}컷 다시 만들기 준비", f"{', '.join(sent)} — 감독이 대표 지시를 반영해 프롬프트를 고치는 중입니다. 편집실에서 '다시 만들기 승인'을 누르면 영상을 만들고, 새 영상이 나오면 타임라인에서 자동으로 바뀝니다", "info")
+    return (res.get("summary") or "") + f" (편집 명령 {len(done)}개 적용" + (f" · 다시 만들기 {len(sent)}컷: {', '.join(sent)}" if sent else "") + ")"
 
 
 def run_task(tk):

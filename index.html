@@ -361,6 +361,7 @@
   .tasklist .tres { flex-basis: 100%; font-size: 12.5px; margin: 2px 0 0; white-space: pre-wrap; } .tasklist .tres.bad { color: var(--bad); }
   .tasklist .tlog { flex-basis: 100%; font-size: 12px; } .tasklist .tlog > div { padding: 1px 0; } .tasklist .tlog summary { color: var(--quiet); cursor: pointer; }
   .nextbox .nextalt { flex-basis: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+  .ed-clip.ed-pending { outline: 2px dashed #e08a00; outline-offset: -2px; opacity: .75; }
   .flowbox { margin-top: 10px; padding: 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--panel); }
   .flowbox .fi { border-top: 1px solid var(--line); padding: 8px 0; display: grid; grid-template-columns: 22px 1fr; gap: 6px; }
   .flowbox .fi.sent { opacity: .55; }
@@ -503,7 +504,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.41.1"
+VERSION = "1.42.0"
 
 import base64
 import glob
@@ -6082,22 +6083,54 @@ def t_edit_command(t):
     takes = ed.get("takes") or {}
     clips, total, _ = tl_layout(tl)
     table = [{"clip": c["id"], "code": c.get("code") or (takes.get(c.get("take_id")) or {}).get("code"), "position_sec": c["start"],
+              "summary": ((takes.get(c.get("take_id")) or {}).get("summary") or "")[:100],
               "length": c["dur"], "in": c["in"], "out": c["out"], "src_len": c.get("src_len"), "gap_before": c.get("gap") or 0,
               "voice_offset": c.get("voice_offset") or 0, "voice_gain": c.get("voice_gain", 1),
               "dialogue": ((takes.get(c.get("take_id")) or {}).get("dialogue") or "")[:120]} for c in clips]
     music = [{k: m.get(k) for k in ("id", "name", "start", "in", "out", "gain", "fade_in", "fade_out")} for m in tl.get("music") or []]
     subs = [{k: s.get(k) for k in ("id", "clip_id", "text")} for s in (tl.get("subs") or [])][:200]
     system = f"""너는 드라마 편집 보조다. 대표의 말을 타임라인 명령으로 바꾼다. 컷 이름(S03 C02, E01-S03-C02, 세 번째 컷 등)은 code와 position으로 찾는다.
-애매하면 가장 그럴듯한 해석 하나만 하고 summary에 그렇게 해석했다고 적는다. 할 수 없는 요청(색보정, 화면 효과 등)은 ops 없이 summary로 설명한다.
+애매하면 가장 그럴듯한 해석 하나만 하고 summary에 그렇게 해석했다고 적는다.
+편집(자르기·순서·소리·자막·음악)으로 되는 것은 ops로 한다.
+영상 자체를 바꿔야 하는 요청(누가 나오는지, 인물 모습, 구도·카메라 무빙·포커스, 연기·동작, 배경 등)은 remake로 보낸다 —
+감독이 그 컷 프롬프트를 고쳐 다시 만들고, 새 영상이 나오면 편집실 타임라인의 그 컷이 자동으로 바뀐다(대표가 이미 이렇게 하라고 정함).
+remake의 instruction은 감독이 바로 프롬프트에 옮길 수 있게 구체적으로(대표가 한 말 그대로 + 앞뒤 컷과의 연결). 한 컷에 여러 요청이면 하나로 합친다.
+색보정·화면 효과처럼 둘 다 안 되는 것만 summary로 설명한다.
 {EDIT_OPS}
-답 형식: <json>{{"ops": [...], "summary": "무엇을 바꿨는지 한두 줄(한국어)"}}</json>"""
+답 형식: <json>{{"ops": [...], "remake": [{{"clip": "클립 id", "instruction": "감독에게 갈 대표 지시"}}], "summary": "무엇을 바꿨고 무엇을 다시 만들게 했는지 한두 줄(한국어)"}}</json>"""
     user = f"[대표 지시]\n{p.get('text')}\n\n[클립 {len(table)}개, 전체 {total:.1f}초]\n{json.dumps(table, ensure_ascii=False)}\n\n[음악]\n{json.dumps(music, ensure_ascii=False)}\n\n[자막]\n{json.dumps(subs, ensure_ascii=False)}"
     text, _ = claude("claude-sonnet-5-5", system, user, max_tokens=3000, stage="edit", episode_id=(ed.get("episode") or {}).get("id"), note="말로 편집")
     res = pick_json(text)
     done = apply_ops(tl, res.get("ops"))
-    if done:
+    # 영상을 다시 만들어야 하는 것: 감독(대표 지시 — 최우선) → 바로 생성 → 새 영상이 통과하면 편집실 타임라인에서 자동 교체
+    sent = []
+    by_clip = {c["id"]: c for c in clips}
+    for r in (res.get("remake") or [])[:12]:
+        c = by_clip.get(r.get("clip")) if isinstance(r, dict) else None
+        tk = takes.get((c or {}).get("take_id")) or {}
+        cid = tk.get("cut_id") or (c or {}).get("cut_id")
+        ins = (r.get("instruction") or "").strip() if isinstance(r, dict) else ""
+        if not cid or not ins:
+            continue
+        try:
+            cur = rpc("agent_get_cut", p_token=TOKEN, p_id=cid) or {}
+            rpc("agent_update_cut", p_token=TOKEN, p_id=cid, p={"fix_request": f"[대표 지시 — 최우선 · 편집실 말로 편집] {ins}\n(대표 원문: {p.get('text')})"[:3000], "status": "designed"})
+            epid = cur.get("episode_id") or (ed.get("episode") or {}).get("id")
+            rpc("agent_add_task", p_token=TOKEN, p={"kind": "director", "episode_id": epid, "scene_no": cur.get("scene_no"), "cut_id": cid,
+                                                   "payload": {"cut_id": cid}})
+            # 영상 생성(결제)은 대표가 편집실에서 '다시 만들기 승인'을 눌러야 시작된다(DB 규칙: 생성은 대표 승인으로만)
+            pend = tl.setdefault("pending", {})
+            pend[cid] = {"since": datetime.now().isoformat(timespec="seconds"), "old_take": c.get("take_id"), "instruction": ins[:300],
+                         "code": cur.get("code"), "episode_id": epid, "scene_no": cur.get("scene_no"), "need_approve": True}
+            sent.append(cur.get("code") or cid)
+            progress(f"{cur.get('code')}: 감독에게 다시 만들기 요청 — {ins[:120]}")
+        except Exception as ex:
+            log(f"말로 편집 → 다시 만들기 요청 실패 {cid}: {ex}")
+    if done or sent:
         rpc("agent_save_edit", p_token=TOKEN, p_project=p["project_id"], p_timeline=tl)
-    return (res.get("summary") or "") + f" (명령 {len(done)}개 적용)"
+    if sent:
+        notify(f"편집실: {len(sent)}컷 다시 만들기 준비", f"{', '.join(sent)} — 감독이 대표 지시를 반영해 프롬프트를 고치는 중입니다. 편집실에서 '다시 만들기 승인'을 누르면 영상을 만들고, 새 영상이 나오면 타임라인에서 자동으로 바뀝니다", "info")
+    return (res.get("summary") or "") + f" (편집 명령 {len(done)}개 적용" + (f" · 다시 만들기 {len(sent)}컷: {', '.join(sent)}" if sent else "") + ")"
 
 
 def run_task(tk):
@@ -11854,27 +11887,84 @@ async function viewEdit(main) {
 
 async function edLoad() {
   const [cuts, proj] = await Promise.all([
-    q(S.sb.from('production_cuts').select('id,code,scene_no,cut_no,seconds,status,best_take_id,dialogue,summary,scene_heading').eq('episode_id', ED.ep.id).order('scene_no').order('cut_no')),
+    q(S.sb.from('production_cuts').select('id,code,scene_no,cut_no,seconds,status,best_take_id,dialogue,summary,scene_heading,est_usd').eq('episode_id', ED.ep.id).order('scene_no').order('cut_no')),
     q(S.sb.from('edit_projects').select('*').eq('episode_id', ED.ep.id).maybeSingle()),
   ]);
   ED.cuts = cuts;
-  const takes = cuts.length ? await q(S.sb.from('production_takes').select('id,cut_id,take_no,status,verdict,score,seconds,files').in('cut_id', cuts.map(c => c.id)).order('take_no')) : [];
+  const takes = cuts.length ? await q(S.sb.from('production_takes').select('id,cut_id,take_no,status,verdict,score,seconds,files,remote_url').in('cut_id', cuts.map(c => c.id)).order('take_no')) : [];
   ED.takes = Object.fromEntries(takes.map(t => [t.id, t]));
   ED.proj = proj; ED.tl = proj?.timeline || { clips: [], music: [], subs: [], settings: {} };
   // 다른 화에서 가져온 컷(모든 화 이어 붙이기 등)도 보이게
   const other = [...new Set((ED.tl.clips || []).map(c => c.cut_id).filter(id => id && !cuts.some(x => x.id === id)))];
   if (other.length) {
-    const oc = await q(S.sb.from('production_cuts').select('id,episode_id,code,scene_no,cut_no,seconds,status,best_take_id,dialogue,summary,scene_heading').in('id', other));
-    const ot = await q(S.sb.from('production_takes').select('id,cut_id,take_no,status,verdict,score,seconds,files').in('cut_id', other));
+    const oc = await q(S.sb.from('production_cuts').select('id,episode_id,code,scene_no,cut_no,seconds,status,best_take_id,dialogue,summary,scene_heading,est_usd').in('id', other));
+    const ot = await q(S.sb.from('production_takes').select('id,cut_id,take_no,status,verdict,score,seconds,files,remote_url').in('cut_id', other));
     ED.cuts.push(...oc); ot.forEach(t => { ED.takes[t.id] = t; });
   }
   ['clips', 'music', 'subs'].forEach(k => ED.tl[k] = ED.tl[k] || []); ED.tl.settings = ED.tl.settings || {};
   ED.hist = []; ED.fut = []; ED.sel = null; ED.t = 0;
+  await edSwapPending();
   await edSign();
   edRender();
   edPollRenders();
 }
 
+// 말로 편집이 '다시 만들기'로 보낸 컷: 생성(결제)은 대표가 여기서 승인 버튼을 눌러야 시작
+function edPendRender() {
+  const box = $('#ePendBox'); if (!box) return;
+  const pend = ED.tl.pending || {}; const ids = Object.keys(pend);
+  if (!ids.length) { box.innerHTML = ''; return; }
+  const need = ids.filter(id => pend[id].need_approve && !pend[id].approved);
+  const cost = need.reduce((s, id) => s + Number(ED.cuts.find(c => c.id === id)?.est_usd || 0), 0);
+  box.innerHTML = `<div class="flowbox" style="border-color:#e08a00">
+    <b>🔄 말로 편집에서 다시 만들 컷 ${ids.length}개</b>
+    ${ids.map(id => { const d = pend[id]; return `<div style="font-size:13px;margin-top:4px">· <b>${esc((d.code || '').replace(/^E\d+-/, ''))}</b> ${esc(d.instruction || '')}
+      <span class="quiet">— ${d.failed ? '⚠ 생성 실패(제작 탭에서 확인)' : d.approved ? '영상 만드는 중 · 나오면 여기서 자동 교체' : '감독이 프롬프트 고치는 중/승인 대기'}</span></div>`; }).join('')}
+    ${need.length ? `<div class="row" style="gap:8px;margin-top:8px"><button class="btn primary" id="ePendGo">다시 만들기 승인 (${need.length}컷${cost ? ' · 예상 ' + usdKrw(cost, S.prodRate || 1340) : ''})</button>
+      <button class="btn small" id="ePendX">요청 취소</button><span class="quiet" style="font-size:12px">승인하면 감독이 고친 프롬프트로 바로 만들고, 새 영상이 통과하면 타임라인의 그 컷이 자동으로 바뀝니다</span></div>` : ''}
+  </div>`;
+  const go = $('#ePendGo'); if (go) go.onclick = guard(async () => {
+    if (!confirm(`${need.map(id => (pend[id].code || '').replace(/^E\d+-/, '')).join(', ')} 영상을 다시 만듭니다.${cost ? `\n예상 비용 ${usdKrw(cost, S.prodRate || 1340)} (Higgsfield 잔액에서 빠집니다)` : ''}`)) return;
+    const open = await q(S.sb.from('pipeline_tasks').select('cut_id').eq('kind', 'generate').in('status', ['queued', 'running']).in('cut_id', need)).catch(() => []);
+    const has = new Set((open || []).map(r => r.cut_id));
+    const rows = need.filter(id => !has.has(id)).map(id => ({ kind: 'generate', episode_id: pend[id].episode_id || ED.ep.id, scene_no: pend[id].scene_no ?? null, cut_id: id, payload: { after_director: true } }));
+    for (const id of need) await q(S.sb.from('production_cuts').update({ status: 'approved' }).eq('id', id));
+    if (rows.length) await q(S.sb.from('pipeline_tasks').insert(rows));
+    const now = new Date().toISOString(); need.forEach(id => { pend[id].approved = now; });
+    await q(S.sb.from('edit_projects').update({ timeline: ED.tl, updated_at: now }).eq('id', ED.proj.id));
+    toast('다시 만들기를 시작했습니다. 감독이 고친 뒤 이어서 만들고, 새 영상이 나오면 자동으로 바뀝니다'); edPendRender();
+  });
+  const x = $('#ePendX'); if (x) x.onclick = guard(async () => {
+    if (!confirm('다시 만들기 요청을 취소할까요? (감독이 고친 프롬프트는 남습니다)')) return;
+    need.forEach(id => { delete pend[id]; }); if (!Object.keys(pend).length) delete ED.tl.pending;
+    await q(S.sb.from('edit_projects').update({ timeline: ED.tl, updated_at: new Date().toISOString() }).eq('id', ED.proj.id));
+    edRender();
+  });
+}
+// 말로 편집에서 '다시 만들기'로 보낸 컷: 새 영상이 나오면(통과·대표 컷 지정) 타임라인의 그 컷을 새 영상으로 바꾼다
+async function edSwapPending() {
+  const pend = ED.tl.pending || {}; const ids = Object.keys(pend); if (!ids.length || !ED.proj) return 0;
+  const fresh = await q(S.sb.from('production_cuts').select('id,status,best_take_id,seconds,code').in('id', ids)).catch(() => []);
+  let n = 0; const names = [];
+  for (const c of fresh || []) {
+    const pd = pend[c.id];
+    if (c.status === 'failed' && pd.approved) { pd.failed = true; continue; }
+    if (pd.need_approve && !pd.approved) continue;
+    if (!c.best_take_id || c.best_take_id === pd.old_take || !['passed'].includes(c.status)) continue;
+    if (!ED.takes[c.best_take_id]) { const t = (await q(S.sb.from('production_takes').select('id,cut_id,take_no,status,verdict,score,seconds,files,remote_url').eq('id', c.best_take_id)).catch(() => []))?.[0]; if (t) ED.takes[t.id] = t; }
+    const tk = ED.takes[c.best_take_id]; if (!tk) continue;
+    const len = +(tk.seconds || c.seconds || 5);
+    for (const cl of ED.tl.clips.filter(x => x.cut_id === c.id)) { cl.take_id = tk.id; cl.in = 0; cl.out = len; cl.src_len = len; }
+    const cc = ED.cuts.find(x => x.id === c.id); if (cc) Object.assign(cc, { best_take_id: c.best_take_id, status: c.status });
+    delete pend[c.id]; n++; names.push(c.code || pd.code || '');
+  }
+  if (n) {
+    if (!Object.keys(pend).length) delete ED.tl.pending;
+    await q(S.sb.from('edit_projects').update({ timeline: ED.tl, updated_at: new Date().toISOString() }).eq('id', ED.proj.id)).catch(e => console.warn(e));
+    toast(`새로 만든 영상으로 바꿨습니다: ${names.join(', ')}`);
+  }
+  return n;
+}
 async function edSign() {
   const paths = new Set();
   Object.values(ED.takes).forEach(t => { if (t.files?.preview) paths.add(t.files.preview); if (t.files?.poster) paths.add(t.files.poster); });
@@ -11956,8 +12046,8 @@ async function edImport() {
     pick = eps.filter(e => nums.has(e.number)); if (!pick.length) return toast('그 번호의 화가 없습니다');
   }
   const ids = pick.map(e => e.id);
-  const cuts = await q(S.sb.from('production_cuts').select('id,episode_id,code,scene_no,cut_no,seconds,status,best_take_id,dialogue,summary,scene_heading').in('episode_id', ids).order('scene_no').order('cut_no'));
-  const takes = cuts.length ? await q(S.sb.from('production_takes').select('id,cut_id,take_no,status,verdict,score,seconds,files').in('cut_id', cuts.map(c => c.id)).order('take_no')) : [];
+  const cuts = await q(S.sb.from('production_cuts').select('id,episode_id,code,scene_no,cut_no,seconds,status,best_take_id,dialogue,summary,scene_heading,est_usd').in('episode_id', ids).order('scene_no').order('cut_no'));
+  const takes = cuts.length ? await q(S.sb.from('production_takes').select('id,cut_id,take_no,status,verdict,score,seconds,files,remote_url').in('cut_id', cuts.map(c => c.id)).order('take_no')) : [];
   const epNo = Object.fromEntries(pick.map(e => [e.id, e.number]));
   cuts.sort((a, b) => (epNo[a.episode_id] - epNo[b.episode_id]) || (a.scene_no - b.scene_no) || (a.cut_no - b.cut_no));
   cuts.forEach(c => { if (!ED.cuts.some(x => x.id === c.id)) ED.cuts.push(c); });
@@ -12056,6 +12146,7 @@ function edRender() {
       <span class="quiet" id="eSum">${L.clips.length}컷 · ${fmtT(L.total)}</span>
     </div>
     <div id="eToneBox"></div>
+    <div id="ePendBox"></div>
     <div id="eFlowBox"></div>
     <div class="ed-tl" id="eTl" style="--th:${ED.th || 46}px">
       <div class="ed-lanes">
@@ -12084,12 +12175,12 @@ function edRender() {
   </div>
   <div class="card ed-ask">
     <div class="row"><b>말로 편집·재생</b><span class="quiet">편집: "S03 C02 빼고, C04 끝 1초 줄여 줘" · 재생: "S02부터 대사만 들려줘", "음악만", "멈춰"</span></div>
-    <div class="row" style="margin-top:6px"><input id="eAsk" placeholder="말하듯 적고 Enter (또는 🎤로 말하기)" style="flex:1">
+    <div class="row" style="margin-top:6px;align-items:flex-start"><textarea id="eAsk" rows="2" placeholder="말하듯 적고 Enter로 실행 · 줄바꿈은 Shift+Enter (또는 🎤로 말하기)&#10;예: S02 C01부터는 그냥 린이 나오게. S02 C02 심사위원 대사 중에 포커스 아웃되며 민지 뒷모습으로" style="flex:1;min-height:44px;resize:vertical;font-family:inherit;font-size:13.5px;line-height:1.5;overflow:hidden"></textarea>
       <button class="btn" id="eMic" title="말로 하기 (켜 두면 계속 듣습니다)">🎤 말하기</button><button class="btn primary" id="eAskGo">실행</button></div>
     <div id="eAskRes" class="quiet" style="margin-top:6px"></div>
   </div>
   <div class="card" id="eOut"></div>`;
-  edBind(); edInspector(); edRenderOut(); edFlowLoad(); edSeek(ED.t, false);
+  edBind(); edInspector(); edRenderOut(); edFlowLoad(); edPendRender(); edSeek(ED.t, false);
 }
 
 function edRuler(total) {
@@ -12100,10 +12191,11 @@ function edRuler(total) {
 function edClipBlock(x) {
   const c = x.c, tk = takeOf(c), cut = cutOf(c), poster = ED.urls[tk.files?.poster];
   const sel = ED.sel?.type === 'clip' && ED.sel.id === c.id;
-  const warn = cut.best_take_id && cut.best_take_id !== c.take_id ? ' ed-newtake' : tk.verdict !== 'pass' ? ' ed-unpassed' : '';
+  const pend = ED.tl.pending?.[c.cut_id];
+  const warn = pend ? ' ed-pending' : cut.best_take_id && cut.best_take_id !== c.take_id ? ' ed-newtake' : tk.verdict !== 'pass' ? ' ed-unpassed' : '';
   return `${+c.gap > 0 ? `<div class="ed-gap" data-gap="${c.id}" style="left:${(x.start - c.gap) * ED.pps}px;width:${c.gap * ED.pps}px" title="정적 ${c.gap}초"></div>` : ''}
     <div class="ed-clip${sel ? ' sel' : ''}${warn}${ED.loop === c.id ? ' loop' : ''}" data-clip="${c.id}" style="left:${x.start * ED.pps}px;width:${Math.max(4, x.dur * ED.pps - 2)}px;${poster ? `background-image:url('${poster}')` : ''}">
-      <i class="h l" data-trim="in"></i><span>${esc(clipCode(c))}<small>${x.dur.toFixed(1)}s</small></span><i class="h r" data-trim="out"></i></div>`;
+      <i class="h l" data-trim="in"></i><span>${esc(clipCode(c))}<small>${pend ? '🔄 다시 만드는 중' : x.dur.toFixed(1) + 's'}</small></span><i class="h r" data-trim="out"></i></div>`;
 }
 function edVoiceBlock(x) {
   const c = x.c, off = +c.voice_offset || 0, g = c.voice_gain ?? 1;
@@ -12313,10 +12405,13 @@ function edBind() {
     await edSave();
     if (!ED.proj) return toast('먼저 타임라인을 만드세요');
     const r = await q(S.sb.from('pipeline_tasks').insert({ kind: 'edit_command', episode_id: ED.ep.id, payload: { project_id: ED.proj.id, text } }).select('id').single());
-    $('#eAsk').value = ''; $('#eAskRes').innerHTML = '<span class="spin"></span>편집 보조가 읽는 중… (보통 10~20초)';
+    $('#eAsk').value = ''; $('#eAsk').style.height = ''; $('#eAskRes').innerHTML = '<span class="spin"></span>편집 보조가 읽는 중… (보통 10~20초) — 영상을 다시 만들어야 하는 요청은 감독에게 보내 새로 만든 뒤 여기서 자동으로 바뀝니다';
     ED.askId = r.id; ED.askRev = ED.proj.rev; edPollRenders();
   });
-  $('#eAskGo').onclick = () => ask(); $('#eAsk').onkeydown = e => { if (e.key === 'Enter' && !e.isComposing) ask(); };
+  $('#eAskGo').onclick = () => ask();
+  const fit = () => { const a = $('#eAsk'); if (!a) return; a.style.height = 'auto'; a.style.height = Math.min(260, a.scrollHeight + 2) + 'px'; a.style.overflowY = a.scrollHeight > 260 ? 'auto' : 'hidden'; };
+  $('#eAsk').oninput = fit;
+  $('#eAsk').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); ask(); } };
   edMicSetup(ask);
 
   const scroll = $('#eScroll'), canvas = $('#eCanvas');
@@ -12906,6 +13001,13 @@ async function edRenderOut() {
   edBindResult();
   if (busy) edPollRenders();
 }
+// 다시 만드는 컷이 있으면 20초마다 확인해 새 영상이 나오면 자동 교체(재생 중이면 잠시 미룸)
+setInterval(async () => {
+  try {
+    if (S.tab !== 'edit' || !ED.proj || !ED.tl?.pending || !Object.keys(ED.tl.pending).length || ED.playing) return;
+    if (await edSwapPending()) { await edSign(); edRender(); } else edPendRender();
+  } catch (e) { console.warn(e); }
+}, 20000);
 function edPollRenders() {
   if (ED.pollTimer) return;
   ED.pollTimer = setInterval(async () => {
