@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.43.1"
+VERSION = "1.43.2"
 
 import base64
 import glob
@@ -2762,6 +2762,20 @@ def _make_temp_ref(b, n, gen, ep):
         log(f"'{n}' 임시 기준 사진 실패(묘사만으로 진행): {ex}")
 
 
+# 대표 결정(11/27): 장소·배경 참고 사진은 무드만 가져가고, 그 사진의 구도·카메라 각도는 따르지 않는다(구도는 이 컷의 SHOT·FRAME)
+PLACE_MOOD_NOTE = (" The location/background reference photos are for MOOD AND LOOK ONLY (materials, colors, lighting atmosphere, set dressing, sense of space):"
+                   " do NOT copy their camera angle, framing, composition, lens or where people stand — follow the shot, angle and framing described in this prompt.")
+
+
+def has_place_ref(ctx, names):
+    """이 컷 참고 이름 중 장소·배경이 있나."""
+    for n in names or []:
+        b = bible_entry(ctx, n)
+        if b and b.get("category") in ("location", "background"):
+            return True
+    return False
+
+
 def bible_ref_urls(ctx, names, limit=4, per=1):
     return [u for _, u in bible_ref_pairs(ctx, names, limit, per)]
 
@@ -2906,7 +2920,8 @@ def t_prep_cut(t):
             progress(f"{code} {'첫' if key == 'frame_first' else '끝'} 장면 사진 만드는 중")
             try:
                 fp = (fprompt + " Photorealistic live-action film still shot on a cinema camera, natural skin texture, realistic lighting."
-                      " Keep each person's face, hair and outfit exactly as in the reference photos. No text, no subtitles.")
+                      " Keep each person's face, hair and outfit exactly as in the reference photos."
+                      + (PLACE_MOOD_NOTE if has_place_ref(ctx, c.get("reference_names")) else "") + " No text, no subtitles.")
                 try:
                     url = hf_image(fp, refs, aspect, imodel)
                 except Exception as ex1:
@@ -3173,6 +3188,8 @@ def _generate(t):
             body["end_image_url"] = last_url
     elif refs:
         body["image_urls"] = refs
+        if has_place_ref(ctx, cut.get("reference_names")):   # 참고 사진으로 만들 때: 장소 사진은 무드만, 구도는 프롬프트대로
+            body["prompt"] = body["prompt"].rstrip() + PLACE_MOOD_NOTE
     pmodel = f"{vm['key']}-{kind}-{res}"
     inflight = inflight_take(cut)
     if inflight:
