@@ -188,6 +188,7 @@
   .bhead .btools { margin-top: 10px; display: grid; gap: 6px; padding: 8px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
   .bcats { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
   .bcats .spon:not(.primary) { border-color: var(--warn, #d68c14); color: var(--warn, #a36a00); }
+  .essline .spon { border-color: var(--warn, #d68c14); color: var(--warn, #a36a00); }
   .sponbox { border-color: var(--warn, #d68c14); background: rgba(214,140,20,.06); }
   .ex { display: block; font-size: 12.5px; color: var(--quiet); margin-top: 2px; }
   .ex::before { content: '↳ '; }
@@ -8087,12 +8088,24 @@ function variantLine(e) {
 // 필수 항목: 인물·스타일·음악은 늘 필수. 소품·장소·배경은 '필수'(미리 사진·감수) 또는 '자동 참고'(첫 등장 장면 사진을 참고로)
 function essLine(e, c) {
   if (!['prop', 'location', 'background'].includes(e.category)) return '';
-  if (e.origin === 'sponsor' || e.essential) return `<div class="essline">${pill('필수 · 협찬', 'accent')}<span class="quiet">사진을 만들어 고정하고 코디네이터가 감수합니다.</span></div>`;
+  if (e.origin === 'sponsor' || e.essential) return `<div class="essline">${pill('필수 · 협찬', 'accent')}<span class="quiet">사진을 만들어 고정하고 코디네이터가 감수합니다.</span>
+    ${e.origin === 'sponsor' ? `<button class="btn small" data-spon="${esc(e.id)}" data-v="0" style="margin-left:auto" title="협찬에서 빼고 대본 항목(묘사로 적용)으로 돌립니다">협찬 해제</button>` : ''}</div>`;
   const refs = e.refs || [];
-  return `<div class="essline">${pill('묘사로 적용')}<span class="quiet">사진을 따로 만들지 않습니다. 이 묘사(영어 프롬프트)로 장면을 만들고, 만들어진 장면 사진이 아래 참고 사진으로 쌓여(최근 6장) 다음 컷·다음 화도 같은 모습으로 나옵니다.</span></div>
+  return `<div class="essline">${pill('묘사로 적용')}<span class="quiet">사진을 따로 만들지 않습니다. 이 묘사(영어 프롬프트)로 장면을 만들고, 만들어진 장면 사진이 아래 참고 사진으로 쌓여(최근 6장) 다음 컷·다음 화도 같은 모습으로 나옵니다.</span>
+    <button class="btn small spon" data-spon="${esc(e.id)}" data-v="1" style="margin-left:auto" title="협찬 ${e.category === 'prop' ? '소품' : '장소'}으로 지정: 필수 항목이 되어 사진을 직접 올리거나 후보에서 골라 고정하고, 코디네이터가 감수합니다">협찬으로 지정</button></div>
     ${refs.length ? `<div class="thumbs refthumbs">${refs.map(r => (S.refUrls || {})[r.path] ? `<a href="${esc(S.refUrls[r.path])}" target="_blank" rel="noopener" title="${esc((r.ep ? r.ep + '화 ' : '') + (r.cut || ''))}"><img src="${esc(S.refUrls[r.path])}" alt="참고 사진" loading="lazy"></a>` : '').join('')}</div>
       <div class="quiet" style="font-size:12px">쌓인 참고 사진 ${refs.length}장 · ${esc(refs.map(r => (r.ep ? r.ep + '화 ' : '') + (r.cut || '')).join(', '))}</div>` : '<div class="quiet" style="font-size:12px;margin-top:2px">아직 이 항목이 나온 장면 사진이 없습니다(첫 컷을 만들면 쌓이기 시작).</div>'}`;
 }
+document.addEventListener('click', ev => {
+  const b = ev.target.closest('[data-spon]'); if (!b) return;
+  ev.preventDefault(); const on = b.dataset.v === '1';
+  const e = (S.bibleEntries || []).find(x => x.id === b.dataset.spon);
+  if (!confirm(on ? `"${e?.name || ''}"을(를) 협찬으로 지정할까요?\n필수 항목이 되어, 사진을 직접 올리거나 후보에서 골라 고정해야 합니다(코디네이터 감수).`
+                  : `"${e?.name || ''}"을(를) 협찬에서 뺄까요?\n대본 항목으로 돌아가 사진 없이 묘사로 적용됩니다(올린 사진은 그대로 남습니다).`)) return;
+  q(S.sb.from('bible_entries').update({ origin: on ? 'sponsor' : 'script' }).eq('id', b.dataset.spon))
+    .then(() => { toast(on ? '협찬으로 지정했습니다. 카드에서 사진을 올리거나 "사진 만들기"로 후보를 골라 주세요' : '협찬에서 뺐습니다(묘사로 적용)'); go('bible'); })
+    .catch(err => toast('오류: ' + errText(err)));
+});
 document.addEventListener('click', ev => {
   const b = ev.target.closest('[data-ess]'); if (!b) return;
   ev.preventDefault(); const v = b.dataset.v === '1';
