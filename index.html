@@ -7777,16 +7777,43 @@ function appearsLine(e, c) {
 }
 // 사진 없는 인물·장소·배경·소품에 사진 디자인을 한꺼번에 맡긴다
 async function queuePhotos(entries, curOf, only, auto = false) {
-  const open = new Set((entries.length ? await q(S.sb.from('photo_designs').select('entry_id').in('entry_id', entries.map(e => e.id))
-    .in('status', ['queued', 'ready', 'training', 'set_ready'])) : []).map(d => d.entry_id));
-  const todo = entries.filter(e => PHOTO_CATS.includes(e.category) && e.photo_source !== 'upload' && e.essential !== false && (!only || only.has(e.id)) && !open.has(e.id)
+  // 이미 사진 요청이 있는 항목은 건너뛰되, 이유를 항목별로 모은다(S.photoSkip). 요청은 있는데 맡은 작업이 없으면(작업이 사라짐) 다시 맡긴다.
+  const cand = entries.filter(e => PHOTO_CATS.includes(e.category) && e.photo_source !== 'upload' && e.essential !== false && (!only || only.has(e.id))
     && curOf(e.id) && !(curOf(e.id).image_paths || []).length);
+  const des = cand.length ? await q(S.sb.from('photo_designs').select('id,entry_id,status,created_at').in('entry_id', cand.map(e => e.id))
+    .in('status', ['queued', 'ready', 'training', 'set_ready']).order('created_at', { ascending: false })) : [];
+  const tasks = des.length ? await q(S.sb.from('pipeline_tasks').select('id,kind,status,payload').in('kind', ['photo_design', 'photo_set'])
+    .in('status', ['queued', 'running'])).catch(() => []) : [];
+  const live = new Set(tasks.map(t => t.payload?.design_id).filter(Boolean));
+  const skip = { waiting: [], making: [], resumed: [] };
+  const latest = {}; des.forEach(d => { if (!latest[d.entry_id]) latest[d.entry_id] = d; });
+  const todo = [];
+  for (const e of cand) {
+    const d = latest[e.id];
+    if (!d) { todo.push(e); continue; }
+    if (d.status === 'ready' || d.status === 'set_ready') { skip.waiting.push(e.name); continue; }   // 후보·기준 사진이 와서 대표 선택을 기다림
+    if (live.has(d.id)) { skip.making.push(e.name); continue; }   // 지금 만드는 중
+    // 요청만 남고 맡은 작업이 없음(예전 실패·초기화·멈춤으로 사라짐) → 다시 맡긴다
+    await q(S.sb.from('pipeline_tasks').insert({ kind: d.status === 'training' ? 'photo_set' : 'photo_design', series_id: S.seriesId, payload: { design_id: d.id } }));
+    skip.resumed.push(e.name);
+  }
   for (const e of todo) {
     const c = curOf(e.id);
     const r = await q(S.sb.from('photo_designs').insert({ entry_id: e.id, prompt: [c.description, e.summary].filter(Boolean).join('. ').slice(0, 1800), ...(auto ? { auto_apply: true } : {}) }).select('id').single());
-    await q(S.sb.from('pipeline_tasks').insert({ kind: 'photo_design', payload: { design_id: r.id } }));
+    await q(S.sb.from('pipeline_tasks').insert({ kind: 'photo_design', series_id: S.seriesId, payload: { design_id: r.id } }));
   }
-  return todo.length;
+  S.photoSkip = skip;
+  return todo.length + skip.resumed.length;
+}
+// 사진 한꺼번에 만들기 결과 안내: 새로 만든 것·다시 맡긴 것·건너뛴 것(이유와 이름)
+function photoSkipText(n) {
+  const s = S.photoSkip || {}, nm = a => a.slice(0, 6).join(', ') + (a.length > 6 ? ` 외 ${a.length - 6}개` : '');
+  const parts = [];
+  if (n - (s.resumed || []).length > 0) parts.push(`새로 ${n - s.resumed.length}개 만드는 중`);
+  if ((s.resumed || []).length) parts.push(`멈춰 있던 ${s.resumed.length}개 다시 맡김(${nm(s.resumed)})`);
+  if ((s.making || []).length) parts.push(`이미 만드는 중 ${s.making.length}개(${nm(s.making)})`);
+  if ((s.waiting || []).length) parts.push(`후보가 와서 고르기를 기다리는 ${s.waiting.length}개(${nm(s.waiting)}) — 카드에서 골라 적용해 주세요`);
+  return parts.join(' · ') || '만들 항목이 없습니다';
 }
 
 // "대본에서 필요한 것 찾기" 화별 진행: 작업(pipeline_tasks) 상태와 진행 문구("N화에서…")로 화마다 준비 중/만드는 중/완료/실패를 보여 준다
@@ -8655,8 +8682,10 @@ async function viewBible(main) {
       { value: 'auto', label: '추천하고 자동 반영', desc: '추천 사진으로 (인물은 얼굴 고정·기준 사진까지) 바이블 적용까지 한 번에', primary: true }]);
     if (!how) return;
     const n = await queuePhotos(photoTodo, cur, null, how === 'auto');
-    toast(n ? `${n}개 항목의 사진 후보를 만들고 있습니다. 카드에서 골라 주세요` : '이미 사진을 만들고 있는 항목뿐입니다');
-    if (n) go('bible');
+    const msg = photoSkipText(n);
+    if ((S.photoSkip?.waiting || []).length || !n) alert('사진 한꺼번에 만들기\n\n' + msg.split(' · ').join('\n'));
+    else toast(msg);
+    go('bible');
   });
   // 항목별 사진 방식: 자동으로 만들기 / 직접 올리기
   main.querySelectorAll('[data-tmpok]').forEach(b => b.onclick = guard(async () => {
@@ -8719,7 +8748,7 @@ async function viewBible(main) {
     for (const p of list) await q(S.sb.rpc('activate_bible_version', { p_id: p.id }));
     const fresh = await q(S.sb.from('bible_versions').select('id,entry_id,description,image_paths,status').in('entry_id', list.map(p => p.entry_id)).eq('status', 'active'));
     const n = await queuePhotos(entries, id => fresh.find(v => v.entry_id === id), new Set(list.map(p => p.entry_id)));
-    toast(`${list.length}개 적용 · 사진 후보 ${n}건 만드는 중`); go('bible');
+    toast(`${list.length}개 적용 · ${photoSkipText(n)}`); go('bible');
   });
   ($('#bcoord') || {}).onclick = guard(async () => {
     const act = entries.filter(e => (e.category === 'character' || e.origin === 'sponsor') && cur(e.id))
