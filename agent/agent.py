@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.43.0"
+VERSION = "1.43.1"
 
 import base64
 import glob
@@ -3594,14 +3594,31 @@ def upload_from_url(url, path):
 def _photo_generate(d, name):
     """사진 디자인 한 번 만들기 → (사진 주소들, 모델)."""
     cm = (d.get("model") or (d.get("generation") or {}).get("char_photo_model") or "seedream")
-    if d["category"] == "character" and cm == "soul2":
+    kin_refs, kin_note = [], ""
+    if d["category"] == "character" and d.get("kin"):
+        # 같은 사람(원래 인물·다른 모습 단계)의 적용된 사진을 참고로: 단계가 바뀌어도 한눈에 같은 사람으로 보이게
+        for k in d["kin"]:
+            for pth in (k.get("images") or [])[:2]:
+                if len(kin_refs) >= 4:
+                    break
+                try:
+                    kin_refs.append(storage_signed_url("bible", pth, 7200))
+                except Exception as ex:
+                    log(f"{name}: 같은 사람 참고 사진 주소 실패: {ex}")
+        if kin_refs:
+            who = ", ".join(f"{k.get('name')}" for k in d["kin"][:4])
+            kin_note = (" The reference photos show the SAME PERSON at other stages of the story (" + who + "). "
+                        "Keep her/his identity clearly recognizable: same ethnicity, age, eye shape and eye color, skin tone, ears, hairline, distinctive marks and the same signature accessories. "
+                        "Change only what this description states (body shape, face changes after surgery, hair, makeup, outfit). Do not copy the reference outfits or backgrounds.")
+            progress(f"{name}: 같은 사람 사진 {len(kin_refs)}장을 참고로 얼굴이 이어지게 만드는 중")
+    if d["category"] == "character" and cm == "soul2" and not kin_refs:
         progress(f"{name} 실사 인물 사진 후보를 만드는 중 (Soul 2)")
         urls = soul_images(d["prompt"] + " " + PHOTO_LOOK, n=4, aspect="3:4")
         model = SOUL2
     elif d["category"] == "character":   # 다른 모델(나노바나나 프로·Grok)로 후보 4장을 동시에 — 고른 사진으로 얼굴 학습(Soul ID)은 그대로
-        model = char_photo_model(cm)
+        model = char_photo_model("seedream" if cm == "soul2" else cm)   # Soul 2는 참고 사진을 못 받아, 같은 사람 사진이 있으면 참고 사진을 받는 모델로
         progress(f"{name} 실사 인물 사진 후보 4장을 동시에 만드는 중 ({model_label(model)})")
-        res = parallel([(lambda: hf_image(d["prompt"] + " Head-and-shoulders portrait, plain light grey background. " + PHOTO_LOOK, [], "3:4", model)) for _ in range(4)], workers=4)
+        res = parallel([(lambda: hf_image(d["prompt"] + kin_note + " Head-and-shoulders portrait, plain light grey background. " + PHOTO_LOOK, kin_refs, "3:4", model)) for _ in range(4)], workers=4)
         urls = [u for u in res if isinstance(u, str) and u]
         if not urls:
             raise RuntimeError(f"인물 사진 후보 실패({model}): {res[0]}")
