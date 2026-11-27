@@ -11755,6 +11755,35 @@ async function renderProdSettings() {
   const last = (await q(S.sb.from('pipeline_tasks').select('status,result,error,finished_at').eq('kind', 'api_check').order('created_at', { ascending: false }).limit(1)))[0];
   if (last) $('#gCheckOut').innerHTML = last.status === 'done' ? `마지막 점검 ${esc(fmt(last.finished_at))}<pre class="doc" style="margin-top:4px;white-space:pre-wrap">${esc(last.result || '')}</pre>`
     : last.status === 'failed' ? `<span style="color:var(--bad)">점검 실패: ${esc(last.error || '')}</span>` : '점검 중…';
+  // 처음부터 다시: 저장소(영상·사진) 파일 비우기 — 대표 로그인으로만 지울 수 있어 여기서 한다
+  box.insertAdjacentHTML('beforeend', `<h4 style="margin:18px 0 4px;color:var(--bad)">저장소 파일 비우기</h4>
+    <p class="quiet" style="margin:0 0 6px">저장소에 올라간 영상·사진·목소리 파일(바이블·제작 폴더)을 모두 지웁니다. 되살릴 수 없습니다. 에이전트 설치 파일과 맥·윈도우 폴더의 파일은 그대로 둡니다.</p>
+    <button class="btn" id="gWipeSt" style="border-color:var(--bad);color:var(--bad)">저장소 파일 모두 지우기</button> <span id="gWipeOut" class="quiet"></span>`);
+  $('#gWipeSt').onclick = guard(async () => {
+    if (!confirm('저장소의 영상·사진·목소리 파일을 모두 지웁니다. 되살릴 수 없습니다. 계속할까요?')) return;
+    if (prompt('정말 지우려면 "지우기"라고 입력하세요') !== '지우기') return;
+    const out = $('#gWipeOut'); let n = 0, bad = 0;
+    const walk = async (b, dir) => {   // 폴더 안을 끝까지 따라가며 파일 경로를 모은다
+      const files = [];
+      for (let off = 0; ; off += 1000) {
+        const { data, error } = await S.sb.storage.from(b).list(dir, { limit: 1000, offset: off }); if (error) throw error;
+        for (const x of data || []) { const pth = dir ? `${dir}/${x.name}` : x.name; if (x.id) files.push(pth); else files.push(...await walk(b, pth)); }
+        if (!data || data.length < 1000) break;
+      }
+      return files;
+    };
+    for (const b of ['takes', 'bible']) {
+      out.textContent = `${b} 목록 읽는 중…`;
+      const files = await walk(b, '');
+      for (let i = 0; i < files.length; i += 100) {
+        const { data, error } = await S.sb.storage.from(b).remove(files.slice(i, i + 100));
+        if (error) bad += Math.min(100, files.length - i); else n += (data || []).length;
+        out.textContent = `${b}: ${Math.min(i + 100, files.length)}/${files.length} 처리`;
+      }
+    }
+    out.textContent = `파일 ${n}개 지움${bad ? ` · ${bad}개 실패(다시 누르면 남은 것만 지웁니다)` : ''}`;
+    toast(out.textContent);
+  });
 }
 
 // ------------------------------------------------------------------
