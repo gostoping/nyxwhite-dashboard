@@ -8304,20 +8304,37 @@ async function viewBible(main) {
     .in('status', ['queued', 'running']).order('created_at')).catch(() => []);
   S.bibleOpen = bOpen.filter(t => t.series_id === S.seriesId || entries.some(e => e.id === t.payload?.entry_id) || myDesigns.some(d => d.id === t.payload?.design_id))
     .map(t => ({ ...t, ent: entries.find(e => e.id === (t.payload?.entry_id || myDesigns.find(d => d.id === t.payload?.design_id)?.entry_id)) }));
-  // 진행 중인 일이 있으면 20초마다 새로 고침(편집 중이거나 입력 중이면 건너뜀)
-  // 화면 전체를 다시 그리지 않고(사진이 다시 받아져 깜박임) '지금 하는 일' 줄만 20초마다 고친다. 끝난 일이 생기면 '새로 보기' 버튼
+  // 바이블 탭을 보고 있는 동안 12초마다: 진행 중인 일 줄을 고치고, 끝난 일이 생기면 화면을 저절로 새로 그린다(스크롤 위치 유지).
+  // 대표가 카드를 고치거나 글을 쓰는 중이면 그때는 다시 그리지 않고 '끝난 일 · 새로 보기' 버튼만 띄운 뒤, 손을 떼면 다음 차례에 새로 그린다.
   if (S.bibleLive) clearInterval(S.bibleLive);
-  if (S.bibleOpen.length) {
-    const startIds = new Set(S.bibleOpen.map(t => t.id));
+  {
+    const KINDS = ['photo_design', 'photo_set', 'bible_prompt', 'coord_review', 'photo_describe', 'voice_design', 'voice_cast', 'voice_save', 'bible_extract', 'bible_suggest', 'bible_place'];
+    const entIds = new Set(entries.map(e => e.id)), desIds = new Set(myDesigns.map(d => d.id));
+    const mine = t => t.series_id === S.seriesId || entIds.has(t.payload?.entry_id) || desIds.has(t.payload?.design_id);
+    const withEnt = t => ({ ...t, ent: entries.find(e => e.id === (t.payload?.entry_id || myDesigns.find(d => d.id === t.payload?.design_id)?.entry_id)) });
+    const since = new Date(Date.now() - 5000).toISOString();
+    const busy = () => {
+      const a = document.activeElement;
+      if (a && a.closest('#main') && a.matches('input, textarea, select')) return true;
+      if (($('#bEditor')?.innerHTML || '').trim()) return true;
+      if ([...document.querySelectorAll('.kotxt')].some(t => t.value !== t.defaultValue)) return true;
+      if (document.querySelector('#zoomBox, #askBox, .zoombox, dialog[open]')) return true;
+      return false;
+    };
+    const tok = S.bibleTok;
     S.bibleLive = setInterval(async () => {
       const box = document.getElementById('bLive');
-      if (S.tab !== 'bible' || !box) { clearInterval(S.bibleLive); S.bibleLive = null; return; }
-      const now = await q(S.sb.from('pipeline_tasks').select('id,kind,status,progress,payload,series_id,started_at,created_at,not_before').in('id', [...startIds])).catch(() => null);
-      if (!now) return;
-      S.bibleOpen = S.bibleOpen.map(t => ({ ...t, ...(now.find(x => x.id === t.id) || {}) }));
+      if (S.tab !== 'bible' || !box || tok !== S.bibleTok) { clearInterval(S.bibleLive); S.bibleLive = null; return; }
+      const cols = 'id,kind,status,progress,payload,series_id,started_at,created_at,not_before,finished_at';
+      const [open, fin] = await Promise.all([
+        q(S.sb.from('pipeline_tasks').select(cols).in('kind', KINDS).in('status', ['queued', 'running']).order('created_at')).catch(() => null),
+        q(S.sb.from('pipeline_tasks').select(cols).in('kind', KINDS).in('status', ['done', 'failed']).gt('finished_at', since).order('finished_at').limit(100)).catch(() => null)]);
+      if (!open || !fin || tok !== S.bibleTok) return;
+      const myFin = fin.filter(mine);
+      if (myFin.length && !busy()) { go('bible'); return; }   // 끝난 일 → 카드(사진·감수 결과·프롬프트)를 바로 보여 준다
+      S.bibleOpen = [...open.filter(mine), ...myFin].map(withEnt);
       box.innerHTML = liveList(true);
-      if (S.bibleOpen.every(t => !['queued', 'running'].includes(t.status))) { clearInterval(S.bibleLive); S.bibleLive = null; }
-    }, 20000);
+    }, 12000);
   }
   S.cvTask = {}; S.reviews = {}; S.bibleEntries = entries; S.bibleCur = {};
   S.bibleMaxEp = Math.max(0, ...episodes.map(x => x.number || 0));
