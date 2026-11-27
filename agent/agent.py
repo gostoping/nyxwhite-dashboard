@@ -10,7 +10,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.43.2"
+VERSION = "1.43.3"
 
 import base64
 import glob
@@ -1400,10 +1400,17 @@ SUB_HEAD = re.compile(r"^([ \t]*[*#>\[]*[ \t]*)S[ \t]*#[ \t]*(\d+)((?:[ \t]*-[ \
 TIME_HEAD = re.compile(r"^([ \t]*[*#>\[]*[ \t]*)(\d{1,2}:\d{2}(?::\d{2})?[ \t]*[–—\-~][ \t]*\d{1,2}:\d{2}(?::\d{2})?[ \t]*\|)", re.M)
 
 
+# 영어식 씬 머리: "SCENE 01 — 백스테이지" → "S#1 | 백스테이지" (대본 파일 8차 형식)
+WORD_HEAD = re.compile(r"^([ \t]*[*#>\[]*[ \t]*)SCENE[ \t]*0*(\d{1,3})[ \t]*(?:[—–\-:|][ \t]*)?(.*)$", re.M | re.I)
+
+
 def normalize_scene_heads(content):
     """S# 씬 머리가 하나도 없고 '시간 구간 | 장소' 줄이 있으면 그 줄마다 순서대로 'S#1 | ' 을 붙인다(내용은 그대로).
-    예전엔 이 형식을 못 알아봐 화 전체가 씬 하나(S#0)가 되고, 작가실에 화 전체를 나눠 달라고 했다가 실패했다."""
+    예전엔 이 형식을 못 알아봐 화 전체가 씬 하나(S#0)가 되고, 작가실에 화 전체를 나눠 달라고 했다가 실패했다.
+    'SCENE 01 — 장소' 줄은 'S#1 | 장소'로 읽는다."""
     content = content or ""
+    if not SCENE_HEAD.search(content) and WORD_HEAD.search(content):
+        content = WORD_HEAD.sub(lambda m: f"{m.group(1)}S#{int(m.group(2))}" + (f" | {m.group(3).strip()}" if m.group(3).strip() else ""), content)
     if SCENE_HEAD.search(content):
         # 작가실이 나눈 씬(S#2-1, S#2-2, S#2-1-2…)이 있거나 번호가 겹치면 씬 순서대로 S#1, S#2, S#3…으로 다시 매긴다.
         # 예전엔 나뉜 부분이 모두 '2번 씬'이 돼 감독이 어느 컷이 어느 부분인지 헷갈려 컷을 비우고, 작가실·감독이 계속 다시 돌았다.

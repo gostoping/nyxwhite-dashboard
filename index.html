@@ -507,7 +507,7 @@ Supabase(중앙 기록 창고)만 바라보고 일합니다.
   새 버전이 시작에 계속 실패하면 이전 버전으로 되돌립니다.
 표준 라이브러리만 씁니다. 설정은 같은 폴더의 config.json(설치할 때 자동 생성)에 있습니다.
 """
-VERSION = "1.43.2"
+VERSION = "1.43.3"
 
 import base64
 import glob
@@ -1897,10 +1897,17 @@ SUB_HEAD = re.compile(r"^([ \t]*[*#>\[]*[ \t]*)S[ \t]*#[ \t]*(\d+)((?:[ \t]*-[ \
 TIME_HEAD = re.compile(r"^([ \t]*[*#>\[]*[ \t]*)(\d{1,2}:\d{2}(?::\d{2})?[ \t]*[–—\-~][ \t]*\d{1,2}:\d{2}(?::\d{2})?[ \t]*\|)", re.M)
 
 
+# 영어식 씬 머리: "SCENE 01 — 백스테이지" → "S#1 | 백스테이지" (대본 파일 8차 형식)
+WORD_HEAD = re.compile(r"^([ \t]*[*#>\[]*[ \t]*)SCENE[ \t]*0*(\d{1,3})[ \t]*(?:[—–\-:|][ \t]*)?(.*)$", re.M | re.I)
+
+
 def normalize_scene_heads(content):
     """S# 씬 머리가 하나도 없고 '시간 구간 | 장소' 줄이 있으면 그 줄마다 순서대로 'S#1 | ' 을 붙인다(내용은 그대로).
-    예전엔 이 형식을 못 알아봐 화 전체가 씬 하나(S#0)가 되고, 작가실에 화 전체를 나눠 달라고 했다가 실패했다."""
+    예전엔 이 형식을 못 알아봐 화 전체가 씬 하나(S#0)가 되고, 작가실에 화 전체를 나눠 달라고 했다가 실패했다.
+    'SCENE 01 — 장소' 줄은 'S#1 | 장소'로 읽는다."""
     content = content or ""
+    if not SCENE_HEAD.search(content) and WORD_HEAD.search(content):
+        content = WORD_HEAD.sub(lambda m: f"{m.group(1)}S#{int(m.group(2))}" + (f" | {m.group(3).strip()}" if m.group(3).strip() else ""), content)
     if SCENE_HEAD.search(content):
         # 작가실이 나눈 씬(S#2-1, S#2-2, S#2-1-2…)이 있거나 번호가 겹치면 씬 순서대로 S#1, S#2, S#3…으로 다시 매긴다.
         # 예전엔 나뉜 부분이 모두 '2번 씬'이 돼 감독이 어느 컷이 어느 부분인지 헷갈려 컷을 비우고, 작가실·감독이 계속 다시 돌았다.
@@ -10767,8 +10774,15 @@ async function scriptTextOf(id) {
   if (S.scTxt[id] == null) S.scTxt[id] = (await q(S.sb.from('script_versions').select('content').eq('id', id).maybeSingle()).catch(() => null))?.content || '';
   return S.scTxt[id];
 }
+// 영어식 씬 머리 "SCENE 01 — 백스테이지" → "S#1 | 백스테이지" (S# 머리가 하나도 없을 때만 · 에이전트와 같은 규칙)
+function sceneWords(text) {
+  const t = String(text || '');
+  if (/^[*#>\[\s]*S#\s*\d+/m.test(t) || !/^[ \t]*[*#>\[]*[ \t]*SCENE[ \t]*\d{1,3}/im.test(t)) return t;
+  return t.replace(/^([ \t]*[*#>\[]*[ \t]*)SCENE[ \t]*0*(\d{1,3})[ \t]*(?:[—–\-:|][ \t]*)?(.*)$/gim, (_, a, n, rest) => `${a}S#${+n}${rest.trim() ? ' | ' + rest.trim() : ''}`);
+}
 // 대본에서 씬 목록: { 번호: { time, place, cast, summary } } — "S#3 | 01:08–01:50 | 대기실 | 낮 / 등장: 서윤" 머리 + 첫 문장
 function parseSceneList(text) {
+  text = sceneWords(text);
   const out = {}; let cur = null, tn = 0;
   const lines = String(text || '').split(/\r?\n/);
   // S# 머리가 없으면 대표 원고 형식 "00:12–00:48 | 장소" 줄을 순서대로 S#1, S#2…로 본다(에이전트와 같은 규칙)
@@ -10807,7 +10821,7 @@ function sceneState(cs) {
 // ---------------- 제작 탭 = 대본 흐름 확인: 왼쪽 대본, 오른쪽 씬별 컷(대사·장면·느낌·구도·조명·연출), 컷을 누르면 대본의 해당 부분이 빨갛게
 // 대본을 줄 단위로(씬 머리 규칙은 parseSceneList와 같다)
 function scriptRows(text) {
-  const lines = String(text || '').split(/\r?\n/);
+  const lines = sceneWords(text).split(/\r?\n/);
   const timeOnly = !lines.some(l => /^[*#>\[\s]*S#\s*\d+/.test(l.trim()));
   const sh = lines.map(l => l.trim().match(/^[*#>\[\s]*S#\s*(\d+)((?:\s*-\s*\d+)*)/)).filter(Boolean);
   const renum = sh.some(m => m[2]) || new Set(sh.map(m => m[1])).size !== sh.length;
