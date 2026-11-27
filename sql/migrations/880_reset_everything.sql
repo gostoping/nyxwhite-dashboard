@@ -1,7 +1,7 @@
 -- 대표 결정(2026-11-27): 대본부터 다시 넣어 처음부터 한다 → 작품 데이터 전부 지움.
 -- 지우는 것: 모든 작품(시리즈)·화·대본(원고·정리본·확정본)·씬·바이블 전부(인물·협찬 포함)·사진 후보·목소리 설계·
 --            제작(컷·테이크·씬 계획)·편집·연출 메모·연속성 기록·작업(pipeline_tasks)·알림·작품별 감수 교훈·광고 소재.
--- 남기는 것: 설정·가격표·비용 기록(작품 연결만 비워짐)·에이전트/기기·직원·공통 감수 교훈(작품 지정 없는 것).
+-- 남기는 것: 설정·가격표·비용 기록(작품 연결만 비워짐)·에이전트/기기·직원·공통 감수 교훈(작품 지정 없는 것)·활동 기록(지울 수 없는 기록이라 그대로, 작품 연결 외래키만 풂).
 -- 저장소 파일(영상·사진)은 SQL로 지울 수 없어 대시보드 설정 탭 '저장소 파일 비우기'로 지운다.
 -- 지우기 전에 nyx_backup 스키마에 표를 통째로 복사해 둔다(비밀값·토큰 표는 복사하지 않음).
 create schema if not exists nyx_backup;
@@ -19,11 +19,14 @@ begin
               join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.att) as ccols,
            (select string_agg(quote_ident(a.attname), ',' order by k.ord) from unnest(c.confkey) with ordinality k(att, ord)
               join pg_attribute a on a.attrelid = c.confrelid and a.attnum = k.att) as pcols,
-           c.confdeltype as t
+           c.confdeltype as t, c.conname as cname
       from pg_constraint c
      where c.contype = 'f' and c.confrelid = p_tbl and c.conrelid <> p_tbl
   loop
-    if r.t in ('a', 'r', 'c') then
+    if r.t in ('a', 'r', 'c') and r.child::text in ('activity_log', 'public.activity_log') then
+      -- 활동 기록은 고치거나 지울 수 없는 기록이라 그대로 둔다: 지워지는 작품·화를 가리키는 연결(외래키)만 풀고, 기록 내용과 id는 남긴다
+      execute format('alter table %s drop constraint %I', r.child, r.cname);
+    elsif r.t in ('a', 'r', 'c') then
       if r.child = any(p_path) then
         -- 서로 참조하는 고리(예: 화 ↔ 현재 대본): 고리를 끊으려고 그 참조만 비운다
         execute format('update %s set (%s) = row(%s) where (%s) in (select %s from %s where %s)', r.child, r.ccols,
